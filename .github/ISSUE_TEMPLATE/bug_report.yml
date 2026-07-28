@@ -1,0 +1,77 @@
+name: Bug Report
+description: 报告一个 bug
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢报告 bug！请提供以下信息帮助我们定位和修复问题。
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug 描述
+      description: 清晰简洁地描述 bug 是什么
+      placeholder: 当我执行 X 操作时，发生了 Y，但我期望的是 Z
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 如何复现这个 bug
+      placeholder: |
+        1. 访问 '...'
+        2. 点击 '...'
+        3. 滚动到 '...'
+        4. 看到错误
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 你期望发生什么
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际发生了什么
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: 如果有相关日志，请粘贴在这里
+      render: shell
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: 影响组件
+      options:
+        - Server (后端)
+        - Web (前端)
+        - Database
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 检查清单
+      options:
+        - label: 我已搜索现有 issues，没有重复
+          required: true
+        - label: 我已阅读 AGENTS.md 和相关文档
+          required: true

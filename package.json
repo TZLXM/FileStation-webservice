@@ -1,0 +1,26 @@
+{
+  "name": "filestation-webservice",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Private file transfer station web application",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace=apps/server\" \"npm run dev --workspace=apps/web\"",
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "typecheck": "npm run typecheck --workspaces",
+    "lint": "npm run lint --workspaces",
+    "start": "node apps/server/dist/main.js"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
