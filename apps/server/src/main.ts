@@ -51,17 +51,25 @@ async function bootstrap() {
   // 修复 v1.5 竞态：旧 token 在 listen 后才被覆盖存在窗口期；现在端口开放前完成覆盖
   const authService = app.get(AuthService);
   const initToken = await authService.ensureInitToken();
+  const port = configService.get<number>('app.port') || 8080;
   if (initToken) {
+    // 初始化页面是前端路由（React /init），不是后端 API（POST /api/v1/auth/init 仅接受 POST）。
+    // 生产模式 Nginx 同端口托管前端+反代后端（默认 http://localhost:8080/init）；
+    // 开发模式前后端分离（vite 5173），设 FILESTATION_WEB_URL=http://localhost:5173 指向开发前端。
+    const webUrl = process.env.FILESTATION_WEB_URL || `http://localhost:${port}`;
     logger.log('================================');
     logger.log('FileStation 首次启动（未初始化）');
     logger.log(`初始化 Token: ${initToken}`);
-    logger.log('有效期：10 分钟，仅本机可访问 /api/v1/auth/init');
-    logger.log('请通过本机访问完成初始化设置');
+    logger.log('有效期：10 分钟，仅本机可完成初始化');
+    logger.log('');
+    logger.log('请在浏览器打开以下地址完成初始化：');
+    logger.log(`  ${webUrl}/init`);
+    logger.log('');
+    logger.log('（输入上面的初始化 Token + 设置管理员用户名/密码）');
     logger.log('================================');
   }
 
   // ========== 阶段 5：最后才监听 ==========
-  const port = configService.get<number>('app.port') || 8080;
   await app.listen(port, '127.0.0.1');
 
   logger.log(`FileStation server running on http://127.0.0.1:${port}`);
