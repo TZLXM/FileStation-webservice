@@ -3,7 +3,10 @@
   "compilerOptions": {
     "rootDir": ".",
     "experimentalDecorators": true,
-    "emitDecoratorMetadata": true
+    "emitDecoratorMetadata": true,
+    "paths": {
+      "@filestation/shared": ["../../packages/shared/dist/index.d.ts"]
+    }
   },
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }
