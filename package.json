@@ -8,8 +8,9 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "concurrently \"npm run dev --workspace=apps/server\" \"npm run dev --workspace=apps/web\"",
-    "build": "npm run build --workspaces",
+    "build:shared": "npm run build --workspace=@filestation/shared",
+    "build": "npm run build:shared && npm run build --workspace=@filestation/server && npm run build --workspace=@filestation/web",
+    "dev": "npm run build:shared && concurrently \"npm run dev --workspace=@filestation/server\" \"npm run dev --workspace=@filestation/web\"",
     "test": "npm run test --workspaces",
     "typecheck": "npm run typecheck --workspaces",
     "lint": "npm run lint --workspaces",
