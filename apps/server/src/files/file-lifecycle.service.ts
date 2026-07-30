@@ -9,6 +9,7 @@ import { SettingsService } from '../settings/settings.service';
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import { beginImmediate, safeRollback } from '../common/database/tx.helper';
 
 const RECEIVING_TIMEOUT_MS = 10 * 60 * 1000; // receiving 分块超 10 分钟（大于最长 64MB 写入预期）
 const BATCH_SIZE = 100;
@@ -261,7 +262,7 @@ export class FileLifecycleService implements OnApplicationBootstrap {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     try {
-      await queryRunner.query('BEGIN IMMEDIATE');
+      await beginImmediate(queryRunner);
       const now = Date.now();
 
       await queryRunner.query(
@@ -293,7 +294,7 @@ export class FileLifecycleService implements OnApplicationBootstrap {
       await queryRunner.query('COMMIT');
       this.logger.log(`Recovered verifying upload ${session.id} -> completed (file ${newFileId})`);
     } catch (error) {
-      await queryRunner.query('ROLLBACK').catch(() => {});
+      await safeRollback(queryRunner);
       throw error;
     } finally {
       await queryRunner.release();

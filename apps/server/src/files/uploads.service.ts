@@ -11,6 +11,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { createHash } from 'crypto';
 import { InitUploadDto } from './dto/init-upload.dto';
 import { UploadInitResponse, UploadStatus as UploadStatusType } from '@filestation/shared';
+import { beginImmediate, safeRollback } from '../common/database/tx.helper';
 
 @Injectable()
 export class UploadsService {
@@ -154,7 +155,7 @@ export class UploadsService {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     try {
-      await queryRunner.query('BEGIN IMMEDIATE');
+      await beginImmediate(queryRunner);
 
       // 会话状态原子守卫（防 complete 抢占后仍有分块写入）
       const sessionRows = await queryRunner.query(`SELECT status FROM upload_sessions WHERE id = ?`, [uploadId]);
@@ -199,7 +200,7 @@ export class UploadsService {
       await queryRunner.query('COMMIT');
       return { outcome: 'claimed' };
     } catch (error) {
-      await queryRunner.query('ROLLBACK').catch(() => {});
+      await safeRollback(queryRunner);
       throw error;
     } finally {
       await queryRunner.release();
@@ -210,14 +211,19 @@ export class UploadsService {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     try {
-      await queryRunner.query('BEGIN IMMEDIATE');
+      await beginImmediate(queryRunner);
       const result: any = await queryRunner.query(
         `UPDATE upload_parts SET status = 'ready', owner_token = NULL, temp_name = NULL, received_at = ?
          WHERE upload_id = ? AND part_number = ? AND owner_token = ? AND status = 'receiving'`,
         [Date.now(), uploadId, partNumber, ownerToken],
       );
-      const affected = result?.changes ?? result?.affected ?? 0;
-      if (affected === 1) {
+      // node-sqlite3 的 queryRunner.query 对 UPDATE 不返回 changes（恒 undefined）；
+      // 用事务内 SELECT 验证状态转换是否由本请求完成（receiving → ready 且 owner 已清空）
+      const verify = await queryRunner.query(
+        `SELECT status, owner_token FROM upload_parts WHERE upload_id = ? AND part_number = ?`,
+        [uploadId, partNumber],
+      );
+      if (verify.length > 0 && verify[0].status === 'ready' && verify[0].owner_token === null) {
         await queryRunner.query(`UPDATE upload_sessions SET received_size = received_size + ? WHERE id = ?`, [partSize, uploadId]);
         await queryRunner.query('COMMIT');
         return;
@@ -225,7 +231,7 @@ export class UploadsService {
       await queryRunner.query('ROLLBACK');
       throw new ConflictException({ code: 'PART_CLAIM_LOST', message: 'Part claim expired while writing; re-upload this part' });
     } catch (error) {
-      await queryRunner.query('ROLLBACK').catch(() => {});
+      await safeRollback(queryRunner);
       throw error;
     } finally {
       await queryRunner.release();
@@ -278,9 +284,9 @@ export class UploadsService {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     try {
-      await queryRunner.query('BEGIN IMMEDIATE');
+      await beginImmediate(queryRunner);
       const now = Date.now();
-      const result: any = await queryRunner.query(
+      await queryRunner.query(
         `UPDATE upload_sessions
            SET status = 'verifying',
                verify_started_at = ?,
@@ -291,9 +297,14 @@ export class UploadsService {
          WHERE id = ? AND status IN ('initiated', 'uploading')`,
         [now, preStoredName, ownerToken, now + leaseMs, now, uploadId],
       );
-      const affected = result?.changes ?? result?.affected ?? 0;
+      // node-sqlite3 不返回 UPDATE changes；事务内 SELECT 验证是否由本请求抢占（owner 匹配）
+      const claimVerify = await queryRunner.query(
+        `SELECT status, verify_owner_token FROM upload_sessions WHERE id = ?`,
+        [uploadId],
+      );
+      const claimed = claimVerify.length > 0 && claimVerify[0].status === 'verifying' && claimVerify[0].verify_owner_token === ownerToken;
 
-      if (affected === 0) {
+      if (!claimed) {
         const current = await queryRunner.query(`SELECT status, final_file_id FROM upload_sessions WHERE id = ?`, [uploadId]);
         if (current.length === 0) throw new NotFoundException('Upload session not found');
         if (current[0].status === 'completed') {
@@ -308,7 +319,7 @@ export class UploadsService {
 
       await queryRunner.query('COMMIT');
     } catch (error) {
-      await queryRunner.query('ROLLBACK').catch(() => {});
+      await safeRollback(queryRunner);
       throw error;
     } finally {
       await queryRunner.release();
@@ -353,7 +364,7 @@ export class UploadsService {
       const queryRunner3 = this.dataSource.createQueryRunner();
       await queryRunner3.connect();
       try {
-        await queryRunner3.query('BEGIN IMMEDIATE');
+        await beginImmediate(queryRunner3);
         const now3 = Date.now();
 
         // 先 INSERT files（folder_id 来自 target_folder_id，v1.7 建议 c）
@@ -366,39 +377,31 @@ export class UploadsService {
         );
 
         // 条件 UPDATE：仅当仍 verifying 且 owner 匹配（租约未被接管）才完成；同时写回 final_file_id
-        const updateResult: any = await queryRunner3.query(
+        await queryRunner3.query(
           `UPDATE upload_sessions
              SET status = 'completed', completed_at = ?, failure_reason = NULL, final_file_id = ?,
                  verify_owner_token = NULL, verify_lease_until = NULL, verify_heartbeat_at = NULL
            WHERE id = ? AND status = 'verifying' AND verify_owner_token = ?`,
           [now3, newFileId, uploadId, ownerToken],
         );
-        const updateAffected = updateResult?.changes ?? updateResult?.affected ?? 0;
 
-        // v1.7 阻断 3：affected === 0 时事务内重查（completed 同文件→幂等，否则回滚）
-        if (updateAffected === 0) {
-          const current = await queryRunner3.query(
-            `SELECT status, final_file_id FROM upload_sessions WHERE id = ?`,
-            [uploadId],
-          );
-          if (current.length > 0 && current[0].status === 'completed' && current[0].final_file_id === newFileId) {
-            // 已被本请求的前一次重试完成（幂等）——正常提交
-            await queryRunner3.query('COMMIT');
-            this.storageService.deleteUploadTempDir(uploadId).catch(() => {});
-            return { file_id: newFileId };
-          }
-          // 失去完成权（租约被接管/状态被改）——回滚，新插入的 files 随之撤销
-          throw new ConflictException({
-            code: 'UPLOAD_FINALIZE_LOST',
-            message: 'Lost finalize ownership (lease taken over or state changed)',
-          });
+        // node-sqlite3 不返回 UPDATE changes；事务内重查（completed 同文件→成功/幂等，否则回滚）
+        const current = await queryRunner3.query(
+          `SELECT status, final_file_id FROM upload_sessions WHERE id = ?`,
+          [uploadId],
+        );
+        if (current.length > 0 && current[0].status === 'completed' && current[0].final_file_id === newFileId) {
+          await queryRunner3.query('COMMIT');
+          this.storageService.deleteUploadTempDir(uploadId).catch(() => {});
+          return { file_id: newFileId };
         }
-
-        await queryRunner3.query('COMMIT');
-        this.storageService.deleteUploadTempDir(uploadId).catch(() => {});
-        return { file_id: newFileId };
+        // 失去完成权（租约被接管/状态被改）——回滚，新插入的 files 随之撤销
+        throw new ConflictException({
+          code: 'UPLOAD_FINALIZE_LOST',
+          message: 'Lost finalize ownership (lease taken over or state changed)',
+        });
       } catch (error) {
-        await queryRunner3.query('ROLLBACK').catch(() => {});
+        await safeRollback(queryRunner3);
         throw error;
       } finally {
         await queryRunner3.release();

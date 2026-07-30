@@ -13,6 +13,7 @@ import { createHash, timingSafeEqual } from 'crypto';
 import * as bcrypt from 'bcrypt';
 import { TokenPair, JwtPayload } from '@filestation/shared';
 import { LoginDto } from './dto/login.dto';
+import { beginImmediate, safeRollback } from '../common/database/tx.helper';
 
 export interface RefreshResult extends TokenPair {
   username: string;
@@ -70,7 +71,7 @@ export class AuthService {
     await queryRunner.connect();
 
     try {
-      await queryRunner.query('BEGIN IMMEDIATE');
+      await beginImmediate(queryRunner);
 
       const metaResult = await queryRunner.query(
         `SELECT value FROM system_meta WHERE key = 'init_token'`,
@@ -124,7 +125,7 @@ export class AuthService {
 
       return this.generateTokens(accountId, username);
     } catch (error) {
-      await queryRunner.query('ROLLBACK').catch(() => {});
+      await safeRollback(queryRunner);
       throw error;
     } finally {
       await queryRunner.release();

@@ -4,6 +4,7 @@ import { Repository, DataSource } from 'typeorm';
 import { Folder } from './entities/folder.entity';
 import { File, FileStatus } from '../files/entities/file.entity';
 import { v4 as uuidv4 } from 'uuid';
+import { beginImmediate, safeRollback } from '../common/database/tx.helper';
 
 @Injectable()
 export class FoldersService {
@@ -28,7 +29,7 @@ export class FoldersService {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     try {
-      await queryRunner.query('BEGIN IMMEDIATE');
+      await beginImmediate(queryRunner);
       const parentRows = await queryRunner.query(
         `SELECT id FROM folders WHERE id = ? AND is_deleted = 0`, [parentId],
       );
@@ -43,7 +44,7 @@ export class FoldersService {
       await queryRunner.query('COMMIT');
       return this.findOne(id);
     } catch (error) {
-      await queryRunner.query('ROLLBACK').catch(() => {});
+      await safeRollback(queryRunner);
       throw error;
     } finally {
       await queryRunner.release();
@@ -98,7 +99,7 @@ export class FoldersService {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     try {
-      await queryRunner.query('BEGIN IMMEDIATE');
+      await beginImmediate(queryRunner);
 
       // 本文件夹存在且未删除
       const selfRows = await queryRunner.query(`SELECT id FROM folders WHERE id = ? AND is_deleted = 0`, [id]);
@@ -120,17 +121,22 @@ export class FoldersService {
       }
 
       // 条件 UPDATE（双保险：仅当仍未删除时生效）
-      const result: any = await queryRunner.query(
+      await queryRunner.query(
         `UPDATE folders SET parent_id = ? WHERE id = ? AND is_deleted = 0`,
         [newParentId, id],
       );
-      if ((result?.changes ?? result?.affected ?? 0) === 0) {
+      // node-sqlite3 不返回 UPDATE changes；事务内 SELECT 验证移动是否生效
+      const moved = await queryRunner.query(
+        `SELECT id FROM folders WHERE id = ? AND is_deleted = 0 AND parent_id IS NOT DISTINCT FROM ?`,
+        [id, newParentId],
+      );
+      if (moved.length === 0) {
         throw new NotFoundException({ code: 'FOLDER_NOT_FOUND', message: 'Folder not found or deleted' });
       }
 
       await queryRunner.query('COMMIT');
     } catch (error) {
-      await queryRunner.query('ROLLBACK').catch(() => {});
+      await safeRollback(queryRunner);
       throw error;
     } finally {
       await queryRunner.release();
@@ -147,7 +153,7 @@ export class FoldersService {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     try {
-      await queryRunner.query('BEGIN IMMEDIATE');
+      await beginImmediate(queryRunner);
 
       // 事务内重查：文件夹存在且未删除
       const folderRows = await queryRunner.query(`SELECT id FROM folders WHERE id = ? AND is_deleted = 0`, [id]);
@@ -174,17 +180,22 @@ export class FoldersService {
       }
 
       // 条件软删（双保险：仅当仍未删除时生效）
-      const deleteResult: any = await queryRunner.query(
+      await queryRunner.query(
         `UPDATE folders SET is_deleted = 1, deleted_at = ? WHERE id = ? AND is_deleted = 0`,
         [Date.now(), id],
       );
-      if ((deleteResult?.changes ?? deleteResult?.affected ?? 0) === 0) {
+      // node-sqlite3 不返回 UPDATE changes；事务内 SELECT 验证软删是否生效
+      const deleted = await queryRunner.query(
+        `SELECT id FROM folders WHERE id = ? AND is_deleted = 1`,
+        [id],
+      );
+      if (deleted.length === 0) {
         throw new ConflictException({ code: 'FOLDER_ALREADY_DELETED', message: 'Folder was deleted concurrently' });
       }
 
       await queryRunner.query('COMMIT');
     } catch (error) {
-      await queryRunner.query('ROLLBACK').catch(() => {});
+      await safeRollback(queryRunner);
       throw error;
     } finally {
       await queryRunner.release();
