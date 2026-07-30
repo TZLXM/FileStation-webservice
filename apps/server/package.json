@@ -6,8 +6,8 @@
     "build": "nest build",
     "dev": "nest start --watch",
     "start": "node dist/main.js",
-    "test": "jest",
-    "test:watch": "jest --watch",
+    "test": "jest --config ./jest.config.json",
+    "test:watch": "jest --watch --config ./jest.config.json",
     "test:e2e": "jest --config ./test/jest-e2e.json --maxWorkers=1",
     "typecheck": "tsc --noEmit",
     "lint": "eslint \"{src,test}/**/*.ts\""
