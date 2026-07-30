@@ -10,15 +10,16 @@
   "scripts": {
     "build:shared": "npm run build --workspace=@filestation/shared",
     "build": "npm run build:shared && npm run build --workspace=@filestation/server && npm run build --workspace=@filestation/web",
-    "dev": "npm run build:shared && concurrently \"npm run dev --workspace=@filestation/server\" \"npm run dev --workspace=@filestation/web\"",
+    "dev": "npm run build:shared && cross-env FILESTATION_WEB_URL=http://localhost:5173 concurrently \"npm run dev --workspace=@filestation/server\" \"npm run dev --workspace=@filestation/web\"",
     "test": "npm run test --workspaces",
     "typecheck": "npm run typecheck --workspaces",
     "lint": "npm run lint --workspaces",
     "start": "node apps/server/dist/main.js"
   },
   "devDependencies": {
-    "concurrently": "^9.0.0",
     "@types/node": "^20.0.0",
+    "concurrently": "^9.0.0",
+    "cross-env": "^10.1.0",
     "typescript": "^5.5.0"
   },
   "engines": {

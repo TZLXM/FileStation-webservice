@@ -12,6 +12,25 @@ import { dirname } from 'path';
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
 
+  // ========== 阶段 0：端口预检（防 EADDRINUSE 时 init token 未激活的混淆） ==========
+  const port = parseInt(process.env.FILESTATION_PORT || '8080', 10);
+  const net = await import('net');
+  const portBusy = await new Promise<boolean>((resolve) => {
+    const tester = net.createServer()
+      .once('error', () => resolve(true))
+      .once('listening', () => tester.close(() => resolve(false)))
+      .listen(port, '127.0.0.1');
+  });
+  if (portBusy) {
+    logger.error('================================');
+    logger.error(`端口 127.0.0.1:${port} 已被占用（EADDRINUSE）`);
+    logger.error('另一个 FileStation 进程可能仍在运行。');
+    logger.error('如果刚看到"初始化 Token"提示，那它是【未激活】的——');
+    logger.error('请先结束旧进程（或换端口），再重新启动以激活新 Token。');
+    logger.error('================================');
+    process.exit(1);
+  }
+
   // ========== 阶段 1：目录预创建（NestFactory.create 之前，纯配置读取，无 DI） ==========
   // DatabaseModule 连接 SQLite 前 db 父目录必须存在，否则报 SQLITE_CANTOPEN
   const storagePath = process.env.FILESTATION_STORAGE_PATH || './data/storage';
@@ -47,11 +66,18 @@ async function bootstrap() {
   // FileLifecycleService 启动扫描 在此执行，migrationsRun 已完成
   await app.init();
 
-  // ========== 阶段 4：init token 覆盖 —— 必须在 listen 之前 ==========
-  // 修复 v1.5 竞态：旧 token 在 listen 后才被覆盖存在窗口期；现在端口开放前完成覆盖
+  // ========== 阶段 4：init token 覆盖（listen 前写入 DB，防 listen 后窗口期旧 token 仍有效） ==========
   const authService = app.get(AuthService);
   const initToken = await authService.ensureInitToken();
-  const port = configService.get<number>('app.port') || 8080;
+
+  // ========== 阶段 5：最后才监听 ==========
+  await app.listen(port, '127.0.0.1');
+
+  logger.log(`FileStation server running on http://127.0.0.1:${port}`);
+  logger.log(`Environment: ${configService.get<string>('app.nodeEnv')}`);
+
+  // ========== 阶段 6：listen 成功后才打印 init token（token 只在进程真正激活后显示） ==========
+  // 防 EADDRINUSE 场景：进程打印了 token 却未启动成功，用户拿未激活 token 去初始化
   if (initToken) {
     // 初始化页面是前端路由（React /init），不是后端 API（POST /api/v1/auth/init 仅接受 POST）。
     // 生产模式 Nginx 同端口托管前端+反代后端（默认 http://localhost:8080/init）；
@@ -68,12 +94,6 @@ async function bootstrap() {
     logger.log('（输入上面的初始化 Token + 设置管理员用户名/密码）');
     logger.log('================================');
   }
-
-  // ========== 阶段 5：最后才监听 ==========
-  await app.listen(port, '127.0.0.1');
-
-  logger.log(`FileStation server running on http://127.0.0.1:${port}`);
-  logger.log(`Environment: ${configService.get<string>('app.nodeEnv')}`);
 }
 
 bootstrap();
