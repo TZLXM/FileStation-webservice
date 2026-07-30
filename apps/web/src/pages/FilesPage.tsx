@@ -14,6 +14,8 @@ export default function FilesPage() {
   const [treeRefreshKey, setTreeRefreshKey] = useState(0);
   const logout = useAuthStore((s) => s.logout);
   const username = useAuthStore((s) => s.username);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const accessToken = useAuthStore((s) => s.accessToken);
 
   const loadFiles = useCallback(async () => {
     // v1.7 建议 b：根目录传 'root'（folder_id IS NULL），选中文件夹传 id，"全部"视图不传
@@ -26,7 +28,12 @@ export default function FilesPage() {
     setTotal(response.data!.total);
   }, [page, selectedFolderId]);
 
-  useEffect(() => { loadFiles(); }, [loadFiles]);
+  // 修复竞态：仅在认证 token 就绪后才加载（防页面重载时 checkAuth 未完成就发 401 请求）
+  useEffect(() => {
+    if (isAuthenticated && accessToken) {
+      loadFiles().catch((err) => console.error('Failed to load files:', err));
+    }
+  }, [loadFiles, isAuthenticated, accessToken]);
 
   const handleSelectFolder = (id: string | null) => {
     setSelectedFolderId(id);
