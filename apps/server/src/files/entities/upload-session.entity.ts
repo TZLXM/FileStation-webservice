@@ -25,7 +25,7 @@ export class UploadSession {
   @Column({ name: 'expected_size', type: 'integer' })
   expectedSize!: number;
 
-  @Column({ name: 'expected_hash', nullable: true })
+  @Column({ name: 'expected_hash', type: 'text', nullable: true })
   expectedHash!: string | null;
 
   @Column({ name: 'chunk_size', type: 'integer' })
@@ -37,10 +37,10 @@ export class UploadSession {
   @Column({ name: 'received_size', default: 0 })
   receivedSize!: number;
 
-  @Column({ name: 'final_stored_name', nullable: true })
+  @Column({ name: 'final_stored_name', type: 'text', nullable: true })
   finalStoredName!: string | null;
 
-  @Column({ name: 'final_file_id', nullable: true })
+  @Column({ name: 'final_file_id', type: 'text', nullable: true })
   finalFileId!: string | null;
 
   @ManyToOne(() => File, { nullable: true })
@@ -51,7 +51,7 @@ export class UploadSession {
   verifyStartedAt!: number | null;
 
   // v1.7 新增：finalizer 租约（阻断 4）
-  @Column({ name: 'verify_owner_token', nullable: true })
+  @Column({ name: 'verify_owner_token', type: 'text', nullable: true })
   verifyOwnerToken!: string | null;
 
   @Column({ name: 'verify_lease_until', type: 'integer', nullable: true })
@@ -61,10 +61,10 @@ export class UploadSession {
   verifyHeartbeatAt!: number | null;
 
   // v1.7 新增：上传目标文件夹（建议 c）
-  @Column({ name: 'target_folder_id', nullable: true })
+  @Column({ name: 'target_folder_id', type: 'text', nullable: true })
   targetFolderId!: string | null;
 
-  @Column({ name: 'failure_reason', nullable: true })
+  @Column({ name: 'failure_reason', type: 'text', nullable: true })
   failureReason!: string | null;
 
   @Column({ name: 'temp_path' })

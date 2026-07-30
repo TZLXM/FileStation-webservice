@@ -26,7 +26,7 @@ export class File {
   @PrimaryColumn('text')
   id!: string;
 
-  @Column({ name: 'folder_id', nullable: true })
+  @Column({ name: 'folder_id', type: 'text', nullable: true })
   @Index('idx_files_folder')
   folderId!: string | null;
 
@@ -43,10 +43,10 @@ export class File {
   @Column({ type: 'integer' })
   size!: number;
 
-  @Column({ name: 'mime_type', nullable: true })
+  @Column({ name: 'mime_type', type: 'text', nullable: true })
   mimeType!: string | null;
 
-  @Column({ name: 'hash_sha256', nullable: true })
+  @Column({ name: 'hash_sha256', type: 'text', nullable: true })
   hashSha256!: string | null;
 
   @Column({ default: FileStatus.ACTIVE })
@@ -68,7 +68,7 @@ export class File {
   @Column({ name: 'uploaded_by_id' })
   uploadedById!: string;
 
-  @Column({ name: 'upload_ip', nullable: true })
+  @Column({ name: 'upload_ip', type: 'text', nullable: true })
   uploadIp!: string | null;
 
   @Column({ name: 'download_count', default: 0 })

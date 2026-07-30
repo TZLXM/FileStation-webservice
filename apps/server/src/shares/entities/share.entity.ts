@@ -30,7 +30,7 @@ export class Share {
   @Column({ type: 'text', default: ShareProtection.NONE })
   protection!: ShareProtection;
 
-  @Column({ name: 'password_hash', nullable: true })
+  @Column({ name: 'password_hash', type: 'text', nullable: true })
   passwordHash!: string | null;
 
   @Column({ name: 'max_downloads', type: 'integer', nullable: true })

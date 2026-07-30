@@ -9,7 +9,7 @@ export class Folder {
   @Column()
   name!: string;
 
-  @Column({ name: 'parent_id', nullable: true })
+  @Column({ name: 'parent_id', type: 'text', nullable: true })
   @Index('idx_folders_parent')
   parentId!: string | null;
 

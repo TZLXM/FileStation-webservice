@@ -32,11 +32,11 @@ export class UploadPart {
   status!: UploadPartStatus;
 
   // v1.6 新增：与迁移 upload_parts.owner_token 对齐（抢占所有者标识）
-  @Column({ name: 'owner_token', nullable: true })
+  @Column({ name: 'owner_token', type: 'text', nullable: true })
   ownerToken!: string | null;
 
   // v1.6 新增：与迁移 upload_parts.temp_name 对齐（临时文件名，ready 后为 null）
-  @Column({ name: 'temp_name', nullable: true })
+  @Column({ name: 'temp_name', type: 'text', nullable: true })
   tempName!: string | null;
 
   @Column({ name: 'received_at', type: 'integer' })
