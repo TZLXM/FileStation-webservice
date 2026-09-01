@@ -14,16 +14,17 @@ async function bootstrap() {
 
   // ========== 阶段 0：端口预检（防 EADDRINUSE 时 init token 未激活的混淆） ==========
   const port = parseInt(process.env.FILESTATION_PORT || '8080', 10);
+  const host = process.env.FILESTATION_HOST || '127.0.0.1';
   const net = await import('net');
   const portBusy = await new Promise<boolean>((resolve) => {
     const tester = net.createServer()
       .once('error', () => resolve(true))
       .once('listening', () => tester.close(() => resolve(false)))
-      .listen(port, '127.0.0.1');
+      .listen(port, host);
   });
   if (portBusy) {
     logger.error('================================');
-    logger.error(`端口 127.0.0.1:${port} 已被占用（EADDRINUSE）`);
+    logger.error(`端口 ${host}:${port} 已被占用（EADDRINUSE）`);
     logger.error('另一个 FileStation 进程可能仍在运行。');
     logger.error('如果刚看到"初始化 Token"提示，那它是【未激活】的——');
     logger.error('请先结束旧进程（或换端口），再重新启动以激活新 Token。');
@@ -56,10 +57,12 @@ async function bootstrap() {
     }),
   );
   app.useGlobalFilters(new RangeNotSatisfiableFilter()); // 416 + Content-Range
-  app.enableCors({
-    origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
-    credentials: true,
-  });
+  const corsOrigins = configService.get<string[]>('app.corsOrigins') ?? [];
+  if (corsOrigins.length > 0) {
+    app.enableCors({ origin: corsOrigins, credentials: true });
+  }
+  // CORS 为空 = 同源部署（静态托管或 FILESTATION_CORS_ORIGINS 未配置且非开发模式），
+  // 浏览器不发 CORS 预检，无需 enableCors。
 
   // ========== 阶段 3：app.init() 触发 OnApplicationBootstrap ==========
   // DatabaseInitializer（PRAGMA + foreign_keys 校验）、StorageService.ensureDirectories、
@@ -71,18 +74,27 @@ async function bootstrap() {
   const initToken = await authService.ensureInitToken();
 
   // ========== 阶段 5：最后才监听 ==========
-  await app.listen(port, '127.0.0.1');
+  await app.listen(port, host);
 
-  logger.log(`FileStation server running on http://127.0.0.1:${port}`);
+  const serveStatic = configService.get<boolean>('app.serveStatic');
+  const displayHost = host === '0.0.0.0' ? 'localhost' : host;
+  logger.log(`FileStation server running on http://${displayHost}:${port}`);
   logger.log(`Environment: ${configService.get<string>('app.nodeEnv')}`);
+  if (serveStatic) {
+    logger.log(`部署模式：单进程（无 Nginx）—— 前端静态文件由本进程托管于 http://${displayHost}:${port}`);
+  } else if (host === '127.0.0.1') {
+    logger.log('部署模式：仅监听回环（Nginx 反代场景，或开发模式 vite 代理）');
+  } else {
+    logger.log(`部署模式：直接监听 ${host}:${port}（无静态托管，前端需单独部署）`);
+  }
 
   // ========== 阶段 6：listen 成功后才打印 init token（token 只在进程真正激活后显示） ==========
   // 防 EADDRINUSE 场景：进程打印了 token 却未启动成功，用户拿未激活 token 去初始化
   if (initToken) {
     // 初始化页面是前端路由（React /init），不是后端 API（POST /api/v1/auth/init 仅接受 POST）。
-    // 生产模式 Nginx 同端口托管前端+反代后端（默认 http://localhost:8080/init）；
+    // 单进程模式（FILESTATION_SERVE_STATIC=true）或 Nginx 同端口托管时，直接用服务端口；
     // 开发模式前后端分离（vite 5173），设 FILESTATION_WEB_URL=http://localhost:5173 指向开发前端。
-    const webUrl = process.env.FILESTATION_WEB_URL || `http://localhost:${port}`;
+    const webUrl = process.env.FILESTATION_WEB_URL || `http://${displayHost}:${port}`;
     logger.log('================================');
     logger.log('FileStation 首次启动（未初始化）');
     logger.log(`初始化 Token: ${initToken}`);

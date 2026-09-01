@@ -14,7 +14,8 @@
     "test": "npm run test --workspaces",
     "typecheck": "npm run typecheck --workspaces",
     "lint": "npm run lint --workspaces",
-    "start": "node apps/server/dist/main.js"
+    "start": "cross-env FILESTATION_SERVE_STATIC=true FILESTATION_HOST=0.0.0.0 node apps/server/dist/main.js",
+    "start:bynginx": "cross-env FILESTATION_SERVE_STATIC=false FILESTATION_HOST=127.0.0.1 node apps/server/dist/main.js"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
