@@ -86,9 +86,9 @@ export class AuthController {
     @Req() req: Request,
     @Headers('authorization') authorization: string | undefined,
   ): Promise<ApiResponse<{ access_token: string; expires_in: number }>> {
-    const raw = authorization?.replace(/^Bearer\s+/i, '');
-    if (!raw) throw new UnauthorizedException('Missing API token');
-    const result = await this.authService.exchangeApiToken(raw, req.ip);
+    const bearer = authorization?.match(/^Bearer[ \t]+(\S+)$/i);
+    if (!bearer) throw new UnauthorizedException('Missing or invalid Bearer token');
+    const result = await this.authService.exchangeApiToken(bearer[1], req.ip);
     return {
       code: 'OK',
       message: 'Token exchanged',

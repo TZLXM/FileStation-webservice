@@ -79,4 +79,14 @@ describe('API Token exchange (e2e)', () => {
     await request(app.getHttpServer()).post('/api/v1/auth/api-token/exchange')
       .set('Authorization', 'Bearer fs_api_deadbeef').expect(401);
   });
+
+  it('有效明文缺少 Bearer scheme 时拒绝 exchange → 401', async () => {
+    const createRes = await request(app.getHttpServer()).post('/api/v1/api-tokens')
+      .set('Authorization', `Bearer ${adminJwt}`)
+      .send({ name: 'raw-header-agent', scopes: ['files:read'] }).expect(201);
+    const validPlaintext = createRes.body.data.token;
+
+    await request(app.getHttpServer()).post('/api/v1/auth/api-token/exchange')
+      .set('Authorization', validPlaintext).expect(401);
+  });
 });
