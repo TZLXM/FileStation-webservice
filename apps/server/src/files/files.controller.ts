@@ -10,6 +10,7 @@ import { RangeNotSatisfiableException } from '../common/http/range-not-satisfiab
 import { writeDownloadHeaders } from '../common/http/download-response';
 import { ApiResponse, PaginatedResponse, FileMetadata } from '@filestation/shared';
 import { Response } from 'express';
+import { RequireScopes } from '../security/decorators/require-scopes.decorator';
 
 @Controller('files')
 @UseGuards(JwtAuthGuard)
@@ -17,6 +18,7 @@ export class FilesController {
   constructor(private filesService: FilesService) {}
 
   @Get()
+  @RequireScopes('files:read')
   async findAll(@Query() query: ListFilesQueryDto): Promise<ApiResponse<PaginatedResponse<FileMetadata>>> {
     const page = query.page ?? 1;
     const pageSize = query.page_size ?? 20;
@@ -36,12 +38,14 @@ export class FilesController {
   }
 
   @Get(':id')
+  @RequireScopes('files:read')
   async findOne(@Param('id') id: string): Promise<ApiResponse<FileMetadata>> {
     const file = await this.filesService.findOne(id);
     return { code: 'OK', message: 'File retrieved', data: this.toMetadata(file), request_id: crypto.randomUUID() };
   }
 
   @Get(':id/content')
+  @RequireScopes('files:read')
   async getContent(
     @Param('id') id: string,
     @Headers('range') rangeHeader: string | undefined,
@@ -69,6 +73,7 @@ export class FilesController {
   }
 
   @Patch(':id')
+  @RequireScopes('files:write')
   async update(@Param('id') id: string, @Body() dto: UpdateFileDto): Promise<ApiResponse<FileMetadata>> {
     // expires_at 显式 null = 永久保留
     if (dto.expires_at === null) {
@@ -96,12 +101,14 @@ export class FilesController {
   }
 
   @Post(':id/extend')
+  @RequireScopes('files:write')
   async extend(@Param('id') id: string, @Body() dto: ExtendFileDto): Promise<ApiResponse<FileMetadata>> {
     const file = await this.filesService.extend(id, dto.hours);
     return { code: 'OK', message: 'File extended', data: this.toMetadata(file), request_id: crypto.randomUUID() };
   }
 
   @Delete(':id')
+  @RequireScopes('files:write')
   async delete(@Param('id') id: string): Promise<ApiResponse<null>> {
     await this.filesService.delete(id);
     return { code: 'OK', message: 'File deletion queued', data: null, request_id: crypto.randomUUID() };

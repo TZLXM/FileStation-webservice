@@ -1,6 +1,7 @@
 import { Controller, Get, Put, Body, UseGuards, Req } from '@nestjs/common';
 import { SettingsService } from './settings.service';
 import { JwtAuthGuard } from '../security/guards/jwt-auth.guard';
+import { AdminOnlyGuard } from '../security/guards/admin-only.guard';
 import { UpdateSettingsDto } from './dto/update-settings.dto';
 import { ApiResponse } from '@filestation/shared';
 import { Request } from 'express';
@@ -16,7 +17,7 @@ export class SettingsController {
   constructor(private settingsService: SettingsService) {}
 
   @Get()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AdminOnlyGuard)
   async getAll(): Promise<ApiResponse<any>> {
     const [site, security, transfer, storage] = await Promise.all([
       this.settingsService.getSiteSettings(),
@@ -34,7 +35,7 @@ export class SettingsController {
   }
 
   @Put()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AdminOnlyGuard)
   async update(@Body() body: UpdateSettingsDto, @Req() req: Request): Promise<ApiResponse<null>> {
     const userId = (req as any).user.id;
 

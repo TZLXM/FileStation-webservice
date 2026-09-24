@@ -9,6 +9,7 @@ import { ShareAccessDto } from './dto/share-access.dto';
 import { ShareType, ShareProtection } from './entities/share.entity';
 import { ApiResponse, ShareInfo } from '@filestation/shared';
 import { writeDownloadHeaders } from '../common/http/download-response';
+import { RequireScopes } from '../security/decorators/require-scopes.decorator';
 
 @Controller('shares')
 export class SharesController {
@@ -20,6 +21,7 @@ export class SharesController {
 
   @Post()
   @UseGuards(JwtAuthGuard)
+  @RequireScopes('shares:write')
   async create(@Body() body: CreateShareDto, @Req() req: Request): Promise<ApiResponse<{ share_id: string; share_url: string }>> {
     const share = await this.sharesService.createShare(
       body.file_id,
@@ -35,6 +37,7 @@ export class SharesController {
 
   @Get()
   @UseGuards(JwtAuthGuard)
+  @RequireScopes('shares:read')
   async listByFile(@Query('file_id') fileId: string): Promise<ApiResponse<any[]>> {
     if (!fileId) throw new BadRequestException('file_id is required');
     const shares = await this.sharesService.findByFile(fileId);
@@ -107,6 +110,7 @@ export class SharesController {
 
   @Delete(':id')
   @UseGuards(JwtAuthGuard)
+  @RequireScopes('shares:write')
   async revoke(@Param('id') id: string): Promise<ApiResponse<null>> {
     await this.sharesService.revokeShare(id);
     return { code: 'OK', message: 'Share revoked', data: null, request_id: crypto.randomUUID() };

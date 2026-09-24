@@ -5,6 +5,7 @@ import { InitUploadDto } from './dto/init-upload.dto';
 import { CompleteUploadDto } from './dto/complete-upload.dto';
 import { ApiResponse } from '@filestation/shared';
 import { Request } from 'express';
+import { RequireScopes } from '../security/decorators/require-scopes.decorator';
 
 @Controller('uploads')
 export class UploadsController {
@@ -13,6 +14,7 @@ export class UploadsController {
   // 仅初始化上传需要管理员 JWT；分块/完成/状态/恢复/中止用 X-Upload-Token（匿名，支持断点续传客户端）
   @Post()
   @UseGuards(JwtAuthGuard)
+  @RequireScopes('files:write')
   async initialize(@Body() body: InitUploadDto, @Req() req: Request) {
     const result = await this.uploadsService.initializeUpload(body, 'admin', (req as any).user.id);
     return { code: 'OK', message: 'Upload initialized', data: result, request_id: crypto.randomUUID() };

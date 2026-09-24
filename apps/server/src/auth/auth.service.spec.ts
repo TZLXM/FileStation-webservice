@@ -11,6 +11,7 @@ import { SettingsService } from '../settings/settings.service'; // v1.7 高优 1
 import { DataSource } from 'typeorm';
 import { UnauthorizedException, BadRequestException } from '@nestjs/common';
 import { createHash } from 'crypto';
+import { ApiTokensService } from '../api-tokens/api-tokens.service';
 
 describe('AuthService', () => {
   let service: AuthService;
@@ -25,6 +26,10 @@ describe('AuthService', () => {
 
   const mockJwtService = { sign: jest.fn() };
   const mockConfigService = { get: jest.fn() };
+  const mockApiTokensService = {
+    validatePlaintext: jest.fn(),
+    touchLastUsed: jest.fn(),
+  };
 
   const mockSessionsRepository = {
     create: jest.fn(),
@@ -88,6 +93,7 @@ describe('AuthService', () => {
         { provide: getRepositoryToken(SystemMeta), useValue: mockSystemMetaRepository },
         { provide: DataSource, useValue: mockDataSource },
         { provide: SettingsService, useValue: mockSettingsService }, // v1.7 高优 10
+        { provide: ApiTokensService, useValue: mockApiTokensService },
       ],
     }).compile();
 

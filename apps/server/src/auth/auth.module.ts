@@ -9,6 +9,7 @@ import { SettingsModule } from '../settings/settings.module';
 import { Session } from './entities/session.entity';
 import { LoginChallenge } from './entities/login-challenge.entity';
 import { SystemMeta } from './entities/system-meta.entity';
+import { ApiTokensModule } from '../api-tokens/api-tokens.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { SystemMeta } from './entities/system-meta.entity';
     PassportModule,
     SecurityModule, // JwtModule/JwtStrategy/JwtAuthGuard
     SettingsModule, // SettingsService（登录锁定）
+    ApiTokensModule,
     TypeOrmModule.forFeature([Session, LoginChallenge, SystemMeta]),
   ],
   controllers: [AuthController],

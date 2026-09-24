@@ -2,9 +2,12 @@ import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { AdminOnlyGuard } from './guards/admin-only.guard';
 import { AccountsModule } from '../accounts/accounts.module';
+import { ApiToken } from '../api-tokens/entities/api-token.entity';
 
 /**
  * SecurityModule：JwtModule 注册 + JwtStrategy + JwtAuthGuard。
@@ -15,6 +18,7 @@ import { AccountsModule } from '../accounts/accounts.module';
 @Module({
   imports: [
     AccountsModule,
+    TypeOrmModule.forFeature([ApiToken]),
     PassportModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
@@ -25,7 +29,7 @@ import { AccountsModule } from '../accounts/accounts.module';
       }),
     }),
   ],
-  providers: [JwtStrategy, JwtAuthGuard],
-  exports: [JwtModule, JwtStrategy, JwtAuthGuard],
+  providers: [JwtStrategy, JwtAuthGuard, AdminOnlyGuard],
+  exports: [JwtModule, JwtStrategy, JwtAuthGuard, AdminOnlyGuard],
 })
 export class SecurityModule {}

@@ -1,6 +1,6 @@
 # Current State
 
-Updated: 2026-09-01
+Updated: 2026-09-24
 
 FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成并通过浏览器全流程验证**。
 
@@ -10,8 +10,8 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 |------|------|
 | 设计文档 | v2.2 已完成；Phase 1 实施计划迭代至 v1.7（经两轮外部评审） |
 | 项目管理 | AGENTS.md 已建立 |
-| 代码实现 | Phase 1 MVP 完成（14 个任务全部落地） |
-| 测试 | 49 单元测试 + 6 E2E 测试通过；浏览器端到端手动验证通过 |
+| 代码实现 | Phase 1 MVP 完成；Phase 2 API Token 管理、exchange 与 scope 授权已实现 |
+| 测试 | server 71 unit tests passed、20 todo；13 E2E tests passed；Phase 1 浏览器端到端手动验证通过 |
 | 部署 | 单进程模式（默认）与 Nginx 反代模式均可用；已推送至 GitHub |
 
 ## 设计决策摘要
@@ -58,10 +58,10 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 - [x] 基础设置页（默认有效期/分块大小/清理宽限/登录锁定参数）
 - [x] Nginx 可选化（单进程静态托管模式，ADR-0004）
 
-### Phase 2: 可靠性（下一阶段）
+### Phase 2: 可靠性（进行中）
 
 - [ ] TOTP 认证（login_challenge 流程）
-- [ ] API Token（exchange 端点 + scopes）
+- [x] API Token 管理、exchange 短期 JWT 与 scopes（默认拒绝，scope 以数据库为准）
 - [ ] 恢复码机制
 - [ ] 断点续传 UI（前端崩溃恢复交互）
 - [ ] 审计日志
@@ -145,6 +145,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 - **2026-07-30**: Phase 1 实施计划经两轮外部评审迭代至 v1.7；MVP 实现完成
 - **2026-07-31**: 浏览器端到端验证通过（初始化→登录→上传→分享→下载→文件夹全流程）；修复验证发现的 5 个 bug
 - **2026-09-01**: Nginx 可选化（ADR-0004）：默认单进程模式托管前端，`start:bynginx` 保留反代模式；代码推送至 GitHub
+- **2026-09-24**: Phase 2 API Token 管理、exchange 与 scope 授权落地；API token JWT 每次请求检查吊销状态，scope 从数据库读取
 
 ---
 

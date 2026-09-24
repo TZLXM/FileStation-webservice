@@ -80,6 +80,23 @@ export class AuthController {
     };
   }
 
+  @Post('api-token/exchange')
+  @HttpCode(HttpStatus.OK)
+  async exchangeApiToken(
+    @Req() req: Request,
+    @Headers('authorization') authorization: string | undefined,
+  ): Promise<ApiResponse<{ access_token: string; expires_in: number }>> {
+    const raw = authorization?.replace(/^Bearer\s+/i, '');
+    if (!raw) throw new UnauthorizedException('Missing API token');
+    const result = await this.authService.exchangeApiToken(raw, req.ip);
+    return {
+      code: 'OK',
+      message: 'Token exchanged',
+      data: { access_token: result.accessToken, expires_in: result.expiresIn },
+      request_id: crypto.randomUUID(),
+    };
+  }
+
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   async refresh(

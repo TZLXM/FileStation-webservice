@@ -14,6 +14,7 @@ import * as bcrypt from 'bcrypt';
 import { TokenPair, JwtPayload } from '@filestation/shared';
 import { LoginDto } from './dto/login.dto';
 import { beginImmediate, safeRollback } from '../common/database/tx.helper';
+import { ApiTokensService } from '../api-tokens/api-tokens.service';
 
 export interface RefreshResult extends TokenPair {
   username: string;
@@ -35,7 +36,29 @@ export class AuthService {
     @InjectRepository(SystemMeta)
     private systemMetaRepository: Repository<SystemMeta>,
     private dataSource: DataSource,
+    private apiTokensService: ApiTokensService,
   ) {}
+
+  /** API Token 换短期 JWT（1h）；scopes 直接取自数据库记录，不信任调用方 */
+  async exchangeApiToken(rawToken: string, clientIp?: string): Promise<{ accessToken: string; expiresIn: number }> {
+    const token = await this.apiTokensService.validatePlaintext(rawToken);
+    if (!token) throw new UnauthorizedException('Invalid or expired API token');
+
+    const account = await this.accountsService.findById(token.accountId);
+    if (!account) throw new UnauthorizedException('Account not found');
+
+    const scopes = JSON.parse(token.scopes) as string[];
+    const payload: Omit<JwtPayload, 'iat' | 'exp'> = {
+      sub: account.id,
+      username: account.username,
+      principal_type: 'api_token',
+      scopes,
+      token_id: token.id,
+    };
+    const accessToken = this.jwtService.sign(payload, { expiresIn: 3600 });
+    await this.apiTokensService.touchLastUsed(token.id, clientIp ?? 'unknown');
+    return { accessToken, expiresIn: 3600 };
+  }
 
   async isInitialized(): Promise<boolean> {
     const meta = await this.systemMetaRepository.findOne({ where: { key: 'initialized_at' } });
