@@ -15,7 +15,7 @@
 - **API Token**：管理员可签发与吊销 Token；exchange 短期 JWT 按数据库 scopes 授权
 - **审计日志**：管理员可通过 `GET /api/v1/audit-logs` 分页查询关键操作，支持按 action 筛选；IP 匿名化并保留 90 天
 
-路线图中（Phase 2-4）：TOTP / WebAuthn 认证、多 FRP 入口智能选路、直链分享、限速控制、临时码、P2P 传输、统计面板。详见 [当前状态](docs/CURRENT-STATE.md)。
+其余路线图功能（Phase 2-4）：TOTP / WebAuthn 认证、多 FRP 入口智能选路、直链分享、限速控制、临时码、P2P 传输、统计面板。详见 [当前状态](docs/CURRENT-STATE.md)。
 
 ## 技术栈
 
@@ -88,4 +88,4 @@ MIT
 
 ---
 
-*项目状态: Phase 1 MVP 已完成，Phase 2 规划中*
+*项目状态: Phase 1 MVP 已完成，Phase 2 进行中（API Token 与审计日志已实现）*

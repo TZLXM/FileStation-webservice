@@ -1,6 +1,6 @@
 # Current State
 
-Updated: 2026-09-24
+Updated: 2026-09-25
 
 FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成并通过浏览器全流程验证**。
 
@@ -11,7 +11,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 | 设计文档 | v2.2 已完成；Phase 1 实施计划迭代至 v1.7（经两轮外部评审） |
 | 项目管理 | AGENTS.md 已建立 |
 | 代码实现 | Phase 1 MVP 完成；Phase 2 API Token 管理、exchange、scope 授权与审计日志已实现 |
-| 测试 | server 99 unit tests passed、20 todo；15 E2E tests passed；Phase 1 浏览器端到端手动验证通过 |
+| 测试 | server 101 unit tests passed、20 todo；15 E2E tests passed；Phase 1 浏览器端到端手动验证通过 |
 | 部署 | 单进程模式（默认）与 Nginx 反代模式均可用；已推送至 GitHub |
 
 ## 设计决策摘要
@@ -117,11 +117,12 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 
 ## 待办事项
 
-### Phase 2 启动前
+### Phase 2 后续（仍未实现）
 
-1. 编写 Phase 2 实施计划（沿用 v1.7 计划格式 + 外部评审流程）
-2. TOTP 具体实现方案选型
-3. 审计日志表结构设计
+1. TOTP 认证方案选型与实现
+2. 恢复码机制
+3. 断点续传 UI
+4. 并发/压力测试
 
 ### 待设计（Phase 3+）
 

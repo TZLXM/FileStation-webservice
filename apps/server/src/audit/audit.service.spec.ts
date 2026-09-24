@@ -117,4 +117,41 @@ describe('AuditService', () => {
       total_pages: 1,
     });
   });
+
+  it('returns a page with null details for malformed stored JSON without echoing it', async () => {
+    const malformedDetails = '{malformed-secret-payload';
+    const warn = jest.spyOn((service as any).logger, 'warn');
+    repo.findAndCount.mockResolvedValue([[
+      {
+        id: 'audit-corrupt',
+        accountId: 'a1',
+        action: 'auth.login',
+        resourceType: null,
+        resourceId: null,
+        details: malformedDetails,
+        ipAddress: null,
+        userAgent: null,
+        createdAt: Date.UTC(2026, 8, 1),
+      },
+      {
+        id: 'audit-valid',
+        accountId: 'a2',
+        action: 'auth.login',
+        resourceType: null,
+        resourceId: null,
+        details: '{"username":"alice"}',
+        ipAddress: null,
+        userAgent: null,
+        createdAt: Date.UTC(2026, 8, 2),
+      },
+    ], 2]);
+
+    const result = await service.findAll(1, 10);
+
+    expect(result.items[0].details).toBeNull();
+    expect(result.items[1].details).toEqual({ username: 'alice' });
+    expect(JSON.stringify(result)).not.toContain(malformedDetails);
+    expect(warn).not.toHaveBeenCalled();
+    expect(result.total).toBe(2);
+  });
 });

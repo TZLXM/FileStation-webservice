@@ -53,4 +53,21 @@ describe('SettingsController audit events', () => {
     await expect(controller.update({ security: { max_login_attempts: 8 } } as any, req)).rejects.toThrow('settings write failed');
     expect(auditService.record).not.toHaveBeenCalled();
   });
+
+  it('keeps the success response but does not audit updates that persist no valid setting keys', async () => {
+    settingsService.set.mockResolvedValue(undefined);
+    const emptyRequests = [
+      {},
+      { security: {} },
+      { unsupported: { value: 'ignored' } },
+    ];
+
+    for (const body of emptyRequests) {
+      const result = await controller.update(body as any, req);
+      expect(result).toMatchObject({ code: 'OK', message: 'Settings updated', data: null });
+    }
+
+    expect(auditService.record).not.toHaveBeenCalled();
+    expect(settingsService.set).not.toHaveBeenCalled();
+  });
 });

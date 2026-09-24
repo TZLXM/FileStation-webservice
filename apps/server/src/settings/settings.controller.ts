@@ -13,6 +13,11 @@ function omitUndefined<T extends object>(o: T): Partial<T> {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>;
 }
 
+function hasChangedKeys(current: object, updates: object): boolean {
+  const currentValues = current as Record<string, unknown>;
+  return Object.entries(updates).some(([key, value]) => currentValues[key] !== value);
+}
+
 @Controller('settings')
 export class SettingsController {
   constructor(private settingsService: SettingsService, private auditService: AuditService) {}
@@ -39,37 +44,57 @@ export class SettingsController {
   @UseGuards(JwtAuthGuard, AdminOnlyGuard)
   async update(@Body() body: UpdateSettingsDto, @Req() req: Request): Promise<ApiResponse<null>> {
     const userId = (req as any).user.id;
+    const updatedSections: string[] = [];
 
     // 合并更新：读取后合并（经 omitUndefined 清洗），非覆盖
     if (body.site) {
-      const current = await this.settingsService.getSiteSettings();
-      await this.settingsService.set('site', { ...current, ...omitUndefined(body.site) }, userId);
+      const updates = omitUndefined(body.site);
+      if (Object.keys(updates).length > 0) {
+        const current = await this.settingsService.getSiteSettings();
+        const changed = hasChangedKeys(current, updates);
+        await this.settingsService.set('site', { ...current, ...updates }, userId);
+        if (changed) updatedSections.push('site');
+      }
     }
     if (body.security) {
-      const current = await this.settingsService.getSecuritySettings();
-      await this.settingsService.set('security', { ...current, ...omitUndefined(body.security) }, userId);
+      const updates = omitUndefined(body.security);
+      if (Object.keys(updates).length > 0) {
+        const current = await this.settingsService.getSecuritySettings();
+        const changed = hasChangedKeys(current, updates);
+        await this.settingsService.set('security', { ...current, ...updates }, userId);
+        if (changed) updatedSections.push('security');
+      }
     }
     if (body.transfer) {
-      const current = await this.settingsService.getTransferSettings();
-      await this.settingsService.set('transfer', { ...current, ...omitUndefined(body.transfer) }, userId);
+      const updates = omitUndefined(body.transfer);
+      if (Object.keys(updates).length > 0) {
+        const current = await this.settingsService.getTransferSettings();
+        const changed = hasChangedKeys(current, updates);
+        await this.settingsService.set('transfer', { ...current, ...updates }, userId);
+        if (changed) updatedSections.push('transfer');
+      }
     }
     if (body.storage) {
-      const current = await this.settingsService.getStorageSettings();
-      // body.storage 已不含 path（DTO 拒绝）；合并后 path 保持 ConfigService 实际值（不入库）
-      const { path: _actualPath, ...rest } = current;
-      await this.settingsService.set('storage', { ...rest, ...omitUndefined(body.storage) }, userId);
+      const updates = omitUndefined(body.storage);
+      if (Object.keys(updates).length > 0) {
+        const current = await this.settingsService.getStorageSettings();
+        const changed = hasChangedKeys(current, updates);
+        // body.storage 已不含 path（DTO 拒绝）；合并后 path 保持 ConfigService 实际值（不入库）
+        const { path: _actualPath, ...rest } = current;
+        await this.settingsService.set('storage', { ...rest, ...updates }, userId);
+        if (changed) updatedSections.push('storage');
+      }
     }
 
-    const sections = Object.entries(body)
-      .filter(([, value]) => value !== undefined)
-      .map(([section]) => section);
-    await this.auditService.record({
-      accountId: userId,
-      action: AuditAction.SETTINGS_UPDATED,
-      details: { sections },
-      ip: req.ip,
-      userAgent: req.headers['user-agent'],
-    });
+    if (updatedSections.length > 0) {
+      await this.auditService.record({
+        accountId: userId,
+        action: AuditAction.SETTINGS_UPDATED,
+        details: { sections: updatedSections },
+        ip: req.ip,
+        userAgent: req.headers['user-agent'],
+      });
+    }
 
     return { code: 'OK', message: 'Settings updated', data: null, request_id: crypto.randomUUID() };
   }

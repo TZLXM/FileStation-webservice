@@ -134,10 +134,20 @@ export class AuditService {
       action: row.action,
       resource_type: row.resourceType,
       resource_id: row.resourceId,
-      details: row.details ? JSON.parse(row.details) : null,
+      details: this.parseDetails(row.details),
       ip_address: row.ipAddress,
       user_agent: row.userAgent,
       created_at: new Date(row.createdAt).toISOString(),
     };
+  }
+
+  private parseDetails(details: string | null): AuditLogEntry['details'] {
+    if (!details) return null;
+    try {
+      return JSON.parse(details) as AuditLogEntry['details'];
+    } catch {
+      // Corrupt historical rows should not prevent admins from reading the rest of the page.
+      return null;
+    }
   }
 }
