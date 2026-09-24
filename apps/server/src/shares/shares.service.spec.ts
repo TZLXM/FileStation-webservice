@@ -9,7 +9,7 @@ import { DataSource } from 'typeorm';
 describe('SharesService', () => {
   let service: SharesService;
 
-  const mockSharesRepository = { create: jest.fn(), save: jest.fn(), findOne: jest.fn(), createQueryBuilder: jest.fn() };
+  const mockSharesRepository = { create: jest.fn(), save: jest.fn(), find: jest.fn(), findOne: jest.fn(), createQueryBuilder: jest.fn() };
   const mockDownloadSessionsRepository = { create: jest.fn(), save: jest.fn(), findOne: jest.fn() };
   const mockFilesRepository = { findOne: jest.fn() };
   const mockDataSource = { createQueryRunner: jest.fn() };
@@ -34,6 +34,16 @@ describe('SharesService', () => {
 
   it('should be defined', () => {
     expect(service).toBeDefined();
+  });
+
+  it('lists the newest 200 shares when no file filter is supplied', async () => {
+    const shares = [{ id: 'share-1' }] as Share[];
+    mockSharesRepository.find.mockResolvedValue(shares);
+
+    const result = await service.findAll();
+
+    expect(result).toBe(shares);
+    expect(mockSharesRepository.find).toHaveBeenCalledWith({ order: { createdAt: 'DESC' }, take: 200 });
   });
 
   // accessShare（统一端点）与 validateAuthorizedDownload（四层复验）、票据语义：

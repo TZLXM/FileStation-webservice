@@ -29,6 +29,11 @@ export interface StorageSettings {
   default_expire_hours: number;
 }
 
+export interface AgentSettings {
+  mcp_enabled: boolean;
+  mcp_max_upload_mb: number;
+}
+
 @Injectable()
 export class SettingsService {
   constructor(
@@ -89,5 +94,9 @@ export class SettingsService {
       // path 只读展示：始终返回环境变量/配置的实际值，不读库、不可写
       path: this.configService.get<string>('app.storagePath') || './data/storage',
     };
+  }
+
+  async getAgentSettings(): Promise<AgentSettings> {
+    return this.get<AgentSettings>('agent', { mcp_enabled: false, mcp_max_upload_mb: 32 });
   }
 }

@@ -203,6 +203,10 @@ export class SharesService {
     return this.sharesRepository.find({ where: { fileId }, order: { createdAt: 'DESC' } });
   }
 
+  async findAll(): Promise<Share[]> {
+    return this.sharesRepository.find({ order: { createdAt: 'DESC' }, take: 200 });
+  }
+
   async revokeShare(shareId: string): Promise<void> {
     const result = await this.sharesRepository.update(
       { id: shareId, status: 'active' },

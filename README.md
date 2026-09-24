@@ -13,6 +13,7 @@
 - **自动过期**：文件可设有效期，到期自动清理；可手动延长或设为永久
 - **基础设置**：默认有效期、分块大小、清理宽限期、登录锁定参数
 - **API Token**：管理员可签发与吊销 Token；exchange 短期 JWT 按数据库 scopes 授权
+- **MCP 服务**：启用设置中的 MCP 开关后，可通过无状态 Streamable HTTP `/api/v1/mcp` 使用 11 个文件、文件夹、上传与分享工具；直接使用 API Token，并按 token scopes 校验权限
 - **审计日志**：管理员可通过 `GET /api/v1/audit-logs` 分页查询关键操作，支持按 action 筛选；IP 匿名化并保留 90 天
 
 其余路线图功能（Phase 2-4）：TOTP / WebAuthn 认证、多 FRP 入口智能选路、直链分享、限速控制、临时码、P2P 传输、统计面板。详见 [当前状态](docs/CURRENT-STATE.md)。
@@ -88,4 +89,4 @@ MIT
 
 ---
 
-*项目状态: Phase 1 MVP 已完成，Phase 2 进行中（API Token 与审计日志已实现）*
+*项目状态: Phase 1 MVP 已完成，Phase 2 进行中（API Token、审计日志与 MCP 服务已实现）*

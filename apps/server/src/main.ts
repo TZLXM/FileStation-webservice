@@ -6,6 +6,7 @@ import { AuthService } from './auth/auth.service';
 import { StorageService } from './files/storage.service';
 import { RangeNotSatisfiableFilter } from './common/http/range-not-satisfiable.filter';
 import cookieParser from 'cookie-parser';
+import { json, NextFunction, Request, Response } from 'express';
 import * as fs from 'fs/promises';
 import { dirname } from 'path';
 
@@ -46,6 +47,12 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
 
+  // Keep MCP base64 chunks under a route-only 16MB limit. The named wrapper
+  // avoids Nest mistaking this middleware for its app-wide `jsonParser`.
+  const mcpJsonParser = json({ limit: '16mb' });
+  app.use('/api/v1/mcp', function routeMcpJsonParser(req: Request, res: Response, next: NextFunction) {
+    return mcpJsonParser(req, res, next);
+  });
   app.use(cookieParser());
   app.setGlobalPrefix('api/v1'); // 唯一前缀来源
   app.useGlobalPipes(

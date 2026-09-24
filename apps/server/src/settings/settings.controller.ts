@@ -25,13 +25,14 @@ export class SettingsController {
   @Get()
   @UseGuards(JwtAuthGuard, AdminOnlyGuard)
   async getAll(): Promise<ApiResponse<any>> {
-    const [site, security, transfer, storage] = await Promise.all([
+    const [site, security, transfer, storage, agent] = await Promise.all([
       this.settingsService.getSiteSettings(),
       this.settingsService.getSecuritySettings(),
       this.settingsService.getTransferSettings(),
       this.settingsService.getStorageSettings(),
+      this.settingsService.getAgentSettings(),
     ]);
-    return { code: 'OK', message: 'Settings retrieved', data: { site, security, transfer, storage }, request_id: crypto.randomUUID() };
+    return { code: 'OK', message: 'Settings retrieved', data: { site, security, transfer, storage, agent }, request_id: crypto.randomUUID() };
   }
 
   @Get('public')
@@ -83,6 +84,16 @@ export class SettingsController {
         const { path: _actualPath, ...rest } = current;
         await this.settingsService.set('storage', { ...rest, ...updates }, userId);
         if (changed) updatedSections.push('storage');
+      }
+    }
+
+    if (body.agent) {
+      const updates = omitUndefined(body.agent);
+      if (Object.keys(updates).length > 0) {
+        const current = await this.settingsService.getAgentSettings();
+        const changed = hasChangedKeys(current, updates);
+        await this.settingsService.set('agent', { ...current, ...updates }, userId);
+        if (changed) updatedSections.push('agent');
       }
     }
 

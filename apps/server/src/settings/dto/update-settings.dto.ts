@@ -52,6 +52,14 @@ export class StorageSettingsDto {
   default_expire_hours?: number;
 }
 
+export class AgentSettingsDto {
+  @IsOptional() @IsBoolean()
+  mcp_enabled?: boolean;
+
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(512)
+  mcp_max_upload_mb?: number;
+}
+
 export class UpdateSettingsDto {
   @IsOptional() @ValidateNested() @Type(() => SiteSettingsDto)
   site?: SiteSettingsDto;
@@ -64,4 +72,7 @@ export class UpdateSettingsDto {
 
   @IsOptional() @ValidateNested() @Type(() => StorageSettingsDto)
   storage?: StorageSettingsDto;
+
+  @IsOptional() @ValidateNested() @Type(() => AgentSettingsDto)
+  agent?: AgentSettingsDto;
 }
