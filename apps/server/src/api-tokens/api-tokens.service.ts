@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { InjectRepository } from '@nestjs/typeorm';
 import { createHash, randomBytes } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
-import { Repository } from 'typeorm';
+import { IsNull, LessThanOrEqual, Repository } from 'typeorm';
 import { API_TOKEN_SCOPES, ApiTokenInfo, ApiTokenScope } from '@filestation/shared';
 import { ApiToken } from './entities/api-token.entity';
 
@@ -66,7 +66,7 @@ export class ApiTokensService {
 
   /** Shared by exchange and MCP authentication: hash lookup plus revoke/expiry checks. */
   async validatePlaintext(raw: string): Promise<ApiToken | null> {
-    if (!raw.startsWith('fs_api_')) return null;
+    if (!/^fs_api_[0-9a-f]{48}$/.test(raw)) return null;
 
     const row = await this.tokensRepository.findOne({ where: { tokenHash: this.hash(raw) } });
     if (!row || row.revokedAt !== null) return null;
@@ -76,11 +76,15 @@ export class ApiTokensService {
 
   /** Record token use at most once per 60 seconds to avoid excess writes. */
   async touchLastUsed(tokenId: string, ip: string): Promise<void> {
-    const row = await this.tokensRepository.findOne({ where: { id: tokenId } });
-    if (!row) return;
-    if (row.lastUsedAt && Date.now() - row.lastUsedAt < 60_000) return;
-
-    await this.tokensRepository.update({ id: tokenId }, { lastUsedAt: Date.now(), lastUsedIp: ip });
+    const now = Date.now();
+    const cutoff = now - 60_000;
+    await this.tokensRepository.update(
+      [
+        { id: tokenId, lastUsedAt: IsNull() },
+        { id: tokenId, lastUsedAt: LessThanOrEqual(cutoff) },
+      ],
+      { lastUsedAt: now, lastUsedIp: ip },
+    );
   }
 
   private hash(raw: string): string {

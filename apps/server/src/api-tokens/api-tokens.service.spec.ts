@@ -1,6 +1,7 @@
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { createHash } from 'crypto';
+import { DataSource, FindOperator, Repository } from 'typeorm';
 import { ApiTokensService } from './api-tokens.service';
 import { ApiToken } from './entities/api-token.entity';
 
@@ -69,6 +70,21 @@ describe('ApiTokensService', () => {
     expect(await service.validatePlaintext('not-a-token')).toBeNull(); // 前缀不符短路
   });
 
+  it('validatePlaintext：带正确前缀但格式非法时不查询仓库', async () => {
+    const malformed = [
+      `fs_api_${'a'.repeat(47)}`,
+      `fs_api_${'a'.repeat(49)}`,
+      `fs_api_${'g'.repeat(48)}`,
+      `fs_api_${'A'.repeat(48)}`,
+    ];
+
+    for (const raw of malformed) {
+      expect(await service.validatePlaintext(raw)).toBeNull();
+    }
+
+    expect(repo.findOne).not.toHaveBeenCalled();
+  });
+
   it('listTokens：只查询指定账号，并返回不含哈希的公开信息', async () => {
     repo.find.mockResolvedValue([
       makeToken({
@@ -113,25 +129,77 @@ describe('ApiTokensService', () => {
     await expect(service.revokeToken('acc1', 'other-account-token')).rejects.toThrow('API token not found');
   });
 
-  it('touchLastUsed：距上次不足 60 秒不写库', async () => {
-    repo.findOne.mockResolvedValue({ id: 't1', lastUsedAt: Date.now() - 1000 });
-    await service.touchLastUsed('t1', '1.2.3.0');
-    expect(repo.update).not.toHaveBeenCalled();
-  });
-
-  it('touchLastUsed：达到 60 秒时更新最近使用时间和 IP', async () => {
+  it('touchLastUsed：用单条条件更新覆盖 NULL 和 60 秒前时间，不先读取', async () => {
     const now = 1_700_000_100_000;
     const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(now);
-    repo.findOne.mockResolvedValue(makeToken({ lastUsedAt: now - 60_000 }));
+    repo.update.mockResolvedValue({ affected: 0 });
     try {
       await service.touchLastUsed('t1', '1.2.3.0');
     } finally {
       nowSpy.mockRestore();
     }
 
-    expect(repo.update).toHaveBeenCalledWith(
-      { id: 't1' },
-      { lastUsedAt: now, lastUsedIp: '1.2.3.0' },
-    );
+    expect(repo.findOne).not.toHaveBeenCalled();
+    expect(repo.update).toHaveBeenCalledTimes(1);
+    const [conditions, changes] = repo.update.mock.calls[0] as [
+      Array<{ id: string; lastUsedAt: FindOperator<number> }>,
+      { lastUsedAt: number; lastUsedIp: string },
+    ];
+    expect(conditions).toHaveLength(2);
+    expect(conditions.map(({ id }) => id)).toEqual(['t1', 't1']);
+    expect(conditions[0].lastUsedAt.type).toBe('isNull');
+    expect(conditions[1].lastUsedAt.type).toBe('lessThanOrEqual');
+    expect(conditions[1].lastUsedAt.value).toBe(now - 60_000);
+    expect(changes).toEqual({ lastUsedAt: now, lastUsedIp: '1.2.3.0' });
+  });
+});
+
+describe('ApiTokensService SQLite conditional update', () => {
+  let dataSource: DataSource;
+  let repository: Repository<ApiToken>;
+  let service: ApiTokensService;
+
+  beforeAll(async () => {
+    dataSource = new DataSource({
+      type: 'sqlite',
+      database: ':memory:',
+      entities: [ApiToken],
+      synchronize: true,
+    });
+    await dataSource.initialize();
+    repository = dataSource.getRepository(ApiToken);
+    service = new ApiTokensService(repository);
+  });
+
+  afterAll(async () => {
+    await dataSource.destroy();
+  });
+
+  beforeEach(async () => {
+    await repository.clear();
+  });
+
+  it('SQLite applies the 60-second cutoff atomically, including the exact boundary', async () => {
+    const now = 1_700_000_100_000;
+    await repository.save([
+      makeToken({ id: 'never-used', lastUsedAt: null }),
+      makeToken({ id: 'at-boundary', lastUsedAt: now - 60_000, lastUsedIp: 'old-boundary-ip' }),
+      makeToken({ id: 'recent', lastUsedAt: now - 59_999, lastUsedIp: 'old-recent-ip' }),
+    ]);
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(now);
+
+    try {
+      await service.touchLastUsed('never-used', '1.2.3.1');
+      await service.touchLastUsed('at-boundary', '1.2.3.2');
+      await service.touchLastUsed('recent', '1.2.3.3');
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    const rows = await repository.find();
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    expect(byId.get('never-used')).toMatchObject({ lastUsedAt: now, lastUsedIp: '1.2.3.1' });
+    expect(byId.get('at-boundary')).toMatchObject({ lastUsedAt: now, lastUsedIp: '1.2.3.2' });
+    expect(byId.get('recent')).toMatchObject({ lastUsedAt: now - 59_999, lastUsedIp: 'old-recent-ip' });
   });
 });
