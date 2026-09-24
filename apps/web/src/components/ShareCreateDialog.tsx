@@ -50,12 +50,12 @@ export default function ShareCreateDialog({ fileId, filename, onClose }: ShareCr
   };
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="share-create-title"
-        className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md mx-4"
+        className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md"
         onClick={(e) => e.stopPropagation()}
       >
         <h3 id="share-create-title" className="text-lg font-semibold mb-1">创建分享</h3>

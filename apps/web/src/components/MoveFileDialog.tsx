@@ -40,12 +40,12 @@ export default function MoveFileDialog({ file, onClose, onMoved }: MoveFileDialo
   };
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="move-file-title"
-        className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md mx-4"
+        className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md"
         onClick={(e) => e.stopPropagation()}
       >
         <h3 id="move-file-title" className="text-lg font-semibold mb-1">移动文件</h3>

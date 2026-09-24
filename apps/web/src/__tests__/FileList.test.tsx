@@ -18,6 +18,15 @@ vi.mock('../lib/api', () => ({
 }));
 
 const mockedApi = vi.mocked(api);
+
+function expectMobileDialogGutters(dialog: HTMLElement) {
+  const overlay = dialog.parentElement;
+  expect(overlay).not.toBeNull();
+  expect(overlay).toHaveClass('p-4');
+  expect(dialog).toHaveClass('w-full', 'max-w-md');
+  expect(dialog).not.toHaveClass('mx-4');
+}
+
 const file: FileMetadata = {
   id: 'file-1',
   filename: 'project-archive-with-a-long-name.zip',
@@ -87,17 +96,17 @@ describe('FileList responsive views', () => {
 
     fireEvent.click(within(screen.getByRole('article', { name: file.filename })).getByRole('button', { name: '分享' }));
 
-    const heading = screen.getByRole('heading', { name: '创建分享' });
-    expect(heading).toBeInTheDocument();
-    expect(heading.parentElement).toHaveClass('mx-4');
+    const dialog = screen.getByRole('dialog', { name: '创建分享' });
+    expectMobileDialogGutters(dialog);
   });
 
-  it('opens the move dialog from a mobile card action with mobile margins', async () => {
+  it('opens the move dialog from a mobile card action with viewport gutters', async () => {
     render(<FileList files={[file]} total={1} page={1} onPageChange={vi.fn()} onChanged={vi.fn()} />);
 
     fireEvent.click(within(screen.getByRole('article', { name: file.filename })).getByRole('button', { name: '移动' }));
 
-    expect((await screen.findByText('移动文件')).parentElement).toHaveClass('mx-4');
+    const dialog = await screen.findByRole('dialog', { name: '移动文件' });
+    expectMobileDialogGutters(dialog);
   });
 
   it('downloads from the mobile card action', async () => {
