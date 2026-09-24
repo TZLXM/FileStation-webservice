@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuthStore } from '../stores/authStore';
 import { api } from '../lib/api';
 import { FileMetadata, PaginatedResponse } from '@filestation/shared';
+import AppLayout from '../components/AppLayout';
 import FileUpload from '../components/FileUpload';
 import FolderTree from '../components/FolderTree';
 import FileList from '../components/FileList';
@@ -12,8 +13,8 @@ export default function FilesPage() {
   const [page, setPage] = useState(1);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null); // null=全部, 'root'=根目录, uuid=指定文件夹
   const [treeRefreshKey, setTreeRefreshKey] = useState(0);
-  const logout = useAuthStore((s) => s.logout);
-  const username = useAuthStore((s) => s.username);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const drawerRef = useRef<HTMLDivElement>(null);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const accessToken = useAuthStore((s) => s.accessToken);
 
@@ -35,36 +36,84 @@ export default function FilesPage() {
     }
   }, [loadFiles, isAuthenticated, accessToken]);
 
+  useEffect(() => {
+    if (!drawerOpen) return;
+
+    const previousOverflow = document.body.style.overflow;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setDrawerOpen(false);
+    };
+
+    document.body.style.overflow = 'hidden';
+    drawerRef.current?.focus();
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener('keydown', handleKeyDown);
+      previousFocus?.focus();
+    };
+  }, [drawerOpen]);
+
   const handleSelectFolder = (id: string | null) => {
     setSelectedFolderId(id);
     setPage(1);
+    setDrawerOpen(false);
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col">
-      <header className="bg-white shadow">
-        <div className="px-4 py-4 flex justify-between items-center">
-          <h1 className="text-2xl font-bold">FileStation</h1>
-          <div className="flex items-center space-x-4">
-            <span className="text-sm text-gray-600">{username}</span>
-            <button onClick={() => logout()} className="text-sm text-red-600 hover:text-red-800">退出</button>
+    <AppLayout onFolderToggle={() => setDrawerOpen(true)}>
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+        {drawerOpen && (
+          <div className="fixed inset-0 z-40 md:hidden">
+            <div
+              data-testid="folder-drawer-backdrop"
+              aria-hidden="true"
+              className="absolute inset-0 bg-black/40"
+              onClick={() => setDrawerOpen(false)}
+            />
+            <div
+              ref={drawerRef}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="folder-drawer-title"
+              tabIndex={-1}
+              className="absolute inset-y-0 left-0 w-72 max-w-[85vw] bg-white shadow-xl overflow-y-auto outline-none"
+            >
+              <h2 id="folder-drawer-title" className="sr-only">文件夹</h2>
+              <div className="flex justify-end px-2 pt-2">
+                <button
+                  type="button"
+                  aria-label="关闭文件夹"
+                  className="min-h-10 min-w-10 rounded text-gray-600 hover:bg-gray-100"
+                  onClick={() => setDrawerOpen(false)}
+                >
+                  <span aria-hidden="true">×</span>
+                </button>
+              </div>
+              <FolderTree
+                selectedFolderId={selectedFolderId}
+                onSelect={handleSelectFolder}
+                refreshKey={treeRefreshKey}
+              />
+            </div>
           </div>
-        </div>
-      </header>
-
-      <div className="flex flex-1 overflow-hidden">
-        <FolderTree
-          selectedFolderId={selectedFolderId}
-          onSelect={handleSelectFolder}
-          refreshKey={treeRefreshKey}
-        />
-        <main className="flex-1 p-6 overflow-y-auto">
+        )}
+        <aside aria-label="文件夹列表" className="hidden md:block h-full">
+          <FolderTree
+            selectedFolderId={selectedFolderId}
+            onSelect={handleSelectFolder}
+            refreshKey={treeRefreshKey}
+          />
+        </aside>
+        <main className="flex-1 min-w-0 p-4 md:p-6 overflow-y-auto">
           <div className="mb-6">
             <FileUpload onUploadComplete={loadFiles} folderId={selectedFolderId === 'root' ? null : selectedFolderId} />
           </div>
           <FileList files={files} total={total} page={page} onPageChange={setPage} onChanged={loadFiles} />
         </main>
       </div>
-    </div>
+    </AppLayout>
   );
 }

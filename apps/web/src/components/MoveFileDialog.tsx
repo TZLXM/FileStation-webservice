@@ -41,8 +41,14 @@ export default function MoveFileDialog({ file, onClose, onMoved }: MoveFileDialo
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md" onClick={(e) => e.stopPropagation()}>
-        <h3 className="text-lg font-semibold mb-1">移动文件</h3>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="move-file-title"
+        className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md mx-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 id="move-file-title" className="text-lg font-semibold mb-1">移动文件</h3>
         <p className="text-sm text-gray-500 mb-4 truncate">{file.filename}</p>
 
         {loading ? (

@@ -108,10 +108,38 @@ export default function FolderTree({ selectedFolderId, onSelect, refreshKey }: F
             </span>
           )}
 
-          <span className="hidden group-hover:flex space-x-1 text-xs text-gray-500">
-            <button title="新建子文件夹" onClick={() => { setCreating(node.id); setInputValue(''); setExpanded((p) => new Set(p).add(node.id)); }}>+</button>
-            <button title="重命名" onClick={() => { setRenaming(node.id); setInputValue(node.name); }}>✎</button>
-            <button title="删除" onClick={() => handleDelete(node)}>×</button>
+          <span
+            role="group"
+            aria-label={`${node.name}操作`}
+            className="flex md:hidden md:group-hover:flex shrink-0 space-x-1 text-xs text-gray-500"
+          >
+            <button
+              type="button"
+              aria-label={`为 ${node.name} 新建子文件夹`}
+              title="新建子文件夹"
+              className="min-h-10 min-w-10 rounded hover:bg-gray-100"
+              onClick={() => { setCreating(node.id); setInputValue(''); setExpanded((p) => new Set(p).add(node.id)); }}
+            >
+              +
+            </button>
+            <button
+              type="button"
+              aria-label={`重命名 ${node.name}`}
+              title="重命名"
+              className="min-h-10 min-w-10 rounded hover:bg-gray-100"
+              onClick={() => { setRenaming(node.id); setInputValue(node.name); }}
+            >
+              ✎
+            </button>
+            <button
+              type="button"
+              aria-label={`删除 ${node.name}`}
+              title="删除"
+              className="min-h-10 min-w-10 rounded hover:bg-gray-100"
+              onClick={() => handleDelete(node)}
+            >
+              ×
+            </button>
           </span>
         </div>
 
@@ -138,11 +166,13 @@ export default function FolderTree({ selectedFolderId, onSelect, refreshKey }: F
   };
 
   return (
-    <div className="w-64 flex-shrink-0 bg-white border-r border-gray-200 p-2 overflow-y-auto">
+    <div className="w-full md:w-64 flex-shrink-0 bg-white border-r border-gray-200 p-2 overflow-y-auto">
       <div className="flex justify-between items-center px-2 py-1 mb-2">
         <span className="text-xs font-semibold text-gray-500 uppercase">文件夹</span>
         <button
-          className="text-sm text-blue-600 hover:text-blue-800"
+          type="button"
+          aria-label="新建根文件夹"
+          className="min-h-10 px-2 text-sm text-blue-600 hover:text-blue-800"
           title="新建根文件夹"
           onClick={() => { setCreating('root'); setInputValue(''); }}
         >

@@ -51,8 +51,14 @@ export default function ShareCreateDialog({ fileId, filename, onClose }: ShareCr
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md" onClick={(e) => e.stopPropagation()}>
-        <h3 className="text-lg font-semibold mb-1">创建分享</h3>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="share-create-title"
+        className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md mx-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 id="share-create-title" className="text-lg font-semibold mb-1">创建分享</h3>
         <p className="text-sm text-gray-500 mb-4 truncate">{filename}</p>
 
         {shareUrl ? (
@@ -60,7 +66,7 @@ export default function ShareCreateDialog({ fileId, filename, onClose }: ShareCr
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">分享链接</label>
               <div className="flex space-x-2">
-                <input readOnly value={shareUrl} className="flex-1 px-3 py-2 border rounded text-sm bg-gray-50" />
+                <input readOnly value={shareUrl} className="min-w-0 flex-1 px-3 py-2 border rounded text-sm bg-gray-50" />
                 <button onClick={copyToClipboard} className="px-3 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">
                   复制
                 </button>

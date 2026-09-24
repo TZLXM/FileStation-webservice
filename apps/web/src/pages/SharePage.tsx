@@ -82,9 +82,9 @@ export default function SharePage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <div className="max-w-md w-full p-8 bg-white rounded-lg shadow">
-        <h2 className="text-2xl font-bold mb-4">{shareInfo.filename}</h2>
+    <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
+      <div className="max-w-md w-full min-w-0 p-8 bg-white rounded-lg shadow">
+        <h2 className="text-xl md:text-2xl font-bold mb-4 break-words">{shareInfo.filename}</h2>
         <p className="text-gray-600 mb-4">大小: {formatSize(shareInfo.size)}</p>
 
         {shareInfo.requires_password && !downloadToken && (
@@ -103,7 +103,7 @@ export default function SharePage() {
             </div>
             <button
               type="submit"
-              className="w-full py-2 px-4 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+              className="w-full py-3 px-4 bg-blue-600 text-white rounded-md hover:bg-blue-700"
             >
               验证
             </button>
@@ -113,7 +113,7 @@ export default function SharePage() {
         {downloadToken && (
           <button
             onClick={handleDownload}
-            className="w-full py-2 px-4 bg-green-600 text-white rounded-md hover:bg-green-700"
+            className="w-full py-3 px-4 bg-green-600 text-white rounded-md hover:bg-green-700"
           >
             下载文件
           </button>
