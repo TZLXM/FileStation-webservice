@@ -269,11 +269,11 @@ export class UploadsService {
    * 阶段三 BEGIN IMMEDIATE：INSERT files + UPDATE ... WHERE status='verifying' AND owner 匹配。
    *   v1.7 阻断 3：检查条件 UPDATE affected；0 时事务内重查（completed 同文件→幂等，否则回滚）。
    */
-  async completeUpload(uploadId: string, uploadToken: string, finalHash?: string): Promise<{ file_id: string }> {
+  async completeUpload(uploadId: string, uploadToken: string, finalHash?: string): Promise<{ file_id: string; filename: string; size: number }> {
     const session = await this.validateUploadToken(uploadId, uploadToken);
 
     if (session.status === UploadStatus.COMPLETED) {
-      return { file_id: session.finalFileId! };
+      return { file_id: session.finalFileId!, filename: session.filename, size: session.expectedSize };
     }
 
     // ---------- 阶段一：抢占 + 持久化 final_stored_name + 租约 ----------
@@ -309,7 +309,7 @@ export class UploadsService {
         if (current.length === 0) throw new NotFoundException('Upload session not found');
         if (current[0].status === 'completed') {
           await queryRunner.query('COMMIT');
-          return { file_id: current[0].final_file_id };
+          return { file_id: current[0].final_file_id, filename: session.filename, size: session.expectedSize };
         }
         if (current[0].status === 'verifying') {
           throw new ConflictException({ code: 'UPLOAD_FINALIZING', message: 'Another request is completing this upload' });
@@ -393,7 +393,7 @@ export class UploadsService {
         if (current.length > 0 && current[0].status === 'completed' && current[0].final_file_id === newFileId) {
           await queryRunner3.query('COMMIT');
           this.storageService.deleteUploadTempDir(uploadId).catch(() => {});
-          return { file_id: newFileId };
+          return { file_id: newFileId, filename: claimedSession.filename, size: claimedSession.expectedSize };
         }
         // 失去完成权（租约被接管/状态被改）——回滚，新插入的 files 随之撤销
         throw new ConflictException({

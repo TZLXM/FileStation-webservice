@@ -44,6 +44,23 @@ describe('API Token exchange (e2e)', () => {
       .set('Authorization', `Bearer ${apiJwt}`).expect(200);
   });
 
+  it('审计日志分页接口仅管理员可访问且不返回明文 token', async () => {
+    const result = await request(app.getHttpServer()).get('/api/v1/audit-logs?page=1&page_size=100&action=api_token.created')
+      .set('Authorization', `Bearer ${adminJwt}`).expect(200);
+    expect(result.body.data).toMatchObject({ page: 1, page_size: 100, total_pages: 1 });
+    expect(result.body.data.items).toHaveLength(1);
+    expect(result.body.data.items[0]).toMatchObject({
+      action: 'api_token.created',
+      resource_type: 'api_token',
+      resource_id: tokenId,
+      details: { name: 'e2e-agent', scopes: ['files:read'] },
+    });
+    expect(JSON.stringify(result.body.data)).not.toContain(plaintext);
+
+    await request(app.getHttpServer()).get('/api/v1/audit-logs')
+      .set('Authorization', `Bearer ${apiJwt}`).expect(403);
+  });
+
   it('scope 不足被拒（POST /uploads 需要 files:write）→ 403', async () => {
     await request(app.getHttpServer()).post('/api/v1/uploads')
       .set('Authorization', `Bearer ${apiJwt}`)
@@ -71,6 +88,11 @@ describe('API Token exchange (e2e)', () => {
       .set('Authorization', `Bearer ${adminJwt}`).expect(200);
     await request(app.getHttpServer()).get('/api/v1/files')
       .set('Authorization', `Bearer ${apiJwt}`).expect(401);
+
+    const auditResult = await request(app.getHttpServer()).get('/api/v1/audit-logs?action=api_token.revoked')
+      .set('Authorization', `Bearer ${adminJwt}`).expect(200);
+    expect(auditResult.body.data.items).toHaveLength(1);
+    expect(auditResult.body.data.items[0]).toMatchObject({ action: 'api_token.revoked', resource_id: tokenId });
   });
 
   it('吊销后的明文、格式错误的明文 exchange → 401', async () => {

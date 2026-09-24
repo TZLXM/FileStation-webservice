@@ -12,12 +12,14 @@ import { UploadPart } from './entities/upload-part.entity';
 import { Folder } from '../folders/entities/folder.entity';
 import { SecurityModule } from '../security/security.module';
 import { SettingsModule } from '../settings/settings.module';
+import { AuditModule } from '../audit/audit.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([File, UploadSession, UploadPart, Folder]),
     SecurityModule,
     SettingsModule,
+    AuditModule,
   ],
   controllers: [FilesController, UploadsController],
   providers: [FilesService, UploadsService, StorageService, FileLifecycleService],

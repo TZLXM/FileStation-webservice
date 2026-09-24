@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Delete, Param, Query, Body, UseGuards, Res, Headers, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Param, Query, Body, UseGuards, Res, Headers, Req, BadRequestException } from '@nestjs/common';
 import { FilesService } from './files.service';
 import { JwtAuthGuard } from '../security/guards/jwt-auth.guard';
 import { UpdateFileDto } from './dto/update-file.dto';
@@ -9,13 +9,14 @@ import { parseRangeHeader } from '../common/http/range-parser';
 import { RangeNotSatisfiableException } from '../common/http/range-not-satisfiable.exception';
 import { writeDownloadHeaders } from '../common/http/download-response';
 import { ApiResponse, PaginatedResponse, FileMetadata } from '@filestation/shared';
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { RequireScopes } from '../security/decorators/require-scopes.decorator';
+import { AuditAction, AuditService } from '../audit/audit.service';
 
 @Controller('files')
 @UseGuards(JwtAuthGuard)
 export class FilesController {
-  constructor(private filesService: FilesService) {}
+  constructor(private filesService: FilesService, private auditService: AuditService) {}
 
   @Get()
   @RequireScopes('files:read')
@@ -109,8 +110,16 @@ export class FilesController {
 
   @Delete(':id')
   @RequireScopes('files:write')
-  async delete(@Param('id') id: string): Promise<ApiResponse<null>> {
+  async delete(@Param('id') id: string, @Req() req: Request): Promise<ApiResponse<null>> {
     await this.filesService.delete(id);
+    await this.auditService.record({
+      accountId: (req as any).user.id,
+      action: AuditAction.FILE_DELETED,
+      resourceType: 'file',
+      resourceId: id,
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
     return { code: 'OK', message: 'File deletion queued', data: null, request_id: crypto.randomUUID() };
   }
 

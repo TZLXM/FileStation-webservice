@@ -11,12 +11,14 @@ import { DownloadTicket } from './entities/download-ticket.entity';
 import { File } from '../files/entities/file.entity';
 import { SecurityModule } from '../security/security.module';
 import { FilesModule } from '../files/files.module';
+import { AuditModule } from '../audit/audit.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Share, DownloadSession, DownloadTicket, File]),
     SecurityModule,
     FilesModule, // StorageService
+    AuditModule,
   ],
   controllers: [SharesController, DownloadsController],
   providers: [SharesService, DownloadService, DownloadTicketService],

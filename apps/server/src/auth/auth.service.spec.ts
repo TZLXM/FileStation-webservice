@@ -12,6 +12,7 @@ import { DataSource } from 'typeorm';
 import { UnauthorizedException, BadRequestException } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { ApiTokensService } from '../api-tokens/api-tokens.service';
+import { AuditService } from '../audit/audit.service';
 
 describe('AuthService', () => {
   let service: AuthService;
@@ -30,6 +31,7 @@ describe('AuthService', () => {
     validatePlaintext: jest.fn(),
     touchLastUsed: jest.fn(),
   };
+  const mockAuditService = { record: jest.fn().mockResolvedValue(undefined) };
 
   const mockSessionsRepository = {
     create: jest.fn(),
@@ -94,6 +96,7 @@ describe('AuthService', () => {
         { provide: DataSource, useValue: mockDataSource },
         { provide: SettingsService, useValue: mockSettingsService }, // v1.7 高优 10
         { provide: ApiTokensService, useValue: mockApiTokensService },
+        { provide: AuditService, useValue: mockAuditService },
       ],
     }).compile();
 
@@ -220,6 +223,129 @@ describe('AuthService', () => {
       const result = await service.refreshToken('refresh-token');
       expect(result.username).toBe('admin');
       expect(result.accessToken).toBe('new-access');
+    });
+  });
+
+  describe('login audit events', () => {
+    it('records a successful login without recording the password', async () => {
+      const password = 'correct-password';
+      mockSettingsService.getSecuritySettings.mockResolvedValue({
+        totp_required: false,
+        max_login_attempts: 5,
+        lockout_minutes: 15,
+      });
+      mockSystemMetaRepository.findOne.mockResolvedValue(null);
+      mockSystemMetaRepository.delete.mockResolvedValue(undefined);
+      mockAccountsService.findByUsername.mockResolvedValue({ id: 'account-1', username: 'admin' });
+      mockAccountsService.validatePassword.mockResolvedValue(true);
+      mockSessionsRepository.create.mockImplementation((session) => session);
+      mockSessionsRepository.save.mockResolvedValue(undefined);
+      mockJwtService.sign.mockReturnValue('admin-access-token');
+
+      const result = await service.login({ username: 'admin', password }, '198.51.100.45');
+
+      expect(result).toEqual({ accessToken: 'admin-access-token', refreshToken: expect.any(String), expiresIn: 86400 });
+      expect(mockAuditService.record).toHaveBeenCalledWith({
+        accountId: 'account-1',
+        action: 'auth.login',
+        ip: '198.51.100.45',
+      });
+      expect(JSON.stringify(mockAuditService.record.mock.calls[0][0])).not.toContain(password);
+    });
+
+    it('records invalid credentials while preserving the unauthorized outcome', async () => {
+      const password = 'incorrect-password';
+      mockSettingsService.getSecuritySettings.mockResolvedValue({
+        totp_required: false,
+        max_login_attempts: 5,
+        lockout_minutes: 15,
+      });
+      mockSystemMetaRepository.findOne.mockResolvedValue(null);
+      mockSystemMetaRepository.save.mockResolvedValue(undefined);
+      mockAccountsService.findByUsername.mockResolvedValue({ id: 'account-1', username: 'admin' });
+      mockAccountsService.validatePassword.mockResolvedValue(false);
+
+      await expect(service.login({ username: 'admin', password }, '198.51.100.45')).rejects.toThrow(UnauthorizedException);
+
+      expect(mockAuditService.record).toHaveBeenCalledWith({
+        accountId: null,
+        action: 'auth.login_failed',
+        details: { username: 'admin' },
+        ip: '198.51.100.45',
+      });
+      expect(JSON.stringify(mockAuditService.record.mock.calls[0][0])).not.toContain(password);
+      expect(mockSessionsRepository.save).not.toHaveBeenCalled();
+    });
+
+    it('records a login rejected by the IP throttle', async () => {
+      mockSettingsService.getSecuritySettings.mockResolvedValue({
+        totp_required: false,
+        max_login_attempts: 5,
+        lockout_minutes: 15,
+      });
+      mockSystemMetaRepository.findOne.mockResolvedValue({
+        key: 'login_ip_198.51.100.45',
+        value: JSON.stringify({ failed_count: 10, delay_until: Date.now() + 60_000 }),
+      });
+
+      await expect(service.login({ username: 'admin', password: 'incorrect-password' }, '198.51.100.45'))
+        .rejects.toThrow(UnauthorizedException);
+
+      expect(mockAuditService.record).toHaveBeenCalledWith({
+        accountId: null,
+        action: 'auth.login_failed',
+        details: { username: 'admin' },
+        ip: '198.51.100.45',
+      });
+      expect(mockAccountsService.findByUsername).not.toHaveBeenCalled();
+    });
+
+    it('records a login rejected because the account is locked', async () => {
+      mockSettingsService.getSecuritySettings.mockResolvedValue({
+        totp_required: false,
+        max_login_attempts: 5,
+        lockout_minutes: 15,
+      });
+      mockSystemMetaRepository.findOne.mockResolvedValue({
+        key: 'login_lockout_admin',
+        value: JSON.stringify({ failed_count: 0, locked_until: Date.now() + 60_000 }),
+      });
+
+      await expect(service.login({ username: 'admin', password: 'incorrect-password' }))
+        .rejects.toThrow(UnauthorizedException);
+
+      expect(mockAuditService.record).toHaveBeenCalledWith({
+        accountId: null,
+        action: 'auth.login_failed',
+        details: { username: 'admin' },
+      });
+      expect(mockAccountsService.findByUsername).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('API token exchange audit event', () => {
+    it('records the token id on a successful exchange without recording the plaintext token', async () => {
+      const plaintextToken = 'fs_secret_api_token';
+      mockApiTokensService.validatePlaintext.mockResolvedValue({
+        id: 'token-1',
+        accountId: 'account-1',
+        scopes: '["files:read"]',
+      });
+      mockAccountsService.findById.mockResolvedValue({ id: 'account-1', username: 'admin' });
+      mockJwtService.sign.mockReturnValue('short-lived-jwt');
+      mockApiTokensService.touchLastUsed.mockResolvedValue(undefined);
+
+      const result = await service.exchangeApiToken(plaintextToken, '203.0.113.9');
+
+      expect(result).toEqual({ accessToken: 'short-lived-jwt', expiresIn: 3600 });
+      expect(mockAuditService.record).toHaveBeenCalledWith({
+        accountId: 'account-1',
+        action: 'auth.api_token_exchanged',
+        resourceType: 'api_token',
+        resourceId: 'token-1',
+        ip: '203.0.113.9',
+      });
+      expect(JSON.stringify(mockAuditService.record.mock.calls[0][0])).not.toContain(plaintextToken);
     });
   });
 });

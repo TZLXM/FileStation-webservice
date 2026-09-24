@@ -108,6 +108,21 @@ describe('UploadsService', () => {
     });
   });
 
+  describe('completeUpload audit metadata', () => {
+    it('returns filename and size internally for completion auditing', async () => {
+      jest.spyOn(service as any, 'validateUploadToken').mockResolvedValue({
+        status: 'completed',
+        finalFileId: 'file-1',
+        filename: 'report.pdf',
+        expectedSize: 4096,
+      });
+
+      const result = await service.completeUpload('upload-1', 'upload-token');
+
+      expect(result).toEqual({ file_id: 'file-1', filename: 'report.pdf', size: 4096 });
+    });
+  });
+
   // owner 抢占并发与 completeUpload 恢复契约：以 fake queryRunner（内存 Map 模拟 SQL 语义 + writeLock 互斥）
   // 在 Task 13 E2E 中用真实 SQLite 验证（此处占位结构，防误标 Expected: PASS）。
   describe('uploadPart owner 抢占并发（结构占位，E2E 覆盖）', () => {

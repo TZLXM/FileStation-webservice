@@ -15,6 +15,7 @@ import { TokenPair, JwtPayload } from '@filestation/shared';
 import { LoginDto } from './dto/login.dto';
 import { beginImmediate, safeRollback } from '../common/database/tx.helper';
 import { ApiTokensService } from '../api-tokens/api-tokens.service';
+import { AuditAction, AuditService } from '../audit/audit.service';
 
 export interface RefreshResult extends TokenPair {
   username: string;
@@ -37,6 +38,7 @@ export class AuthService {
     private systemMetaRepository: Repository<SystemMeta>,
     private dataSource: DataSource,
     private apiTokensService: ApiTokensService,
+    private auditService: AuditService,
   ) {}
 
   /** API Token 换短期 JWT（1h）；scopes 直接取自数据库记录，不信任调用方 */
@@ -57,6 +59,13 @@ export class AuthService {
     };
     const accessToken = this.jwtService.sign(payload, { expiresIn: 3600 });
     await this.apiTokensService.touchLastUsed(token.id, clientIp ?? 'unknown');
+    await this.auditService.record({
+      accountId: account.id,
+      action: AuditAction.AUTH_API_TOKEN_EXCHANGED,
+      resourceType: 'api_token',
+      resourceId: token.id,
+      ip: clientIp,
+    });
     return { accessToken, expiresIn: 3600 };
   }
 
@@ -161,13 +170,21 @@ export class AuthService {
 
     // 1) IP 维度检查（独立于账户）
     if (clientIp) {
-      await this.checkIpThrottle(clientIp, now);
+      try {
+        await this.checkIpThrottle(clientIp, now);
+      } catch (error) {
+        if (error instanceof UnauthorizedException) {
+          await this.recordLoginFailureAudit(loginDto.username, clientIp);
+        }
+        throw error;
+      }
     }
 
     // 2) 账户维度锁定检查（固定时长，首次即配置值，不翻倍）
     const accountState = await this.getAccountLockout(loginDto.username);
     if (accountState.locked_until && accountState.locked_until > now) {
       const retryAfterSec = Math.ceil((accountState.locked_until - now) / 1000);
+      await this.recordLoginFailureAudit(loginDto.username, clientIp);
       throw new UnauthorizedException({ code: 'ACCOUNT_LOCKED', message: `Account locked, retry after ${retryAfterSec} seconds`, retry_after: retryAfterSec });
     }
 
@@ -181,6 +198,7 @@ export class AuthService {
       if (clientIp) {
         await this.recordIpFailure(clientIp, now);
       }
+      await this.recordLoginFailureAudit(loginDto.username, clientIp);
       throw new UnauthorizedException('Invalid credentials');
     }
 
@@ -189,7 +207,9 @@ export class AuthService {
       await this.clearIpFailures(clientIp);
     }
 
-    return this.generateTokens(account.id, account.username);
+    const tokens = await this.generateTokens(account.id, account.username);
+    await this.auditService.record({ accountId: account.id, action: AuditAction.AUTH_LOGIN, ip: clientIp });
+    return tokens;
   }
 
   async refreshToken(refreshToken: string): Promise<RefreshResult> {
@@ -295,6 +315,15 @@ export class AuthService {
 
   private async clearIpFailures(ip: string): Promise<void> {
     await this.systemMetaRepository.delete({ key: `login_ip_${ip}` });
+  }
+
+  private async recordLoginFailureAudit(username: string, ip?: string): Promise<void> {
+    await this.auditService.record({
+      accountId: null,
+      action: AuditAction.AUTH_LOGIN_FAILED,
+      details: { username },
+      ip,
+    });
   }
 
   private async generateTokensInTransaction(queryRunner: any, accountId: string, username: string): Promise<TokenPair> {

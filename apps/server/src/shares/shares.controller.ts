@@ -10,6 +10,7 @@ import { ShareType, ShareProtection } from './entities/share.entity';
 import { ApiResponse, ShareInfo } from '@filestation/shared';
 import { writeDownloadHeaders } from '../common/http/download-response';
 import { RequireScopes } from '../security/decorators/require-scopes.decorator';
+import { AuditAction, AuditService } from '../audit/audit.service';
 
 @Controller('shares')
 export class SharesController {
@@ -17,6 +18,7 @@ export class SharesController {
     private sharesService: SharesService,
     private downloadService: DownloadService,
     private downloadTicketService: DownloadTicketService, // v1.6 修正：v1.5 调用它但未注入（编译错误）
+    private auditService: AuditService,
   ) {}
 
   @Post()
@@ -32,6 +34,15 @@ export class SharesController {
       body.expires_at ? new Date(body.expires_at) : null,
       (req as any).user.id,
     );
+    await this.auditService.record({
+      accountId: (req as any).user.id,
+      action: AuditAction.SHARE_CREATED,
+      resourceType: 'share',
+      resourceId: share.id,
+      details: { protection: body.protection, max_downloads: body.max_downloads ?? null },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
     return { code: 'OK', message: 'Share created', data: { share_id: share.id, share_url: `/s/${share.id}` }, request_id: crypto.randomUUID() };
   }
 
@@ -111,8 +122,16 @@ export class SharesController {
   @Delete(':id')
   @UseGuards(JwtAuthGuard)
   @RequireScopes('shares:write')
-  async revoke(@Param('id') id: string): Promise<ApiResponse<null>> {
+  async revoke(@Param('id') id: string, @Req() req: Request): Promise<ApiResponse<null>> {
     await this.sharesService.revokeShare(id);
+    await this.auditService.record({
+      accountId: (req as any).user.id,
+      action: AuditAction.SHARE_REVOKED,
+      resourceType: 'share',
+      resourceId: id,
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
     return { code: 'OK', message: 'Share revoked', data: null, request_id: crypto.randomUUID() };
   }
 

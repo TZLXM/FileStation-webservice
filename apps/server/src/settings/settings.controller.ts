@@ -5,6 +5,7 @@ import { AdminOnlyGuard } from '../security/guards/admin-only.guard';
 import { UpdateSettingsDto } from './dto/update-settings.dto';
 import { ApiResponse } from '@filestation/shared';
 import { Request } from 'express';
+import { AuditAction, AuditService } from '../audit/audit.service';
 
 /** 剔除 undefined 字段（ES2022 useDefineForClassFields 下 DTO 类字段会成为值为 undefined 的自有属性，
  *  直接 spread 会用 undefined 覆盖已有值 —— 必须先清洗再合并） */
@@ -14,7 +15,7 @@ function omitUndefined<T extends object>(o: T): Partial<T> {
 
 @Controller('settings')
 export class SettingsController {
-  constructor(private settingsService: SettingsService) {}
+  constructor(private settingsService: SettingsService, private auditService: AuditService) {}
 
   @Get()
   @UseGuards(JwtAuthGuard, AdminOnlyGuard)
@@ -58,6 +59,17 @@ export class SettingsController {
       const { path: _actualPath, ...rest } = current;
       await this.settingsService.set('storage', { ...rest, ...omitUndefined(body.storage) }, userId);
     }
+
+    const sections = Object.entries(body)
+      .filter(([, value]) => value !== undefined)
+      .map(([section]) => section);
+    await this.auditService.record({
+      accountId: userId,
+      action: AuditAction.SETTINGS_UPDATED,
+      details: { sections },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
 
     return { code: 'OK', message: 'Settings updated', data: null, request_id: crypto.randomUUID() };
   }
