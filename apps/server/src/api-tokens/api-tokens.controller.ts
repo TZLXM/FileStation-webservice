@@ -2,11 +2,12 @@ import { Body, Controller, Delete, Get, Param, Post, Req, UseGuards } from '@nes
 import { ApiResponse, ApiTokenInfo, ApiTokenScope, CreatedApiToken } from '@filestation/shared';
 import { Request } from 'express';
 import { JwtAuthGuard } from '../security/guards/jwt-auth.guard';
+import { AdminOnlyGuard } from '../security/guards/admin-only.guard';
 import { CreateApiTokenDto } from './dto/create-api-token.dto';
 import { ApiTokensService } from './api-tokens.service';
 
 @Controller('api-tokens')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, AdminOnlyGuard)
 export class ApiTokensController {
   constructor(private apiTokensService: ApiTokensService) {}
 
