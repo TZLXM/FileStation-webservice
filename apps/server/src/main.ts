@@ -6,9 +6,9 @@ import { AuthService } from './auth/auth.service';
 import { StorageService } from './files/storage.service';
 import { RangeNotSatisfiableFilter } from './common/http/range-not-satisfiable.filter';
 import cookieParser from 'cookie-parser';
-import { json, NextFunction, Request, Response } from 'express';
 import * as fs from 'fs/promises';
 import { dirname } from 'path';
+import { installNonMcpBodyParsers } from './common/http/body-parsers';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
@@ -44,15 +44,12 @@ async function bootstrap() {
   logger.log(`Directories ensured: storage=${storagePath}, temp=${tempPath}, db=${dirname(dbPath)}`);
 
   // ========== 阶段 2：创建应用（migrationsRun 在此触发） ==========
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { bodyParser: false });
   const configService = app.get(ConfigService);
 
-  // Keep MCP base64 chunks under a route-only 16MB limit. The named wrapper
-  // avoids Nest mistaking this middleware for its app-wide `jsonParser`.
-  const mcpJsonParser = json({ limit: '16mb' });
-  app.use('/api/v1/mcp', function routeMcpJsonParser(req: Request, res: Response, next: NextFunction) {
-    return mcpJsonParser(req, res, next);
-  });
+  // Ordinary routes retain the default 100KB parser limit. MCP is parsed only
+  // inside its controller, after its disabled/method/auth gates.
+  installNonMcpBodyParsers(app);
   app.use(cookieParser());
   app.setGlobalPrefix('api/v1'); // 唯一前缀来源
   app.useGlobalPipes(

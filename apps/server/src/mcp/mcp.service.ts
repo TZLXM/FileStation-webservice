@@ -10,6 +10,56 @@ import { SettingsService } from '../settings/settings.service';
 import { AuditService } from '../audit/audit.service';
 import { ShareProtection, ShareType } from '../shares/entities/share.entity';
 
+const MAX_MCP_PART_BYTES = 8 * 1024 * 1024;
+const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+const BASE64_VALUES = new Int8Array(128).fill(-1);
+for (let index = 0; index < BASE64_ALPHABET.length; index++) {
+  BASE64_VALUES[BASE64_ALPHABET.charCodeAt(index)] = index;
+}
+
+function decodeMcpBase64(value: string): Buffer {
+  if (value.length % 4 !== 0) {
+    throw new Error('INVALID_BASE64: use canonical standard Base64 with padding');
+  }
+
+  const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+  const dataEnd = value.length - padding;
+  if (padding > 0 && (value.indexOf('=') !== dataEnd || value.slice(dataEnd) !== '='.repeat(padding))) {
+    throw new Error('INVALID_BASE64: padding must appear only at the end');
+  }
+  if ((padding === 2 && dataEnd % 4 !== 2) || (padding === 1 && dataEnd % 4 !== 3)) {
+    throw new Error('INVALID_BASE64: invalid padding length');
+  }
+
+  const byteLength = (value.length / 4) * 3 - padding;
+  if (byteLength > MAX_MCP_PART_BYTES) {
+    throw new Error('MCP_CHUNK_TOO_LARGE: decoded part must be at most 8 MiB');
+  }
+
+  for (let index = 0; index < dataEnd; index++) {
+    const code = value.charCodeAt(index);
+    if (code >= BASE64_VALUES.length || BASE64_VALUES[code] < 0) {
+      throw new Error('INVALID_BASE64: contains a non-Base64 character');
+    }
+  }
+
+  if (padding > 0) {
+    const finalSextet = BASE64_VALUES[value.charCodeAt(dataEnd - 1)];
+    const unusedBits = padding === 2 ? 4 : 2;
+    if ((finalSextet & ((1 << unusedBits) - 1)) !== 0) {
+      throw new Error('INVALID_BASE64: non-zero padding bits are not canonical');
+    }
+  }
+
+  for (let index = dataEnd; index < value.length; index++) {
+    if (value.charCodeAt(index) !== '='.charCodeAt(0)) {
+      throw new Error('INVALID_BASE64: invalid padding character');
+    }
+  }
+
+  return Buffer.from(value, 'base64');
+}
+
 export interface McpPrincipal {
   accountId: string;
   tokenId: string;
@@ -149,20 +199,22 @@ export class McpService {
           upload_id: upload.upload_id,
           upload_token: upload.upload_token,
           chunk_size: upload.chunk_size,
-          total_chunks: Math.max(1, Math.ceil(size / upload.chunk_size)),
-          next: '对 part_number ∈ [0, total_chunks) 逐块调 upload_part（content_base64 的原始字节 ≤ chunk_size），全部成功后调 complete_upload',
+          total_chunks: Math.ceil(size / upload.chunk_size),
+          next: size === 0
+            ? '空文件无需调用 upload_part；直接调用 complete_upload'
+            : '对 part_number ∈ [0, total_chunks) 逐块调 upload_part（content_base64 使用标准带填充 Base64，解码后的原始字节 ≤ chunk_size），全部成功后调 complete_upload',
         });
       },
     );
 
-    registerTool('upload_part', '上传一个分块（content_base64 解码后的字节数须符合 upload_init 返回的 chunk_size，最大 8MiB）', {
+    registerTool('upload_part', '上传一个分块（content_base64 使用标准带填充 Base64，解码后的字节数须符合 upload_init 返回的 chunk_size，最大 8MiB）', {
       upload_id: z.string(),
       upload_token: z.string(),
       part_number: z.number().int().min(0),
       content_base64: z.string(),
     }, async ({ upload_id, upload_token, part_number, content_base64 }) => {
       this.assertScope(principal, 'files:write');
-      const data = Buffer.from(content_base64, 'base64');
+      const data = decodeMcpBase64(content_base64);
       const checksum = createHash('sha256').update(data).digest('hex');
       await this.uploadsService.uploadPart(upload_id, part_number, data, checksum, upload_token);
       await audit('upload_part', { upload_id, part_number, size: data.length });
