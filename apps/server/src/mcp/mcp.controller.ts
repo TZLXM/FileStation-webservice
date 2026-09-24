@@ -20,6 +20,7 @@ import { SettingsService } from '../settings/settings.service';
 import { McpPrincipal, McpService } from './mcp.service';
 
 const mcpJsonParser = json({ limit: '16mb' });
+const REQUEST_DRAIN_GRACE_MS = 500;
 
 function parseTokenScopes(scopesJson: string): ApiTokenScope[] | null {
   let decoded: unknown;
@@ -51,20 +52,32 @@ function parseMcpJsonBody(req: Request, res: Response): Promise<unknown> {
   });
 }
 
-function discardRequestBody(req: Request): Promise<void> {
+function discardRequestBody(req: Request, res: Response): Promise<void> {
   if (req.readableEnded || req.destroyed) return Promise.resolve();
   return new Promise((resolve) => {
-    const finish = () => {
-      req.removeListener('end', finish);
-      req.removeListener('close', finish);
-      req.removeListener('error', finish);
+    let settled = false;
+    let deadline: NodeJS.Timeout | undefined;
+    const finish = (closeConnection: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (deadline) clearTimeout(deadline);
+      if (closeConnection) res.shouldKeepAlive = false;
+      req.removeListener('end', onEnd);
+      req.removeListener('close', onClose);
+      req.removeListener('aborted', onAbort);
+      req.removeListener('error', onAbort);
       resolve();
     };
-    req.once('end', finish);
-    req.once('close', finish);
-    req.once('error', finish);
+    const onEnd = () => finish(false);
+    const onClose = () => finish(!req.complete);
+    const onAbort = () => finish(true);
+    req.once('end', onEnd);
+    req.once('close', onClose);
+    req.once('aborted', onAbort);
+    req.once('error', onAbort);
+    deadline = setTimeout(() => finish(true), REQUEST_DRAIN_GRACE_MS);
     req.resume();
-    if (req.readableEnded || req.destroyed) finish();
+    if (req.readableEnded || req.destroyed) finish(req.destroyed && !req.complete);
   });
 }
 
@@ -81,7 +94,7 @@ export class McpController {
   async handle(@Req() req: Request, @Res() res: Response): Promise<void> {
     const agent = await this.settingsService.getAgentSettings();
     if (!agent.mcp_enabled) {
-      await discardRequestBody(req);
+      await discardRequestBody(req, res);
       throw new NotFoundException('Not found');
     }
 
@@ -90,18 +103,18 @@ export class McpController {
       ? /^Bearer +(\S+)$/i.exec(authorization)
       : null;
     if (!bearerMatch) {
-      await discardRequestBody(req);
+      await discardRequestBody(req, res);
       throw new UnauthorizedException('Missing API token');
     }
 
     const token = await this.apiTokensService.validatePlaintext(bearerMatch[1]);
     if (!token) {
-      await discardRequestBody(req);
+      await discardRequestBody(req, res);
       throw new UnauthorizedException('Invalid or expired API token');
     }
     const scopes = parseTokenScopes(token.scopes);
     if (!scopes) {
-      await discardRequestBody(req);
+      await discardRequestBody(req, res);
       throw new UnauthorizedException('Invalid API token scopes');
     }
 
@@ -132,14 +145,20 @@ export class McpController {
   }
 
   @Get()
-  async methodNotAllowed(@Req() req: Request): Promise<void> {
-    await discardRequestBody(req);
+  async methodNotAllowed(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<void> {
+    await discardRequestBody(req, res);
     throw new NotFoundException('Not found');
   }
 
   @Delete()
-  async methodNotAllowedDelete(@Req() req: Request): Promise<void> {
-    await discardRequestBody(req);
+  async methodNotAllowedDelete(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<void> {
+    await discardRequestBody(req, res);
     throw new NotFoundException('Not found');
   }
 }

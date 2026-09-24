@@ -1,6 +1,7 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
+import * as http from 'http';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
@@ -64,6 +65,7 @@ describe('MCP service (e2e)', () => {
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }));
     app.useGlobalFilters(new RangeNotSatisfiableFilter());
     await app.init();
+    await app.listen(0);
 
     adminToken = await initAndLogin(app);
     const readTokenResponse = await request(app.getHttpServer()).post('/api/v1/api-tokens')
@@ -100,6 +102,38 @@ describe('MCP service (e2e)', () => {
     const oversizedJson = `{"body":"${'x'.repeat(16 * 1024 * 1024)}"}`;
     await rawJson('post', oversizedJson).expect(404);
   });
+
+  it('returns disabled 404 promptly while a chunked MCP body remains open', async () => {
+    const address = app.getHttpServer().address();
+    if (!address || typeof address === 'string') throw new Error('Expected an active local HTTP server');
+    const client = http.request({
+      host: address.address.includes(':') ? '::1' : '127.0.0.1',
+      port: address.port,
+      path: '/api/v1/mcp',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Transfer-Encoding': 'chunked' },
+    });
+    const responseStatus = new Promise<number | null>((resolve) => {
+      client.once('response', (response) => {
+        response.resume();
+        resolve(response.statusCode ?? null);
+      });
+      client.once('error', () => resolve(null));
+    });
+    let deadline: NodeJS.Timeout | undefined;
+    const timedResponse = new Promise<null>((resolve) => {
+      deadline = setTimeout(() => resolve(null), 2500);
+    });
+
+    try {
+      client.flushHeaders();
+      client.write('{"partial":');
+      expect(await Promise.race([responseStatus, timedResponse])).toBe(404);
+    } finally {
+      if (deadline) clearTimeout(deadline);
+      client.destroy();
+    }
+  }, 10_000);
 
   it.each(['get', 'delete'] as const)(
     'returns 404 for %s before parsing a malformed MCP body',
@@ -230,13 +264,27 @@ describe('MCP service (e2e)', () => {
   });
 
   it('reports zero-byte uploads as zero parts with a direct-complete instruction', async () => {
-    const response = await callTool(writeToken, 'upload_init', {
-      filename: 'empty.bin', size: 0,
-    }).expect(200);
-    const upload = JSON.parse(decodeMcpResponse(response).result.content[0].text);
-    expect(upload.total_chunks).toBe(0);
-    expect(upload.next).toContain('直接调用 complete_upload');
-    expect(upload.next).not.toContain('upload_part 0');
+    const uploadPart = jest.spyOn(app.get(UploadsService), 'uploadPart');
+    try {
+      const response = await callTool(writeToken, 'upload_init', {
+        filename: 'empty.bin', size: 0,
+      }).expect(200);
+      const upload = JSON.parse(decodeMcpResponse(response).result.content[0].text);
+      expect(upload.total_chunks).toBe(0);
+      expect(upload.next).toContain('直接调用 complete_upload');
+      expect(upload.next).not.toContain('upload_part 0');
+
+      const completeResponse = await callTool(writeToken, 'complete_upload', {
+        upload_id: upload.upload_id,
+        upload_token: upload.upload_token,
+      }).expect(200);
+      const completeResult = JSON.parse(decodeMcpResponse(completeResponse).result.content[0].text);
+      expect(typeof completeResult.file_id).toBe('string');
+      expect(completeResult.file_id.length).toBeGreaterThan(0);
+      expect(uploadPart).not.toHaveBeenCalled();
+    } finally {
+      uploadPart.mockRestore();
+    }
   });
 
   it('rejects decoded upload parts larger than eight MiB before UploadsService and audit', async () => {
