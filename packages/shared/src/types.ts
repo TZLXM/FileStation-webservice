@@ -65,20 +65,12 @@ export interface TokenPair {
   expiresIn: number;
 }
 
-// API 登录响应（不含 refresh_token，在 HttpOnly Cookie 中）
-export interface LoginResponse {
-  requires_second_factor: boolean;
-  login_challenge?: string;
-  available_methods?: string[];
-  access_token?: string;
-  expires_in?: number;
-}
-
 export interface JwtPayload {
   sub: string;
   username: string;
   principal_type: 'admin' | 'api_token';
   scopes?: string[];
+  token_id?: string;      // 新增：api_token 主体必有（吊销检查用）
   iat: number;
   exp: number;
 }
@@ -106,4 +98,47 @@ export interface UploadStatus {
   received_size: number;
   total_parts: number;
   expected_size: number;
+}
+
+// ---- Phase 2: API Token ----
+export const API_TOKEN_SCOPES = [
+  'files:read', 'files:write',
+  'shares:read', 'shares:write',
+  'folders:read', 'folders:write',
+] as const;
+export type ApiTokenScope = (typeof API_TOKEN_SCOPES)[number];
+
+export interface ApiTokenInfo {
+  id: string;
+  name: string;
+  token_prefix: string;
+  scopes: ApiTokenScope[];
+  expires_at: string | null;
+  created_at: string;
+  last_used_at: string | null;
+  last_used_ip: string | null;
+  revoked_at: string | null;
+}
+
+/** 仅签发时返回一次 */
+export interface CreatedApiToken extends ApiTokenInfo {
+  token: string;
+}
+
+// ---- Phase 2: 登录两步 ----
+export type LoginResponseData =
+  | { access_token: string; expires_in: number }
+  | { requires_second_factor: true; login_challenge: string; available_methods: string[] };
+
+// ---- Phase 2: 审计日志 ----
+export interface AuditLogEntry {
+  id: string;
+  account_id: string | null;
+  action: string;
+  resource_type: string | null;
+  resource_id: string | null;
+  details: Record<string, unknown> | null;
+  ip_address: string | null;
+  user_agent: string | null;
+  created_at: string;
 }
