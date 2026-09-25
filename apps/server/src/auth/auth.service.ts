@@ -21,6 +21,7 @@ import { ApiTokensService } from '../api-tokens/api-tokens.service';
 import { AuditAction, AuditService } from '../audit/audit.service';
 import { TotpService } from './totp.service';
 import { RecoveryService, type RecoverySessionMaterial } from './recovery.service';
+import { reserveRecoveryIpAttempt as reservePersistentRecoveryIpAttempt, settleRecoveryIpFailure } from './recovery-ip-reservations';
 
 export interface RefreshResult extends TokenPair {
   username: string;
@@ -232,22 +233,33 @@ export class AuthService {
   /** Recovery login uses the shared IP throttle here and account-specific locking in RecoveryService. */
   async recoveryVerify(username: string, code: string, clientIp?: string): Promise<TokenPair & { username: string }> {
     const now = Date.now();
-    if (clientIp) await this.reserveRecoveryIpAttempt(clientIp, now);
+    const ipReservationId = clientIp ? await this.reserveRecoveryIpAttempt(clientIp, now) : undefined;
+    try {
+      const account = await this.accountsService.findByUsername(username);
+      const prepared = account ? this.prepareRecoveryTokens(account.id, account.username) : null;
+      const { accountId } = await this.recoveryService.verify(username, code, clientIp, prepared?.session, ipReservationId);
+      if (!account || account.id !== accountId || !prepared) {
+        throw new UnauthorizedException('Account not found');
+      }
 
-    const account = await this.accountsService.findByUsername(username);
-    const prepared = account ? this.prepareRecoveryTokens(account.id, account.username) : null;
-    const { accountId } = await this.recoveryService.verify(username, code, clientIp, prepared?.session);
-    if (!account || account.id !== accountId || !prepared) {
-      throw new UnauthorizedException('Account not found');
+      await this.auditService.record({
+        accountId: account.id,
+        action: AuditAction.AUTH_LOGIN,
+        details: { second_factor: 'recovery' },
+        ip: clientIp,
+      });
+      return { ...prepared.tokens, username: account.username };
+    } catch (error) {
+      if (clientIp && ipReservationId) {
+        try {
+          await this.sqliteTransactions.run((connection) =>
+            settleRecoveryIpFailure(connection, clientIp, ipReservationId, Date.now()));
+        } catch {
+          // The durable reservation is reclaimed as a failure when its lease expires.
+        }
+      }
+      throw error;
     }
-
-    await this.auditService.record({
-      accountId: account.id,
-      action: AuditAction.AUTH_LOGIN,
-      details: { second_factor: 'recovery' },
-      ip: clientIp,
-    });
-    return { ...prepared.tokens, username: account.username };
   }
 
   async verifyTotpLogin(
@@ -426,44 +438,18 @@ export class AuthService {
   }
 
   /** Reserve one shared-IP recovery attempt atomically before account lookup or Argon2 work. */
-  private async reserveRecoveryIpAttempt(ip: string, now: number): Promise<void> {
-    const key = `login_ip_${ip}`;
-    await this.sqliteTransactions.run(async (connection) => {
-      const meta = await connection.get<{ value: string }>('SELECT value FROM system_meta WHERE key = ?', [key]);
-      let state = { failed_count: 0, delay_until: null as number | null };
-      if (meta) {
-        try {
-          const parsed = JSON.parse(meta.value) as Partial<typeof state>;
-          state = {
-            failed_count: Number.isInteger(parsed.failed_count) && (parsed.failed_count ?? -1) >= 0
-              ? parsed.failed_count!
-              : 0,
-            delay_until: typeof parsed.delay_until === 'number' ? parsed.delay_until : null,
-          };
-        } catch {
-          // Reset malformed historical state while reserving this request.
-        }
-      }
-
-      if (state.delay_until && state.delay_until > now) {
-        const retryAfterSec = Math.ceil((state.delay_until - now) / 1000);
-        throw new UnauthorizedException({
-          code: 'IP_THROTTLED',
-          message: `Too many attempts from this IP, retry after ${retryAfterSec} seconds`,
-          retry_after: retryAfterSec,
-        });
-      }
-
-      state.failed_count += 1;
-      if (state.failed_count >= 10) {
-        const delaySec = Math.floor(state.failed_count / 10) * 30;
-        state.delay_until = now + delaySec * 1000;
-      }
-      await connection.run(
-        'INSERT INTO system_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-        [key, JSON.stringify(state)],
-      );
-    });
+  private async reserveRecoveryIpAttempt(ip: string, now: number): Promise<string> {
+    const reservationId = uuidv4();
+    const retryAfterSec = await this.sqliteTransactions.run((connection) =>
+      reservePersistentRecoveryIpAttempt(connection, ip, reservationId, now));
+    if (retryAfterSec !== null) {
+      throw new UnauthorizedException({
+        code: 'IP_THROTTLED',
+        message: `Too many attempts from this IP, retry after ${retryAfterSec} seconds`,
+        retry_after: retryAfterSec,
+      });
+    }
+    return reservationId;
   }
 
   /** Atomically admit a TOTP guess and reserve its account/IP failure slot. */

@@ -414,11 +414,12 @@ describe('AuthService', () => {
 
       expect(mockRecoveryService.verify).not.toHaveBeenCalled();
       expect(mockQueryRunner.query).toHaveBeenCalledWith('BEGIN IMMEDIATE');
-      expect(mockQueryRunner.query.mock.calls.some(([sql]) => sql === 'ROLLBACK')).toBe(true);
+      expect(mockQueryRunner.query.mock.calls.some(([sql]) => sql === 'COMMIT')).toBe(true);
+      expect(mockQueryRunner.query.mock.calls.some(([sql]) => sql === 'ROLLBACK')).toBe(false);
       expect(mockSystemMetaRepository.delete).not.toHaveBeenCalled();
     });
 
-    it('retains the atomically reserved IP slot when recovery verification rejects the code', async () => {
+    it('persists a request-specific IP reservation before recovery verification', async () => {
       const verify = getMethod('recoveryVerify');
       if (!verify) return;
       const ip = '198.51.100.46';
@@ -426,11 +427,14 @@ describe('AuthService', () => {
 
       await expect(verify('admin', 'recovery-test-input', ip)).rejects.toThrow(UnauthorizedException);
 
-      expect(mockRecoveryService.verify).toHaveBeenCalledWith('admin', 'recovery-test-input', ip, undefined);
-      const ipUpserts = mockQueryRunner.query.mock.calls.filter(([sql, params]) =>
-        typeof sql === 'string' && sql.startsWith('INSERT INTO system_meta') && params?.[0] === `login_ip_${ip}`,
+      expect(mockRecoveryService.verify).toHaveBeenCalledWith(
+        'admin', 'recovery-test-input', ip, undefined, expect.any(String),
       );
-      expect(ipUpserts).toHaveLength(1);
+      const reservationInserts = mockQueryRunner.query.mock.calls.filter(([sql, params]) =>
+        typeof sql === 'string' && sql.startsWith('INSERT INTO system_meta') &&
+        typeof params?.[0] === 'string' && params[0].startsWith('login_ip_reservation_'),
+      );
+      expect(reservationInserts).toHaveLength(1);
     });
 
     it('prepares the refresh hash and session material before recovery and returns its token only on success', async () => {
@@ -453,10 +457,13 @@ describe('AuthService', () => {
       expect(session.refreshTokenHash).toBe(createHash('sha256').update(result.refreshToken).digest('hex'));
       expect(session.expiresAt - session.createdAt).toBe(7 * 24 * 60 * 60 * 1000);
       expect(mockSessionsRepository.save).not.toHaveBeenCalled();
-      const ipUpserts = mockQueryRunner.query.mock.calls.filter(([sql, params]) =>
-        typeof sql === 'string' && sql.startsWith('INSERT INTO system_meta') && params?.[0] === `login_ip_${ip}`,
+      const reservationInserts = mockQueryRunner.query.mock.calls.filter(([sql, params]) =>
+        typeof sql === 'string' && sql.startsWith('INSERT INTO system_meta') &&
+        typeof params?.[0] === 'string' && params[0].startsWith('login_ip_reservation_'),
       );
-      expect(ipUpserts).toHaveLength(1);
+      expect(reservationInserts).toHaveLength(1);
+      expect(JSON.parse(reservationInserts[0][1][1] as string)).toMatchObject({ ip });
+      expect(JSON.parse(reservationInserts[0][1][1] as string).expires_at).toBeGreaterThan(Date.now());
     });
   });
 

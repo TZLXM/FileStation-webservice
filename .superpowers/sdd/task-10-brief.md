@@ -30,3 +30,10 @@
 - server 全单测、完整 server E2E、Web 必要回归、root typecheck/build、`git diff --check`。
 - lint 若仍因 ESLint 可执行文件缺失而不可运行，记录现状，不额外安装工具链。
 - 仅提交 Task 10 文件，使用中文 Conventional Commit 与实际实施模型 trailer。
+
+## 独立复审修复轮次 2 范围
+
+- 复现并修复同一 IP 的并发恢复验证中，成功请求清除完整 `login_ip_` 行导致其他在途失败计数丢失的问题。
+- 使用跨进程可见、带请求 ID 和过期时间的持久 reservation；成功仅结算自己的 reservation 并清历史失败，失败/异常/租约过期必须形成持久失败；过期请求不能迟到消费恢复码。
+- 保持普通密码登录与 TOTP 共用的 `login_ip_<ip>` 历史状态格式与清理方式兼容；不得用进程内 Map 作为并发正确性的依据。
+- 用真实 SQLite + gate 写 RED，新增跨独立 transaction queue 并发及异常/过期测试，重跑完整 server/web 验证与构建并更新 Task 10 report/progress/CURRENT-STATE；不开始 Task 11。

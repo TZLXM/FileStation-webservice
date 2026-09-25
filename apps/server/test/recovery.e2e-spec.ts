@@ -5,6 +5,7 @@ import request from 'supertest';
 import { createHash } from 'crypto';
 import { RecoveryCode } from '../src/auth/entities/recovery-code.entity';
 import { Session } from '../src/auth/entities/session.entity';
+import { AuthService } from '../src/auth/auth.service';
 import { RecoveryService } from '../src/auth/recovery.service';
 import { setupEnv, teardownEnv, createApp, initAndLogin, TestEnv } from './helpers';
 
@@ -171,6 +172,98 @@ describe('recovery-code authentication (e2e)', () => {
     expect(obsolete.status).toBe(401);
     expect(responseCode(obsolete)).toBe('INVALID_RECOVERY_CODE');
     expect(JSON.stringify(obsolete.body)).not.toContain(firstCodes[0]);
+  });
+
+  it('preserves a failed same-IP recovery reservation when a different account succeeds in between', async () => {
+    const recoveryService = app.get(RecoveryService);
+    const originalVerify = recoveryService.verify.bind(recoveryService);
+    const username = 'missing-interleaved';
+    let entered!: () => void;
+    let release!: () => void;
+    let clientIp: string | undefined;
+    let reservationId: string | undefined;
+    const atVerify = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const verifySpy = jest.spyOn(recoveryService, 'verify').mockImplementation(async (...args) => {
+      if (args[0] === username) {
+        clientIp = args[2];
+        reservationId = args[4];
+        entered();
+        await gate;
+      }
+      return originalVerify(...args);
+    });
+
+    const failedRequest = request(app.getHttpServer())
+      .post('/api/v1/auth/recovery/verify')
+      .send({ username, code: 'ABCD-EFGH-JK' })
+      .then((response) => response);
+    try {
+      await atVerify;
+      const success = await request(app.getHttpServer())
+        .post('/api/v1/auth/recovery/verify')
+        .send({ username: 'admin', code: latestCodes[8] })
+        .expect(200);
+      expect(hasRefreshCookie(success.headers['set-cookie'])).toBe(true);
+      expect(reservationId).toBeDefined();
+      expect(await app.get(DataSource).query('SELECT key FROM system_meta WHERE key = ?', [
+        `login_ip_reservation_${reservationId}`,
+      ])).toHaveLength(1);
+      expect(await app.get(DataSource).query('SELECT key FROM system_meta WHERE key = ?', [
+        `login_ip_${clientIp}`,
+      ])).toHaveLength(0);
+
+      release();
+      const failure = await failedRequest;
+      expect(failure.status).toBe(401);
+      expect(responseCode(failure)).toBe('INVALID_RECOVERY_CODE');
+
+      const row = (await app.get(DataSource).query(
+        'SELECT value FROM system_meta WHERE key = ?',
+        [`login_ip_${clientIp}`],
+      ))[0];
+      expect(row).toBeDefined();
+      expect(JSON.parse(row.value)).toMatchObject({ failed_count: 1, delay_until: null });
+      expect(await app.get(DataSource).query('SELECT key FROM system_meta WHERE key = ?', [
+        `login_ip_reservation_${reservationId}`,
+      ])).toHaveLength(0);
+    } finally {
+      release();
+      verifySpy.mockRestore();
+      if (clientIp) {
+        await app.get(DataSource).query('DELETE FROM system_meta WHERE key IN (?, ?)', [
+          `login_ip_${clientIp}`,
+          `recovery_fail_${username}`,
+        ]);
+      }
+      if (reservationId) {
+        await app.get(DataSource).query('DELETE FROM system_meta WHERE key = ?', [
+          `login_ip_reservation_${reservationId}`,
+        ]);
+      }
+      await failedRequest;
+    }
+  });
+
+  it('settles an IP reservation when verifier infrastructure throws', async () => {
+    const ip = '198.51.100.94';
+    const recoveryService = app.get(RecoveryService);
+    const verifySpy = jest.spyOn(recoveryService, 'verify').mockRejectedValue(new Error('controlled verifier failure'));
+    try {
+      await expect(app.get(AuthService).recoveryVerify('admin', 'not-a-real-code', ip))
+        .rejects.toThrow('controlled verifier failure');
+
+      const dataSource = app.get(DataSource);
+      const row = (await dataSource.query('SELECT value FROM system_meta WHERE key = ?', [`login_ip_${ip}`]))[0];
+      expect(JSON.parse(row.value)).toMatchObject({ failed_count: 1, delay_until: null });
+      const reservations = await dataSource.query(
+        "SELECT key FROM system_meta WHERE key GLOB 'login_ip_reservation_*'",
+      );
+      expect(reservations).toHaveLength(0);
+    } finally {
+      verifySpy.mockRestore();
+      await app.get(DataSource).query('DELETE FROM system_meta WHERE key = ?', [`login_ip_${ip}`]);
+    }
   });
 
   it('serializes different valid codes with their session replacement before returning tokens', async () => {

@@ -1,5 +1,6 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import * as argon2 from 'argon2';
 import { randomBytes } from 'crypto';
 import { IsNull, MoreThan, Repository } from 'typeorm';
@@ -7,6 +8,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { AccountsService } from '../accounts/accounts.service';
 import { AuditAction, AuditService } from '../audit/audit.service';
 import { SqliteImmediateTransactionService, SqliteTransactionConnection } from '../common/database/sqlite-immediate-transaction.service';
+import { hasActiveRecoveryIpReservation, settleExpiredRecoveryIpReservations, settleRecoveryIpSuccess } from './recovery-ip-reservations';
 import { RecoveryCode } from './entities/recovery-code.entity';
 import { TotpService } from './totp.service';
 
@@ -31,7 +33,8 @@ interface RecoveryFailureState {
 type VerificationCommit =
   | { kind: 'accepted' }
   | { kind: 'invalid' }
-  | { kind: 'locked'; retryAfterSec: number };
+  | { kind: 'locked'; retryAfterSec: number }
+  | { kind: 'ip_reservation_expired' };
 
 export interface RecoverySessionMaterial {
   id: string;
@@ -54,6 +57,12 @@ export class RecoveryService {
     private readonly auditService: AuditService,
     private readonly sqliteTransactions: SqliteImmediateTransactionService,
   ) {}
+
+  @Cron(CronExpression.EVERY_MINUTE)
+  async cleanupExpiredIpReservations(): Promise<void> {
+    await this.sqliteTransactions.run((connection) =>
+      settleExpiredRecoveryIpReservations(connection, Date.now()));
+  }
 
   async generate(accountId: string, password: string, totpCode?: string): Promise<string[]> {
     const account = await this.accountsService.findById(accountId);
@@ -104,8 +113,9 @@ export class RecoveryService {
     code: string,
     clientIp?: string,
     session?: RecoverySessionMaterial,
+    ipReservationId?: string,
   ): Promise<{ accountId: string }> {
-    return this.serializeVerification(username, () => this.verifySerially(username, code, clientIp, session));
+    return this.serializeVerification(username, () => this.verifySerially(username, code, clientIp, session, ipReservationId));
   }
 
   private async verifySerially(
@@ -113,6 +123,7 @@ export class RecoveryService {
     code: string,
     clientIp?: string,
     session?: RecoverySessionMaterial,
+    ipReservationId?: string,
   ): Promise<{ accountId: string }> {
     const verificationStartedAt = Date.now();
     await this.assertNotLocked(username, verificationStartedAt);
@@ -145,6 +156,13 @@ export class RecoveryService {
     const failureKey = `recovery_fail_${username}`;
     const outcome = await this.sqliteTransactions.run(async (connection): Promise<VerificationCommit> => {
       const committedAt = Date.now();
+      if (clientIp) {
+        if (!ipReservationId) return { kind: 'ip_reservation_expired' };
+        await settleExpiredRecoveryIpReservations(connection, committedAt);
+        if (!await hasActiveRecoveryIpReservation(connection, clientIp, ipReservationId, committedAt)) {
+          return { kind: 'ip_reservation_expired' };
+        }
+      }
       const state = await this.readFailureState(connection, failureKey);
       if (state.locked_until && state.locked_until > committedAt) {
         return { kind: 'locked', retryAfterSec: Math.ceil((state.locked_until - committedAt) / 1000) };
@@ -169,7 +187,8 @@ export class RecoveryService {
           );
           await connection.run('DELETE FROM system_meta WHERE key = ?', [failureKey]);
           if (clientIp) {
-            await connection.run('DELETE FROM system_meta WHERE key = ?', [`login_ip_${clientIp}`]);
+            const settled = await settleRecoveryIpSuccess(connection, clientIp, ipReservationId!, committedAt);
+            if (!settled) throw new Error('Recovery IP reservation expired before session commit');
           }
           return { kind: 'accepted' };
         }
@@ -184,6 +203,13 @@ export class RecoveryService {
         code: 'RECOVERY_LOCKED',
         message: 'Too many failed attempts, retry later',
         retry_after: outcome.retryAfterSec,
+      });
+    }
+    if (outcome.kind === 'ip_reservation_expired') {
+      throw new UnauthorizedException({
+        code: 'IP_THROTTLED',
+        message: 'Recovery verification attempt expired, please retry',
+        retry_after: 1,
       });
     }
     if (outcome.kind === 'invalid' || !account) {

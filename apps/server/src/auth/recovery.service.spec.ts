@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { DataSource, Repository } from 'typeorm';
+import { UnauthorizedException } from '@nestjs/common';
 import { AccountsService } from '../accounts/accounts.service';
 import { AdminAccount } from '../accounts/entities/admin-account.entity';
 import { InitialSchema1700000000000 } from '../database/migrations/1700000000000-initial-schema';
@@ -14,6 +15,7 @@ import { RecoveryCode } from './entities/recovery-code.entity';
 import { Session } from './entities/session.entity';
 import { SystemMeta } from './entities/system-meta.entity';
 import type { RecoverySessionMaterial } from './recovery.service';
+import { reserveRecoveryIpAttempt, settleRecoveryIpFailure, settleRecoveryIpSuccess } from './recovery-ip-reservations';
 import { v4 as uuidv4 } from 'uuid';
 
 type RecoveryServiceModule = { RecoveryService: new (...args: any[]) => any };
@@ -38,6 +40,7 @@ describe('RecoveryService', () => {
   let sessionRepository: Repository<Session>;
   let metaRepository: Repository<SystemMeta>;
   let service: any;
+  let transactionService: SqliteImmediateTransactionService;
   let totpEnabled = false;
   const accountsService = new AccountsService({} as Repository<AdminAccount>);
   const totpService = {
@@ -104,7 +107,7 @@ describe('RecoveryService', () => {
     totpService.hasActiveTotp.mockClear();
     totpService.verifyCode.mockClear().mockResolvedValue(true);
     auditService.record.mockClear().mockResolvedValue(undefined);
-    const transactionService = new SqliteImmediateTransactionService({ get: () => dbPath } as any);
+    transactionService = new SqliteImmediateTransactionService({ get: () => dbPath } as any);
     service = new recoveryModule.RecoveryService(
       codeRepository,
       accountsService,
@@ -229,6 +232,9 @@ describe('RecoveryService', () => {
       key: 'login_ip_198.51.100.45',
       value: JSON.stringify({ failed_count: 3, delay_until: null }),
     });
+    const ipReservationId = uuidv4();
+    await transactionService.run((connection) =>
+      reserveRecoveryIpAttempt(connection, '198.51.100.45', ipReservationId, Date.now()));
     await sessionRepository.save([
       { id: 'session-active-1', accountId: 'account-1', refreshTokenHash: 'hash-1', deviceInfo: null, createdAt: now, expiresAt: now + 1_000, revokedAt: null },
       { id: 'session-active-2', accountId: 'account-1', refreshTokenHash: 'hash-2', deviceInfo: null, createdAt: now, expiresAt: now + 1_000, revokedAt: null },
@@ -237,7 +243,9 @@ describe('RecoveryService', () => {
     ]);
 
     const recoverySession = preparedSessionMaterial();
-    const result = await subject.verify('admin', code.toLowerCase().replace('-', ' '), '198.51.100.45', recoverySession);
+    const result = await subject.verify(
+      'admin', code.toLowerCase().replace('-', ' '), '198.51.100.45', recoverySession, ipReservationId,
+    );
     const consumed = (await codeRepository.findBy({ accountId: 'account-1' })).find(({ usedAt }) => usedAt !== null) ?? null;
     const sessions = await sessionRepository.find();
 
@@ -257,6 +265,7 @@ describe('RecoveryService', () => {
     expect(sessions.find(({ id }) => id === 'session-other')?.revokedAt).toBeNull();
     expect(await metaRepository.findOneBy({ key: 'recovery_fail_admin' })).toBeNull();
     expect(await metaRepository.findOneBy({ key: 'login_ip_198.51.100.45' })).toBeNull();
+    expect(await metaRepository.findOneBy({ key: `login_ip_reservation_${ipReservationId}` })).toBeNull();
     expect(auditService.record).toHaveBeenCalledWith({
       accountId: 'account-1', action: 'recovery.used', ip: '198.51.100.45',
     });
@@ -277,6 +286,9 @@ describe('RecoveryService', () => {
       key: 'login_ip_198.51.100.90',
       value: JSON.stringify({ failed_count: 4, delay_until: null }),
     });
+    const ipReservationId = uuidv4();
+    await transactionService.run((connection) =>
+      reserveRecoveryIpAttempt(connection, '198.51.100.90', ipReservationId, Date.now()));
     const brokenSession: RecoverySessionMaterial = {
       ...preparedSessionMaterial(),
       id: 'session-insert-failure',
@@ -286,12 +298,13 @@ describe('RecoveryService', () => {
       BEGIN SELECT RAISE(ABORT, 'injected recovery session failure'); END`);
 
     try {
-      await expect(subject.verify('admin', code, '198.51.100.90', brokenSession))
+      await expect(subject.verify('admin', code, '198.51.100.90', brokenSession, ipReservationId))
         .rejects.toThrow('injected recovery session failure');
       expect((await codeRepository.findBy({ accountId: 'account-1' }))[0].usedAt).toBeNull();
       expect((await sessionRepository.findOneByOrFail({ id: 'session-before-failed-recovery' })).revokedAt).toBeNull();
       expect(JSON.parse((await metaRepository.findOneByOrFail({ key: 'login_ip_198.51.100.90' })).value))
         .toEqual({ failed_count: 4, delay_until: null });
+      expect(await metaRepository.findOneBy({ key: `login_ip_reservation_${ipReservationId}` })).not.toBeNull();
       expect(auditService.record).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'recovery.used' }));
     } finally {
       await dataSource.query('DROP TRIGGER IF EXISTS fail_recovery_session_insert');
@@ -411,5 +424,91 @@ describe('RecoveryService', () => {
     expect([firstSession.refreshTokenHash, secondSession.refreshTokenHash]).toContain(active[0].refreshTokenHash);
     expect(used.filter(({ usedAt }) => usedAt !== null)).toHaveLength(2);
     expect(sessions.filter(({ revokedAt }) => revokedAt !== null)).toHaveLength(1);
+  });
+
+  it('settles only the successful request and preserves another in-flight failure after history is cleared', async () => {
+    const ip = '198.51.100.91';
+    await metaRepository.save({
+      key: `login_ip_${ip}`,
+      value: JSON.stringify({ failed_count: 3, delay_until: null }),
+    });
+    const firstId = uuidv4();
+    const secondId = uuidv4();
+    const now = Date.now();
+    await transactionService.run(async (connection) => {
+      await reserveRecoveryIpAttempt(connection, ip, firstId, now);
+      await reserveRecoveryIpAttempt(connection, ip, secondId, now);
+    });
+
+    await transactionService.run((connection) => settleRecoveryIpSuccess(connection, ip, secondId, Date.now()));
+    expect(await metaRepository.findOneBy({ key: `login_ip_reservation_${firstId}` })).not.toBeNull();
+    expect(await metaRepository.findOneBy({ key: `login_ip_reservation_${secondId}` })).toBeNull();
+    expect(await metaRepository.findOneBy({ key: `login_ip_${ip}` })).toBeNull();
+
+    await transactionService.run((connection) => settleRecoveryIpFailure(connection, ip, firstId, Date.now()));
+    expect(await metaRepository.findOneBy({ key: `login_ip_reservation_${firstId}` })).toBeNull();
+    expect(JSON.parse((await metaRepository.findOneByOrFail({ key: `login_ip_${ip}` })).value))
+      .toMatchObject({ failed_count: 1, delay_until: null });
+  });
+
+  it('reclaims expired reservations as failures before admitting new factor work', async () => {
+    const ip = '198.51.100.92';
+    const expiredId = uuidv4();
+    const activeId = uuidv4();
+    await metaRepository.save({
+      key: `login_ip_${ip}`,
+      value: JSON.stringify({ failed_count: 2, delay_until: null }),
+    });
+    await metaRepository.save({
+      key: `login_ip_reservation_${expiredId}`,
+      value: JSON.stringify({ ip, expires_at: Date.now() - 1 }),
+    });
+
+    await transactionService.run((connection) => reserveRecoveryIpAttempt(connection, ip, activeId, Date.now()));
+
+    expect(await metaRepository.findOneBy({ key: `login_ip_reservation_${expiredId}` })).toBeNull();
+    expect(await metaRepository.findOneBy({ key: `login_ip_reservation_${activeId}` })).not.toBeNull();
+    expect(JSON.parse((await metaRepository.findOneByOrFail({ key: `login_ip_${ip}` })).value))
+      .toMatchObject({ failed_count: 3 });
+  });
+
+  it('enforces the shared IP factor-work cap across independent SQLite transaction queues', async () => {
+    const ip = '198.51.100.95';
+    const otherQueue = new SqliteImmediateTransactionService({ get: () => dbPath } as any);
+    const reservations = await Promise.all(Array.from({ length: 11 }, (_, index) => {
+      const queue = index % 2 === 0 ? transactionService : otherQueue;
+      return queue.run((connection) => reserveRecoveryIpAttempt(connection, ip, uuidv4(), Date.now()));
+    }));
+
+    expect(reservations.filter((retryAfter) => retryAfter === null)).toHaveLength(10);
+    expect(reservations.filter((retryAfter) => retryAfter !== null)).toHaveLength(1);
+    const active = await dataSource!.query(
+      "SELECT value FROM system_meta WHERE key GLOB 'login_ip_reservation_*'",
+    );
+    expect(active.filter(({ value }: { value: string }) => JSON.parse(value).ip === ip)).toHaveLength(10);
+  });
+
+  it('does not consume a valid code when its IP reservation expires during factor work', async () => {
+    const subject = requireService();
+    if (!subject) return;
+
+    const [code] = await subject.generate('account-1', 'current-password') as string[];
+    const ip = '198.51.100.93';
+    const reservationId = uuidv4();
+    const session = preparedSessionMaterial();
+    await metaRepository.save({
+      key: `login_ip_reservation_${reservationId}`,
+      value: JSON.stringify({ ip, expires_at: Date.now() - 1 }),
+    });
+
+    await expect(subject.verify('admin', code, ip, session, reservationId)).rejects.toMatchObject({
+      response: { code: 'IP_THROTTLED' },
+    });
+
+    expect((await codeRepository.findBy({ accountId: 'account-1' })).every(({ usedAt }) => usedAt === null)).toBe(true);
+    expect(await sessionRepository.findOneBy({ id: session.id })).toBeNull();
+    expect(await metaRepository.findOneBy({ key: `login_ip_reservation_${reservationId}` })).toBeNull();
+    expect(JSON.parse((await metaRepository.findOneByOrFail({ key: `login_ip_${ip}` })).value))
+      .toMatchObject({ failed_count: 1 });
   });
 });
