@@ -266,6 +266,37 @@ describe('recovery-code authentication (e2e)', () => {
     }
   });
 
+  it('allows a valid recovery after the shared IP cooldown expires and clears the old failures', async () => {
+    const ip = '198.51.100.99';
+    const dataSource = app.get(DataSource);
+    await dataSource.query('INSERT INTO system_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', [
+      `login_ip_${ip}`,
+      JSON.stringify({ failed_count: 10, delay_until: Date.now() - 1 }),
+    ]);
+
+    try {
+      const tokens = await app.get(AuthService).recoveryVerify('admin', latestCodes[7], ip);
+      expect(tokens.username).toBe('admin');
+      expect(typeof tokens.accessToken).toBe('string');
+      expect(typeof tokens.refreshToken).toBe('string');
+      expect(await dataSource.query('SELECT key FROM system_meta WHERE key = ?', [`login_ip_${ip}`])).toHaveLength(0);
+      const activeReservations = await dataSource.query(
+        "SELECT value FROM system_meta WHERE key GLOB 'login_ip_reservation_*'",
+      );
+      expect(activeReservations.filter((row: { value: string }) => JSON.parse(row.value).ip === ip)).toHaveLength(0);
+    } finally {
+      await dataSource.query('DELETE FROM system_meta WHERE key = ?', [`login_ip_${ip}`]);
+      const reservationRows = await dataSource.query(
+        "SELECT key, value FROM system_meta WHERE key GLOB 'login_ip_reservation_*'",
+      );
+      for (const row of reservationRows) {
+        if (JSON.parse(row.value).ip === ip) {
+          await dataSource.query('DELETE FROM system_meta WHERE key = ?', [row.key]);
+        }
+      }
+    }
+  });
+
   it('serializes different valid codes with their session replacement before returning tokens', async () => {
     const firstCode = latestCodes[2];
     const secondCode = latestCodes[3];

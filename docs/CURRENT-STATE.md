@@ -62,7 +62,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 
 - [x] TOTP 认证（AES-256-GCM 密文、管理员 setup/confirm/disable、单次 login_challenge 两步登录、两步登录 UI、设置页启停与强制 TOTP 开关）
 - [x] API Token 管理、exchange 短期 JWT 与 scopes（默认拒绝，scope 以数据库为准）
-- [x] 恢复码后端（Argon2id、24 小时、一次性消费、账户/IP 防线、带租约的持久化逐请求 IP reservation、单事务消费+旧 session 撤销+新 session 插入；Swagger/OpenAPI 文档；Task 10 第二轮复审修复完成、独立复审待安排）
+- [x] 恢复码后端（Argon2id、24 小时、一次性消费、账户/IP 防线、带租约的持久化逐请求 IP reservation、单事务消费+旧 session 撤销+新 session 插入；Swagger/OpenAPI 文档；Task 10 第三轮复审修复完成、独立复审待安排）
 - [ ] 断点续传 UI（前端崩溃恢复交互）
 - [x] 审计日志（管理员查询、90 天保留、关键操作埋点）
 - [x] 内嵌 MCP 服务（默认关闭、Streamable HTTP、11 个工具、API Token scope 校验与工具审计）
@@ -158,6 +158,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 - **2026-09-25**: Phase 2 Task 10 恢复码后端落地；Argon2id 单次码、原子替换/消费、账户锁定、IP 限速与全会话吊销；复审待安排
 - **2026-09-25**: Task 10 复审修复；原子预留恢复 IP 因子 admission，恢复码/会话替换同事务提交，覆盖不同有效码跨独立 SQLite 队列并发及 refresh 轮换；新增恢复端点 OpenAPI 契约与 `/api/docs` 文档
 - **2026-09-26**: Task 10 第二轮复审修复；将恢复因子 IP admission 改为有 TTL 的逐请求持久 reservation，成功仅结算自身并保留其他在途请求，过期/异常释放有持久失败语义；全量验证通过，等待独立复审
+- **2026-09-26**: Task 10 第三轮复审修复；IP 冷却到期后在新 admission 前重置历史失败计数，但仍将未过期 reservation 计入并发上限；TTL 结算先归一过期窗口再结算本批失败，达到阈值时正确重新锁定
 
 ---
 

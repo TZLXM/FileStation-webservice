@@ -488,6 +488,95 @@ describe('RecoveryService', () => {
     expect(active.filter(({ value }: { value: string }) => JSON.parse(value).ip === ip)).toHaveLength(10);
   });
 
+  it('resets historical failures after the IP cooldown expires before reserving new work', async () => {
+    const ip = '198.51.100.96';
+    const reservationId = uuidv4();
+    const now = Date.now();
+    await metaRepository.save({
+      key: `login_ip_${ip}`,
+      value: JSON.stringify({ failed_count: 10, delay_until: now - 1 }),
+    });
+
+    const retryAfterSec = await transactionService.run((connection) =>
+      reserveRecoveryIpAttempt(connection, ip, reservationId, now));
+
+    expect(retryAfterSec).toBeNull();
+    expect(await metaRepository.findOneBy({ key: `login_ip_reservation_${reservationId}` })).not.toBeNull();
+    expect(JSON.parse((await metaRepository.findOneByOrFail({ key: `login_ip_${ip}` })).value))
+      .toEqual({ failed_count: 0, delay_until: null });
+  });
+
+  it('releases only the remaining IP slots when concurrent admissions reach an expired cooldown', async () => {
+    const ip = '198.51.100.97';
+    const now = Date.now();
+    const heldIds = Array.from({ length: 8 }, () => uuidv4());
+    await metaRepository.save({
+      key: `login_ip_${ip}`,
+      value: JSON.stringify({ failed_count: 10, delay_until: now - 1 }),
+    });
+    await metaRepository.save(heldIds.map((id) => ({
+      key: `login_ip_reservation_${id}`,
+      value: JSON.stringify({ ip, expires_at: now + 60_000 }),
+    })));
+
+    const otherQueue = new SqliteImmediateTransactionService({ get: () => dbPath } as any);
+    const admissions = await Promise.all(Array.from({ length: 5 }, (_, index) => {
+      const queue = index % 2 === 0 ? transactionService : otherQueue;
+      return queue.run((connection) => reserveRecoveryIpAttempt(connection, ip, uuidv4(), now));
+    }));
+
+    expect(admissions.filter((retryAfter) => retryAfter === null)).toHaveLength(2);
+    expect(admissions.filter((retryAfter) => retryAfter !== null)).toHaveLength(3);
+    const rows = await dataSource!.query("SELECT value FROM system_meta WHERE key GLOB 'login_ip_reservation_*'");
+    expect(rows.filter(({ value }: { value: string }) => JSON.parse(value).ip === ip)).toHaveLength(10);
+  });
+
+  it('reapplies the IP cooldown when expired reservations themselves reach the failure threshold', async () => {
+    const ip = '198.51.100.98';
+    const now = Date.now();
+    const expiredIds = Array.from({ length: 10 }, () => uuidv4());
+    const newId = uuidv4();
+    await metaRepository.save({
+      key: `login_ip_${ip}`,
+      value: JSON.stringify({ failed_count: 10, delay_until: now - 1 }),
+    });
+    await metaRepository.save(expiredIds.map((id) => ({
+      key: `login_ip_reservation_${id}`,
+      value: JSON.stringify({ ip, expires_at: now - 1 }),
+    })));
+
+    const retryAfterSec = await transactionService.run((connection) =>
+      reserveRecoveryIpAttempt(connection, ip, newId, now));
+
+    expect(retryAfterSec).not.toBeNull();
+    expect(await metaRepository.findOneBy({ key: `login_ip_reservation_${newId}` })).toBeNull();
+    expect(JSON.parse((await metaRepository.findOneByOrFail({ key: `login_ip_${ip}` })).value))
+      .toMatchObject({ failed_count: 10 });
+    expect(JSON.parse((await metaRepository.findOneByOrFail({ key: `login_ip_${ip}` })).value).delay_until)
+      .toBeGreaterThan(now);
+  });
+
+  it('starts fresh IP failure accounting when a reserved attempt fails after cooldown expiry', async () => {
+    const ip = '198.51.100.100';
+    const reservationId = uuidv4();
+    const now = Date.now();
+    await metaRepository.save({
+      key: `login_ip_${ip}`,
+      value: JSON.stringify({ failed_count: 10, delay_until: now - 1 }),
+    });
+    await metaRepository.save({
+      key: `login_ip_reservation_${reservationId}`,
+      value: JSON.stringify({ ip, expires_at: now + 60_000 }),
+    });
+
+    await transactionService.run((connection) =>
+      settleRecoveryIpFailure(connection, ip, reservationId, now));
+
+    expect(await metaRepository.findOneBy({ key: `login_ip_reservation_${reservationId}` })).toBeNull();
+    expect(JSON.parse((await metaRepository.findOneByOrFail({ key: `login_ip_${ip}` })).value))
+      .toEqual({ failed_count: 1, delay_until: null });
+  });
+
   it('does not consume a valid code when its IP reservation expires during factor work', async () => {
     const subject = requireService();
     if (!subject) return;

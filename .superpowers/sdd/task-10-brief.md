@@ -37,3 +37,9 @@
 - 使用跨进程可见、带请求 ID 和过期时间的持久 reservation；成功仅结算自己的 reservation 并清历史失败，失败/异常/租约过期必须形成持久失败；过期请求不能迟到消费恢复码。
 - 保持普通密码登录与 TOTP 共用的 `login_ip_<ip>` 历史状态格式与清理方式兼容；不得用进程内 Map 作为并发正确性的依据。
 - 用真实 SQLite + gate 写 RED，新增跨独立 transaction queue 并发及异常/过期测试，重跑完整 server/web 验证与构建并更新 Task 10 report/progress/CURRENT-STATE；不开始 Task 11。
+
+## 独立复审修复轮次 3 范围
+
+- 冷却过期后归一历史 IP 失败状态，但继续将所有活跃逐请求 reservation 计入 admission 槽；确保并发 admission 只获得真正剩余槽位。
+- TTL 扫描对同批到期 reservation 的失败结算须在重置旧过期窗口之后进行，防止先归零再漏掉同批失败阈值；冷却后的后续失败从新窗口计数。
+- 使用真实 SQLite 先 RED，再验证有效恢复码冷却后可登录且清历史、成功清理与其他在途请求语义不退化；完成全量验证、更新台账/CURRENT-STATE 并提交 fix-round，不开始 Task 11。

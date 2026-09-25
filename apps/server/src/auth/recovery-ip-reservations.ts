@@ -42,6 +42,14 @@ function parseFailureState(value: string | undefined): IpFailureState {
   }
 }
 
+/** A completed cooldown starts a fresh failure window; in-flight reservations stay separate. */
+function resetExpiredCooldown(state: IpFailureState, now: number): boolean {
+  if (state.delay_until === null || state.delay_until > now) return false;
+  state.failed_count = 0;
+  state.delay_until = null;
+  return true;
+}
+
 async function readIpFailureState(connection: SqliteTransactionConnection, ip: string): Promise<IpFailureState> {
   const row = await connection.get<{ value: string }>(
     'SELECT value FROM system_meta WHERE key = ?',
@@ -114,6 +122,9 @@ export async function settleExpiredRecoveryIpReservations(
 
   for (const [ip, expiredCount] of expiredByIp) {
     const state = await readIpFailureState(connection, ip);
+    // Normalize the old window before charging leases that expired in this sweep.
+    // Otherwise an expired lock's historical count can be carried forward forever.
+    resetExpiredCooldown(state, now);
     state.failed_count += expiredCount;
     if (state.failed_count >= FAILURE_THRESHOLD) {
       const delay = Math.floor(state.failed_count / FAILURE_THRESHOLD) * FAILURE_DELAY_MS;
@@ -132,7 +143,10 @@ export async function reserveRecoveryIpAttempt(
 ): Promise<number | null> {
   await settleExpiredRecoveryIpReservations(connection, now);
   const state = await readIpFailureState(connection, ip);
-  if (state.delay_until && state.delay_until > now) {
+  if (resetExpiredCooldown(state, now)) {
+    await writeIpFailureState(connection, ip, state);
+  }
+  if (state.delay_until !== null && state.delay_until > now) {
     return Math.ceil((state.delay_until - now) / 1000);
   }
 
@@ -176,6 +190,7 @@ export async function settleRecoveryIpFailure(
 
   await connection.run('DELETE FROM system_meta WHERE key = ?', [key]);
   const state = await readIpFailureState(connection, ip);
+  resetExpiredCooldown(state, now);
   state.failed_count += 1;
   const activeRows = await listReservations(connection);
   const remaining = activeRows.reduce((count, activeRow) => {

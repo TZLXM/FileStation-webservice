@@ -55,3 +55,12 @@
 - 新增覆盖：真实 SQLite gate E2E 验证 B 成功后 A reservation 仍在、IP history 已清，再放行 A 失败后 history 重新成为 1；注入 verifier infrastructure error 后 IP failure 持久为 1 且无残留 reservation；真实 SQLite 过期测试验证迟到的有效码被拒绝、码不消费且租约变失败；两个独立 SQLite transaction queue 并发 11 次 reserve，恰好允许 10 次。
 - 完整验证：server unit 25 suites / 163 passed / 20 todo；full server E2E 6 suites / 63 passed；Web Vitest 11 files / 65 passed；root typecheck/build 与 `npx vitest run --no-cache` 通过。`npm run lint` 仍不可运行：server/web 缺少 ESLint 可执行文件，shared 没有 lint script。旧 E2E 的 body-parser 超大请求日志仍属预期测试输出。`git diff --check` 将在提交前对精确暂存文件复核。
 - 提交与审阅：本修复轮仅提交 Task 10 相关源代码/测试/台账/CURRENT-STATE；保留 `.claude/settings.local.json` 和未跟踪 Phase 2 计划。commit id 在交接消息报告，并请父任务安排独立复审。
+
+## 独立复审修复轮次 3
+
+- 新增 P1 核实：成立。真实 SQLite RED 在 `delay_until` 已过去、历史 `failed_count=10` 时仍返回 30 秒并拒绝新 reservation；有 8 个活跃 reservation 时，5 个到期冷却 admission 全部被挡（本应只允许剩余 2 槽）；同批 10 个 TTL reservation 到期后，旧实现把已过期窗口 10 次失败与本批 10 次失败叠加为 20，顺序不符合既有 IP 冷却语义。Recovery E2E 通过真实 AuthService/SQLite 调用有效码，也复现 `IP_THROTTLED`。
+- 最小修复：新增冷却到期归一逻辑，历史失败计数归零并清 `delay_until`，但 reservation 仍单独持久化并照常占并发槽。admission 在任何槽位计算前归一并持久化；失败结算也在累加本次失败前归一，确保过期冷却后从新窗口重新计数。批量 TTL 结算则先归一旧窗口、再增加本批过期 reservation 失败并判断阈值，因此达到 10 次时会新建冷却，而不是归一后误放行。
+- 顺序/竞态覆盖：真实 SQLite 测试以 8 个有效 reservation 和两个独立 transaction queue 同时发起 5 个 admission，严格得到 2 个获准、3 个受限；10 个同批过期 reservation 测试断言归一后失败计数为 10 且新冷却已设置。另测冷却过期后的有效恢复登录成功并清旧 IP 失败状态，以及新窗口内一次失败从 1 计数、旧冷却后续状态已清除。未改变 success-before-failure：成功仍只删除自己的 reservation 并清历史失败，其他在途请求保留并可在失败或 TTL 时结算。
+- TDD：新增的三项单元 RED 均重现目标行为错误；新增 Recovery E2E 在有效码路径上因 `IP_THROTTLED` 失败。实现后针对性 unit 20/20、Recovery E2E 12/12 全绿。
+- 第三轮完整验证 GREEN：server 单测 25 suites / 167 passed / 20 todo；full server E2E 6 suites / 64 passed；Web Vitest 11 files / 65 passed；root `npm run typecheck`、`npm run build` 通过。`npm run lint` 仍无法运行：server/web 缺 ESLint 可执行文件，shared 无 lint script；未额外安装 lint 工具链。E2E 中既有 body-parser 超大请求测试打印预期 413 日志，套件仍通过。提交前对精确范围运行 `git diff --check`。
+- 本轮提交仅包含 IP reservation helper、相应 unit/E2E 测试、本报告、进度台账与 `CURRENT-STATE.md`；保留 `.claude/settings.local.json` 与未跟踪 Phase 2 计划，不开始 Task 11。commit id 在 handoff 报告，并由父任务安排 GPT-5.6 Sol / medium 独立复审。
