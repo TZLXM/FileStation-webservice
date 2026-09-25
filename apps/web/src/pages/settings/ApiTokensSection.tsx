@@ -49,11 +49,17 @@ export default function ApiTokensSection() {
       : [...current, scope]);
   };
 
-  const parsedExpiresDays = expiresDays === '' ? null : Number(expiresDays);
+  const hasExpiresDays = expiresDays !== '';
+  const parsedExpiresDays = hasExpiresDays ? Number(expiresDays) : null;
   const validName = name.trim().length > 0 && name.trim().length <= 64;
   const validScopes = selectedScopes.length > 0;
-  const validExpiresDays = parsedExpiresDays === null
-    || (Number.isInteger(parsedExpiresDays) && parsedExpiresDays >= 1 && parsedExpiresDays <= 365);
+  const validExpiresDays = !hasExpiresDays || (
+    /^\d+$/.test(expiresDays)
+    && parsedExpiresDays !== null
+    && Number.isInteger(parsedExpiresDays)
+    && parsedExpiresDays >= 1
+    && parsedExpiresDays <= 365
+  );
 
   const handleCreate = async () => {
     if (!validName || !validScopes || !validExpiresDays) return;
@@ -163,9 +169,9 @@ export default function ApiTokensSection() {
               aria-label="有效期（天，留空永久）"
               value={expiresDays}
               onChange={(event) => setExpiresDays(event.target.value)}
-              type="number"
-              min={1}
-              max={365}
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
               className="px-3 py-2 border border-gray-300 rounded-md w-full sm:w-48"
             />
           </label>
@@ -188,7 +194,7 @@ export default function ApiTokensSection() {
         <ul className="divide-y divide-gray-100 text-sm">
           {tokens.map((token) => (
             <li key={token.id} className="py-3 flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0">
-              <span className="font-medium break-words">{token.name}</span>
+              <span className="min-w-0 max-w-full font-medium break-all">{token.name}</span>
               <span className="font-mono text-gray-500 break-all">{token.token_prefix}…</span>
               <span className="text-gray-500 text-xs break-words">{token.scopes.join(', ')}</span>
               <span className="text-gray-500 text-xs">{token.expires_at ? `${new Date(token.expires_at).toLocaleDateString()} 到期` : '永久'}</span>

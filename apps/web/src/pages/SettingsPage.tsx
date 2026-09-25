@@ -32,6 +32,13 @@ export default function SettingsPage() {
     }
   };
 
+  const refreshAgentSettings = async () => {
+    const response = await api.get<Settings>('/settings');
+    setSettings((current) => current
+      ? { ...current, agent: response.data!.agent }
+      : response.data!);
+  };
+
   const handleSave = async () => {
     if (!settings) return;
     setSaving(true);
@@ -121,7 +128,7 @@ export default function SettingsPage() {
           </div>
 
           <ApiTokensSection />
-          <AgentSection agent={settings.agent} onSaved={loadSettings} />
+          <AgentSection agent={settings.agent} onSaved={refreshAgentSettings} />
 
           <div className="bg-white shadow rounded-lg p-6 mb-6">
             <h2 className="text-lg font-medium mb-4">存储设置</h2>

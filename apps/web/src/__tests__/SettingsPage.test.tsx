@@ -30,7 +30,7 @@ describe('SettingsPage Phase 2 sections', () => {
 
   afterEach(cleanup);
 
-  it('mounts token and agent sections and refreshes agent props after save', async () => {
+  it('mounts token and agent sections, refreshes agent props, and preserves unrelated drafts', async () => {
     let savedAgent = { mcp_enabled: false, mcp_max_upload_mb: 32 };
     mockedApi.get.mockImplementation(async (path: string) => {
       if (path === '/settings') return { data: { ...baseSettings, agent: savedAgent } } as never;
@@ -45,6 +45,7 @@ describe('SettingsPage Phase 2 sections', () => {
     render(<MemoryRouter><SettingsPage /></MemoryRouter>);
     expect(await screen.findByRole('heading', { name: 'API Token' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Agent 接入（MCP）' })).toBeInTheDocument();
+    fireEvent.change(screen.getByDisplayValue('FileStation'), { target: { value: 'Draft site name' } });
     fireEvent.click(screen.getByLabelText('启用 MCP 端点'));
     fireEvent.change(screen.getByLabelText('MCP 单文件大小上限（MB）'), { target: { value: '64' } });
     fireEvent.click(screen.getByRole('button', { name: '保存 MCP 设置' }));
@@ -52,5 +53,6 @@ describe('SettingsPage Phase 2 sections', () => {
     await waitFor(() => expect(mockedApi.get).toHaveBeenCalledWith('/settings'));
     await waitFor(() => expect(screen.getByLabelText('启用 MCP 端点')).toBeChecked());
     expect(screen.getByLabelText('MCP 单文件大小上限（MB）')).toHaveValue(64);
+    expect(screen.getByDisplayValue('Draft site name')).toBeInTheDocument();
   });
 });

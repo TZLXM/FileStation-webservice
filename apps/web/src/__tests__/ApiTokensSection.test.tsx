@@ -113,6 +113,26 @@ describe('ApiTokensSection', () => {
     }
   });
 
+  it('does not treat an incomplete numeric lifetime as a permanent token', async () => {
+    render(<ApiTokensSection />);
+    await screen.findByText('desktop');
+    fireEvent.change(screen.getByLabelText('Token 名称'), { target: { value: 'bounded token' } });
+    fireEvent.change(screen.getByLabelText('有效期（天，留空永久）'), { target: { value: '1e' } });
+
+    expect(screen.getByRole('button', { name: '签发 Token' })).toBeDisabled();
+    expect(mockedApi.post).not.toHaveBeenCalled();
+  });
+
+  it('wraps an unbroken maximum-length token name within the list row', async () => {
+    const longName = 'n'.repeat(64);
+    mockedApi.get.mockResolvedValue({ data: [{ ...activeToken, name: longName }] } as never);
+    render(<ApiTokensSection />);
+
+    const nameElement = await screen.findByText(longName);
+    expect(nameElement).toHaveClass('min-w-0', 'break-all');
+    expect(nameElement.closest('li')).toHaveClass('min-w-0');
+  });
+
   it('marks a token revoked only after the revoke succeeds and refreshes the list', async () => {
     mockedApi.get
       .mockResolvedValueOnce({ data: [activeToken] } as never)

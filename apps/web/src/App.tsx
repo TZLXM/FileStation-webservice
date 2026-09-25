@@ -7,6 +7,7 @@ import FilesPage from './pages/FilesPage';
 import SharePage from './pages/SharePage';
 import SettingsPage from './pages/SettingsPage';
 import AuditPage from './pages/AuditPage';
+import PageErrorBoundary from './components/PageErrorBoundary';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, checkAuth } = useAuthStore();
@@ -54,7 +55,9 @@ function App() {
           path="/audit"
           element={
             <ProtectedRoute>
-              <AuditPage />
+              <PageErrorBoundary>
+                <AuditPage />
+              </PageErrorBoundary>
             </ProtectedRoute>
           }
         />
