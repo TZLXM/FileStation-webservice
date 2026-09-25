@@ -6,6 +6,7 @@ import InitPage from './pages/InitPage';
 import FilesPage from './pages/FilesPage';
 import SharePage from './pages/SharePage';
 import SettingsPage from './pages/SettingsPage';
+import AuditPage from './pages/AuditPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, checkAuth } = useAuthStore();
@@ -46,6 +47,14 @@ function App() {
           element={
             <ProtectedRoute>
               <SettingsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/audit"
+          element={
+            <ProtectedRoute>
+              <AuditPage />
             </ProtectedRoute>
           }
         />

@@ -1,12 +1,15 @@
 import { useState, useEffect } from 'react';
 import { api } from '../lib/api';
 import AppLayout from '../components/AppLayout';
+import ApiTokensSection from './settings/ApiTokensSection';
+import AgentSection from './settings/AgentSection';
 
 interface Settings {
   site: { name: string; icon: string | null; theme_color: string };
   security: { totp_required: boolean; max_login_attempts: number; lockout_minutes: number };
   transfer: { default_chunk_size: number; global_upload_limit_bps: number | null; global_download_limit_bps: number | null };
   storage: { path: string; max_size_gb: number; cleanup_grace_hours: number; default_expire_hours: number };
+  agent: { mcp_enabled: boolean; mcp_max_upload_mb: number };
 }
 
 export default function SettingsPage() {
@@ -116,6 +119,9 @@ export default function SettingsPage() {
               </div>
             </div>
           </div>
+
+          <ApiTokensSection />
+          <AgentSection agent={settings.agent} onSaved={loadSettings} />
 
           <div className="bg-white shadow rounded-lg p-6 mb-6">
             <h2 className="text-lg font-medium mb-4">存储设置</h2>

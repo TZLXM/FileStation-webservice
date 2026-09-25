@@ -10,7 +10,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 |------|------|
 | 设计文档 | v2.2 已完成；Phase 1 实施计划迭代至 v1.7（经两轮外部评审） |
 | 项目管理 | AGENTS.md 已建立 |
-| 代码实现 | Phase 1 MVP 完成；Phase 2 API Token 管理、exchange、scope 授权、审计日志与 MCP 服务已实现 |
+| 代码实现 | Phase 1 MVP 完成；Phase 2 API Token 管理、exchange、scope 授权、审计日志与 MCP 服务已实现；Web 已提供 Token/MCP 设置与审计查询页面 |
 | 测试 | server 104 unit tests passed、20 todo；22 E2E tests passed；Phase 1 浏览器端到端手动验证通过 |
 | 部署 | 单进程模式（默认）与 Nginx 反代模式均可用；已推送至 GitHub |
 
@@ -66,6 +66,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 - [ ] 断点续传 UI（前端崩溃恢复交互）
 - [x] 审计日志（管理员查询、90 天保留、关键操作埋点）
 - [x] 内嵌 MCP 服务（默认关闭、Streamable HTTP、11 个工具、API Token scope 校验与工具审计）
+- [x] Web API Token 管理、MCP 设置与审计日志分页/操作过滤页面
 - [x] 前端全局导航与移动端适配（文件夹抽屉、文件卡片、触屏操作、分享/设置页布局）
 - [ ] 并发/压力测试
 
@@ -151,6 +152,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 - **2026-09-24**: Phase 2 API Token 管理、exchange 与 scope 授权落地；API token JWT 每次请求检查吊销状态，scope 从数据库读取
 - **2026-09-25**: Phase 2 审计日志落地；关键认证/文件/分享/设置操作埋点，管理员分页查询，IP 匿名化与 90 天清理
 - **2026-09-25**: Phase 2 内嵌 MCP 服务落地；默认关闭的无状态 Streamable HTTP 入口、11 个工具、逐工具 scope 与审计，上传总大小及分块上限
+- **2026-09-25**: Phase 2 Web 设置页增加 API Token 签发/吊销与 MCP 配置，新增受保护的审计日志分页、过滤页面
 
 ---
 

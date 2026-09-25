@@ -14,6 +14,7 @@ export default function AppLayout({ children, onFolderToggle }: AppLayoutProps) 
 
   const navItems = [
     { to: '/', label: '文件' },
+    { to: '/audit', label: '审计' },
     { to: '/settings', label: '设置' },
   ];
 

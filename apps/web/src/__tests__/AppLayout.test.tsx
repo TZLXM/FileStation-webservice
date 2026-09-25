@@ -17,9 +17,11 @@ vi.mock('../lib/api', () => ({
             security: { totp_required: false, max_login_attempts: 5, lockout_minutes: 15 },
             transfer: { default_chunk_size: 4194304, global_upload_limit_bps: null, global_download_limit_bps: null },
             storage: { path: '/data', max_size_gb: 100, cleanup_grace_hours: 24, default_expire_hours: 168 },
+            agent: { mcp_enabled: false, mcp_max_upload_mb: 32 },
           },
         };
       }
+      if (path === '/api-tokens') return { data: [] };
       return { data: { items: [], total: 0, page: 1, page_size: 20, total_pages: 0 } };
     }),
     post: vi.fn(async () => ({ data: {} })),
@@ -84,5 +86,26 @@ describe('global navigation', () => {
 
     expect(await screen.findByRole('button', { name: '登录' })).toBeInTheDocument();
     expect(mockedApi.get).not.toHaveBeenCalledWith('/settings');
+  });
+
+  it('opens the protected audit route and marks its navigation item active', async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('link', { name: '审计' }));
+
+    expect(await screen.findByRole('heading', { name: '审计日志' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '审计' })).toHaveAttribute('aria-current', 'page');
+    expect(mockedApi.get).toHaveBeenCalledWith('/audit-logs?page=1&page_size=20');
+  });
+
+  it('requires authentication before loading the audit route', async () => {
+    window.history.replaceState({}, '', '/audit');
+    useAuthStore.setState({ isAuthenticated: false, accessToken: null, username: null });
+    mockedApi.post.mockRejectedValueOnce(new Error('no session'));
+
+    render(<App />);
+
+    expect(await screen.findByRole('button', { name: '登录' })).toBeInTheDocument();
+    expect(mockedApi.get).not.toHaveBeenCalledWith(expect.stringContaining('/audit-logs'));
   });
 });
