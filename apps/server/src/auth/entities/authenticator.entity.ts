@@ -32,6 +32,7 @@ export class Authenticator {
   @Column({ name: 'created_at', type: 'integer' })
   createdAt!: number;
 
+  /** TOTP: start timestamp of the last consumed 30s counter; WebAuthn: last-use timestamp. */
   @Column({ name: 'last_used_at', type: 'integer', nullable: true })
   lastUsedAt!: number | null;
 

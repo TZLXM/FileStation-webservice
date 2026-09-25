@@ -4,7 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { AccountsService } from '../accounts/accounts.service';
 import { SettingsService } from '../settings/settings.service';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, IsNull, QueryRunner } from 'typeorm';
 import { Session } from './entities/session.entity';
 import { LoginChallenge } from './entities/login-challenge.entity';
 import { SystemMeta } from './entities/system-meta.entity';
@@ -16,10 +16,15 @@ import { LoginDto } from './dto/login.dto';
 import { beginImmediate, safeRollback } from '../common/database/tx.helper';
 import { ApiTokensService } from '../api-tokens/api-tokens.service';
 import { AuditAction, AuditService } from '../audit/audit.service';
+import { MatchedTotpStep, TotpService } from './totp.service';
 
 export interface RefreshResult extends TokenPair {
   username: string;
 }
+
+export type LoginOutcome =
+  | { kind: 'tokens'; tokens: TokenPair }
+  | { kind: 'second_factor'; loginChallenge: string; availableMethods: string[] };
 
 @Injectable()
 export class AuthService {
@@ -38,6 +43,7 @@ export class AuthService {
     private systemMetaRepository: Repository<SystemMeta>,
     private dataSource: DataSource,
     private apiTokensService: ApiTokensService,
+    private totpService: TotpService,
     private auditService: AuditService,
   ) {}
 
@@ -164,7 +170,7 @@ export class AuthService {
     }
   }
 
-  async login(loginDto: LoginDto, clientIp?: string): Promise<TokenPair> {
+  async login(loginDto: LoginDto, clientIp?: string): Promise<LoginOutcome> {
     const security = await this.settingsService.getSecuritySettings();
     const now = Date.now();
 
@@ -202,6 +208,21 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
+    if (await this.totpService.hasActiveTotp(account.id)) {
+      const challengeTime = Date.now();
+      const loginChallenge = `ch_${uuidv4()}`;
+      await this.challengesRepository.save({
+        id: loginChallenge,
+        accountId: account.id,
+        challengeType: 'totp',
+        challengeData: null,
+        createdAt: challengeTime,
+        expiresAt: challengeTime + 5 * 60 * 1000,
+        usedAt: null,
+      });
+      return { kind: 'second_factor', loginChallenge, availableMethods: ['totp'] };
+    }
+
     await this.clearLoginFailures(loginDto.username);
     if (clientIp) {
       await this.clearIpFailures(clientIp);
@@ -209,7 +230,96 @@ export class AuthService {
 
     const tokens = await this.generateTokens(account.id, account.username);
     await this.auditService.record({ accountId: account.id, action: AuditAction.AUTH_LOGIN, ip: clientIp });
-    return tokens;
+    return { kind: 'tokens', tokens };
+  }
+
+  async totpSetup(accountId: string) {
+    return this.totpService.setup(accountId);
+  }
+
+  async totpConfirm(accountId: string, code: string): Promise<void> {
+    await this.totpService.confirm(accountId, code);
+  }
+
+  async totpDisable(accountId: string, password: string, code: string): Promise<void> {
+    await this.totpService.disable(accountId, password, code);
+  }
+
+  async verifyTotpLogin(
+    loginChallenge: string,
+    code: string,
+    clientIp?: string,
+  ): Promise<TokenPair & { username: string }> {
+    const now = Date.now();
+    if (clientIp) await this.checkIpThrottle(clientIp, now);
+
+    const claimed = await this.challengesRepository.update(
+      { id: loginChallenge, usedAt: IsNull() },
+      { usedAt: now },
+    );
+    if (claimed.affected !== 1) {
+      throw new UnauthorizedException({ code: 'INVALID_CHALLENGE', message: 'Challenge is invalid or already used' });
+    }
+
+    const challenge = await this.challengesRepository.findOne({ where: { id: loginChallenge } });
+    if (!challenge || challenge.expiresAt <= now || challenge.challengeType !== 'totp') {
+      throw new UnauthorizedException({ code: 'CHALLENGE_EXPIRED', message: 'Challenge has expired' });
+    }
+
+    const account = await this.accountsService.findById(challenge.accountId);
+    if (!account) throw new UnauthorizedException('Account not found');
+    const accountState = await this.getAccountLockout(account.username);
+    if (accountState.locked_until && accountState.locked_until > now) {
+      const retryAfterSec = Math.ceil((accountState.locked_until - now) / 1000);
+      await this.recordLoginFailureAudit(account.username, clientIp);
+      throw new UnauthorizedException({
+        code: 'ACCOUNT_LOCKED',
+        message: `Account locked, retry after ${retryAfterSec} seconds`,
+        retry_after: retryAfterSec,
+      });
+    }
+    const matchedStep = await this.totpService.matchLoginCode(challenge.accountId, code);
+    const security = await this.settingsService.getSecuritySettings();
+    const admission = await this.reserveTotpAttempt(
+      account.id,
+      account.username,
+      security.max_login_attempts,
+      security.lockout_minutes,
+      clientIp,
+      now,
+      matchedStep,
+    );
+    const rejection = admission.rejection;
+    if (rejection) {
+      if (rejection.code === 'ACCOUNT_LOCKED') {
+        await this.recordLoginFailureAudit(account.username, clientIp);
+      }
+      const message = rejection.code === 'ACCOUNT_LOCKED'
+        ? `Account locked, retry after ${rejection.retryAfterSec} seconds`
+        : `Too many attempts from this IP, retry after ${rejection.retryAfterSec} seconds`;
+      throw new UnauthorizedException({
+        code: rejection.code,
+        message,
+        retry_after: rejection.retryAfterSec,
+      });
+    }
+
+    if (!admission.factorAccepted || !admission.tokens) {
+      await this.auditService.record({
+        accountId: challenge.accountId,
+        action: AuditAction.AUTH_TOTP_FAILED,
+        ip: clientIp,
+      });
+      throw new UnauthorizedException({ code: 'INVALID_TOTP', message: 'Invalid TOTP code; please log in again' });
+    }
+
+    await this.auditService.record({
+      accountId: account.id,
+      action: AuditAction.AUTH_LOGIN,
+      details: { second_factor: 'totp' },
+      ip: clientIp,
+    });
+    return { ...admission.tokens, username: account.username };
   }
 
   async refreshToken(refreshToken: string): Promise<RefreshResult> {
@@ -275,14 +385,36 @@ export class AuthService {
 
   private async recordLoginFailure(username: string, maxAttempts: number, lockoutMinutes: number, now: number): Promise<void> {
     const key = `login_lockout_${username}`;
-    const current = await this.getAccountLockout(username);
-    const base = current.locked_until && current.locked_until <= now ? 0 : current.failed_count;
-    const failedCount = base + 1;
-    const locked_until = failedCount >= maxAttempts ? now + lockoutMinutes * 60 * 1000 : null;
-    await this.systemMetaRepository.save({
-      key,
-      value: JSON.stringify({ failed_count: locked_until ? 0 : failedCount, locked_until }),
-    });
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    try {
+      await beginImmediate(queryRunner);
+      const rows = await queryRunner.query('SELECT value FROM system_meta WHERE key = ?', [key]);
+      const meta = rows[0] as { value: string } | undefined;
+      let current = { failed_count: 0, locked_until: null as number | null };
+      if (meta) {
+        try { current = JSON.parse(meta.value); } catch { /* reset malformed historical state */ }
+      }
+      // A challenge that passed its initial lockout check before a concurrent request
+      // locked the account must not clear that lock when its delayed failure is recorded.
+      if (current.locked_until && current.locked_until > now) {
+        await queryRunner.query('COMMIT');
+        return;
+      }
+      const base = current.locked_until && current.locked_until <= now ? 0 : current.failed_count;
+      const failedCount = base + 1;
+      const locked_until = failedCount >= maxAttempts ? now + lockoutMinutes * 60 * 1000 : null;
+      await queryRunner.query(
+        'INSERT INTO system_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+        [key, JSON.stringify({ failed_count: locked_until ? 0 : failedCount, locked_until })],
+      );
+      await queryRunner.query('COMMIT');
+    } catch (error) {
+      await safeRollback(queryRunner);
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
   }
 
   private async clearLoginFailures(username: string): Promise<void> {
@@ -300,17 +432,108 @@ export class AuthService {
     }
   }
 
+  /** Atomically admit a TOTP guess and reserve its account/IP failure slot. */
+  private async reserveTotpAttempt(
+    accountId: string,
+    username: string,
+    maxAttempts: number,
+    lockoutMinutes: number,
+    ip: string | undefined,
+    now: number,
+    matchedStep: MatchedTotpStep | null,
+  ): Promise<{
+    rejection: { code: 'ACCOUNT_LOCKED' | 'IP_THROTTLED'; retryAfterSec: number } | null;
+    factorAccepted: boolean;
+    tokens: TokenPair | null;
+  }> {
+    const accountKey = `login_lockout_${username}`;
+    const ipKey = ip ? `login_ip_${ip}` : null;
+    let rejection: { code: 'ACCOUNT_LOCKED' | 'IP_THROTTLED'; retryAfterSec: number } | null = null;
+    let factorAccepted = false;
+    let tokens: TokenPair | null = null;
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    try {
+      await beginImmediate(queryRunner);
+      const readState = async <T extends Record<string, unknown>>(key: string, fallback: T): Promise<T> => {
+        const rows = await queryRunner.query('SELECT value FROM system_meta WHERE key = ?', [key]);
+        const row = rows[0] as { value: string } | undefined;
+        if (!row) return fallback;
+        try { return JSON.parse(row.value) as T; } catch { return fallback; }
+      };
+      const accountState = await readState(accountKey, { failed_count: 0, locked_until: null as number | null });
+      const ipState = ipKey
+        ? await readState(ipKey, { failed_count: 0, delay_until: null as number | null })
+        : null;
+
+      if (ipState?.delay_until && ipState.delay_until > now) {
+        rejection = { code: 'IP_THROTTLED', retryAfterSec: Math.ceil((ipState.delay_until - now) / 1000) };
+      } else if (accountState.locked_until && accountState.locked_until > now) {
+        rejection = { code: 'ACCOUNT_LOCKED', retryAfterSec: Math.ceil((accountState.locked_until - now) / 1000) };
+      } else {
+        const base = accountState.locked_until && accountState.locked_until <= now ? 0 : accountState.failed_count;
+        const failedCount = base + 1;
+        const lockedUntil = failedCount >= maxAttempts ? now + lockoutMinutes * 60 * 1000 : null;
+        await queryRunner.query(
+          'INSERT INTO system_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+          [accountKey, JSON.stringify({ failed_count: lockedUntil ? 0 : failedCount, locked_until: lockedUntil })],
+        );
+        if (ipKey && ipState) {
+          ipState.failed_count += 1;
+          if (ipState.failed_count >= 10) {
+            const delaySec = Math.floor(ipState.failed_count / 10) * 30;
+            ipState.delay_until = now + delaySec * 1000;
+          }
+          await queryRunner.query(
+            'INSERT INTO system_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+            [ipKey, JSON.stringify(ipState)],
+          );
+        }
+        if (matchedStep) {
+          factorAccepted = await this.totpService.consumeLoginStep(queryRunner, matchedStep);
+        }
+        if (factorAccepted) {
+          await queryRunner.query('DELETE FROM system_meta WHERE key = ?', [accountKey]);
+          if (ipKey) await queryRunner.query('DELETE FROM system_meta WHERE key = ?', [ipKey]);
+          tokens = await this.generateTokensInImmediateTransaction(queryRunner, accountId, username);
+        }
+      }
+      await queryRunner.query('COMMIT');
+    } catch (error) {
+      await safeRollback(queryRunner);
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
+    return { rejection, factorAccepted, tokens };
+  }
+
   private async recordIpFailure(ip: string, now: number): Promise<void> {
     const key = `login_ip_${ip}`;
-    const meta = await this.systemMetaRepository.findOne({ where: { key } });
-    let state = { failed_count: 0, delay_until: null as number | null };
-    if (meta) { try { state = JSON.parse(meta.value); } catch {} }
-    state.failed_count += 1;
-    if (state.failed_count >= 10) {
-      const delaySec = Math.floor(state.failed_count / 10) * 30;
-      state.delay_until = now + delaySec * 1000;
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    try {
+      await beginImmediate(queryRunner);
+      const rows = await queryRunner.query('SELECT value FROM system_meta WHERE key = ?', [key]);
+      const meta = rows[0] as { value: string } | undefined;
+      let state = { failed_count: 0, delay_until: null as number | null };
+      if (meta) { try { state = JSON.parse(meta.value); } catch { /* reset malformed historical state */ } }
+      state.failed_count += 1;
+      if (state.failed_count >= 10) {
+        const delaySec = Math.floor(state.failed_count / 10) * 30;
+        state.delay_until = now + delaySec * 1000;
+      }
+      await queryRunner.query(
+        'INSERT INTO system_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+        [key, JSON.stringify(state)],
+      );
+      await queryRunner.query('COMMIT');
+    } catch (error) {
+      await safeRollback(queryRunner);
+      throw error;
+    } finally {
+      await queryRunner.release();
     }
-    await this.systemMetaRepository.save({ key, value: JSON.stringify(state) });
   }
 
   private async clearIpFailures(ip: string): Promise<void> {
@@ -346,6 +569,27 @@ export class AuthService {
     });
     await queryRunner.manager.save(session);
 
+    return { accessToken, refreshToken, expiresIn };
+  }
+
+  private async generateTokensInImmediateTransaction(
+    queryRunner: QueryRunner,
+    accountId: string,
+    username: string,
+  ): Promise<TokenPair> {
+    const payload: Omit<JwtPayload, 'iat' | 'exp'> = {
+      sub: accountId,
+      username,
+      principal_type: 'admin',
+    };
+    const accessToken = this.jwtService.sign(payload);
+    const refreshToken = uuidv4();
+    const now = Date.now();
+    const expiresIn = 24 * 60 * 60;
+    await queryRunner.query(
+      'INSERT INTO sessions (id, account_id, refresh_token_hash, device_info, created_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [uuidv4(), accountId, this.hashToken(refreshToken), null, now, now + 7 * 24 * 60 * 60 * 1000, null],
+    );
     return { accessToken, refreshToken, expiresIn };
   }
 

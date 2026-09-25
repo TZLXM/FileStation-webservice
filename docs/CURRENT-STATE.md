@@ -11,7 +11,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 | 设计文档 | v2.2 已完成；Phase 1 实施计划迭代至 v1.7（经两轮外部评审） |
 | 项目管理 | AGENTS.md 已建立 |
 | 代码实现 | Phase 1 MVP 完成；Phase 2 API Token 管理、exchange、scope 授权、审计日志与 MCP 服务已实现；Web 已提供 Token/MCP 设置与审计查询页面 |
-| 测试 | server 104 unit tests passed、20 todo；22 E2E tests passed；Phase 1 浏览器端到端手动验证通过 |
+| 测试 | server 135 unit tests passed、20 todo；web 50 tests passed；Task 8 TOTP E2E 12 项通过；Phase 1 浏览器端到端手动验证通过 |
 | 部署 | 单进程模式（默认）与 Nginx 反代模式均可用；已推送至 GitHub |
 
 ## 设计决策摘要
@@ -60,7 +60,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 
 ### Phase 2: 可靠性（进行中）
 
-- [ ] TOTP 认证（login_challenge 流程）
+- [x] TOTP 后端认证（AES-256-GCM 密文、管理员 setup/confirm/disable、单次 login_challenge 两步登录）；前端流程待 Task 9
 - [x] API Token 管理、exchange 短期 JWT 与 scopes（默认拒绝，scope 以数据库为准）
 - [ ] 恢复码机制
 - [ ] 断点续传 UI（前端崩溃恢复交互）
@@ -122,7 +122,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 
 ### Phase 2 后续（仍未实现）
 
-1. TOTP 认证方案选型与实现
+1. TOTP 两步登录与设置页前端（Task 9）
 2. 恢复码机制
 3. 断点续传 UI
 4. 并发/压力测试
@@ -153,6 +153,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 - **2026-09-25**: Phase 2 审计日志落地；关键认证/文件/分享/设置操作埋点，管理员分页查询，IP 匿名化与 90 天清理
 - **2026-09-25**: Phase 2 内嵌 MCP 服务落地；默认关闭的无状态 Streamable HTTP 入口、11 个工具、逐工具 scope 与审计，上传总大小及分块上限
 - **2026-09-25**: Phase 2 Web 设置页增加 API Token 签发/吊销与 MCP 配置，新增受保护的审计日志分页、过滤页面
+- **2026-09-25**: Phase 2 TOTP 后端落地；AES-256-GCM 密文存储、管理员启停、单次挑战两步登录、强制 TOTP 防自锁与派生状态
 
 ---
 

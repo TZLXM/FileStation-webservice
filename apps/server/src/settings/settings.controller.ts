@@ -58,11 +58,13 @@ export class SettingsController {
       }
     }
     if (body.security) {
-      const updates = omitUndefined(body.security);
+      const { totp_active: _derivedIgnored, ...writable } = body.security;
+      const updates = omitUndefined(writable);
       if (Object.keys(updates).length > 0) {
         const current = await this.settingsService.getSecuritySettings();
         const changed = hasChangedKeys(current, updates);
-        await this.settingsService.set('security', { ...current, ...updates }, userId);
+        const { totp_active: _derived, ...merged } = { ...current, ...updates };
+        await this.settingsService.setSecuritySettings(merged, userId);
         if (changed) updatedSections.push('security');
       }
     }

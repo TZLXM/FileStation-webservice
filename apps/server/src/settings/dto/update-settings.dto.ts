@@ -1,4 +1,4 @@
-import { IsString, Length, IsBoolean, IsInt, Min, Max, IsOptional, ValidateIf, ValidateNested, IsIn } from 'class-validator';
+import { IsString, Length, IsBoolean, IsInt, Min, Max, IsOptional, ValidateIf, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class SiteSettingsDto {
@@ -14,10 +14,12 @@ export class SiteSettingsDto {
 }
 
 export class SecuritySettingsDto {
-  // Phase 1 决策：DTO 层直接拒绝写入 totp_required=true（未实现，防安全功能假开启）
-  @ValidateIf((_o, v) => v !== undefined)
-  @IsIn([false], { message: 'security.totp_required is not supported in Phase 1 and cannot be written' })
+  @IsOptional() @IsBoolean()
   totp_required?: boolean;
+
+  // 派生只读字段：回读回写时允许通过 DTO，控制器与服务都会剥离。
+  @IsOptional() @IsBoolean()
+  totp_active?: boolean;
 
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(20)
   max_login_attempts?: number;

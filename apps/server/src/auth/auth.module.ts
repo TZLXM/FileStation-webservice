@@ -3,12 +3,14 @@ import { PassportModule } from '@nestjs/passport';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { TotpService } from './totp.service';
 import { AccountsModule } from '../accounts/accounts.module';
 import { SecurityModule } from '../security/security.module';
 import { SettingsModule } from '../settings/settings.module';
 import { Session } from './entities/session.entity';
 import { LoginChallenge } from './entities/login-challenge.entity';
 import { SystemMeta } from './entities/system-meta.entity';
+import { Authenticator } from './entities/authenticator.entity';
 import { ApiTokensModule } from '../api-tokens/api-tokens.module';
 import { AuditModule } from '../audit/audit.module';
 
@@ -20,10 +22,10 @@ import { AuditModule } from '../audit/audit.module';
     SettingsModule, // SettingsService（登录锁定）
     ApiTokensModule,
     AuditModule,
-    TypeOrmModule.forFeature([Session, LoginChallenge, SystemMeta]),
+    TypeOrmModule.forFeature([Session, LoginChallenge, SystemMeta, Authenticator]),
   ],
   controllers: [AuthController],
-  providers: [AuthService],
+  providers: [AuthService, TotpService],
   exports: [AuthService],
 })
 export class AuthModule {}

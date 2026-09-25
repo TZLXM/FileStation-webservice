@@ -4,6 +4,7 @@ describe('SettingsController audit events', () => {
   const settingsService = {
     getSecuritySettings: jest.fn(),
     getTransferSettings: jest.fn(),
+    setSecuritySettings: jest.fn(),
     set: jest.fn(),
   };
   const auditService = { record: jest.fn().mockResolvedValue(undefined) };
@@ -48,7 +49,7 @@ describe('SettingsController audit events', () => {
 
   it('does not emit a settings event when persistence fails', async () => {
     settingsService.getSecuritySettings.mockResolvedValue({ max_login_attempts: 5 });
-    settingsService.set.mockRejectedValue(new Error('settings write failed'));
+    settingsService.setSecuritySettings.mockRejectedValue(new Error('settings write failed'));
 
     await expect(controller.update({ security: { max_login_attempts: 8 } } as any, req)).rejects.toThrow('settings write failed');
     expect(auditService.record).not.toHaveBeenCalled();
@@ -69,5 +70,26 @@ describe('SettingsController audit events', () => {
 
     expect(auditService.record).not.toHaveBeenCalled();
     expect(settingsService.set).not.toHaveBeenCalled();
+  });
+
+  it('treats totp_active as derived read-only data when updating security settings', async () => {
+    settingsService.getSecuritySettings.mockResolvedValue({
+      totp_required: false,
+      totp_active: true,
+      max_login_attempts: 5,
+      lockout_minutes: 15,
+    });
+    settingsService.setSecuritySettings.mockResolvedValue(undefined);
+
+    await controller.update({
+      security: { totp_active: false, max_login_attempts: 8 },
+    } as any, req);
+
+    expect(settingsService.setSecuritySettings).toHaveBeenCalledWith({
+      totp_required: false,
+      max_login_attempts: 8,
+      lockout_minutes: 15,
+    }, 'admin-1');
+    expect(settingsService.set).not.toHaveBeenCalledWith('security', expect.objectContaining({ totp_active: expect.anything() }), 'admin-1');
   });
 });

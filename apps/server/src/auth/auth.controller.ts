@@ -1,9 +1,11 @@
 import { Controller, Post, Body, HttpCode, HttpStatus, UseGuards, Get, Req, Res, Headers, UnauthorizedException, BadRequestException } from '@nestjs/common';
-import { AuthService, RefreshResult } from './auth.service';
-import { TokenPair, ApiResponse } from '@filestation/shared';
+import { AuthService, LoginOutcome, RefreshResult } from './auth.service';
+import { ApiResponse, LoginResponseData, TokenPair } from '@filestation/shared';
 import { JwtAuthGuard } from '../security/guards/jwt-auth.guard';
+import { AdminOnlyGuard } from '../security/guards/admin-only.guard';
 import { InitDto } from './dto/init.dto';
 import { LoginDto } from './dto/login.dto';
+import { TotpCodeDto, TotpDisableDto, TotpLoginDto } from './dto/totp.dto';
 import { Response, Request } from 'express';
 
 const REFRESH_COOKIE = 'refresh_token';
@@ -64,20 +66,81 @@ export class AuthController {
     @Body() loginDto: LoginDto,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
-  ): Promise<ApiResponse<{ access_token: string; expires_in: number }>> {
-    const result: TokenPair = await this.authService.login(loginDto, req.ip);
+  ): Promise<ApiResponse<LoginResponseData>> {
+    const outcome: LoginOutcome = await this.authService.login(loginDto, req.ip);
 
-    res.cookie(REFRESH_COOKIE, result.refreshToken, REFRESH_COOKIE_OPTIONS);
+    if (outcome.kind === 'second_factor') {
+      return {
+        code: 'OK',
+        message: 'Second factor required',
+        data: {
+          requires_second_factor: true,
+          login_challenge: outcome.loginChallenge,
+          available_methods: outcome.availableMethods,
+        },
+        request_id: crypto.randomUUID(),
+      };
+    }
+
+    res.cookie(REFRESH_COOKIE, outcome.tokens.refreshToken, REFRESH_COOKIE_OPTIONS);
 
     return {
       code: 'OK',
       message: 'Login successful',
       data: {
-        access_token: result.accessToken,
-        expires_in: result.expiresIn,
+        access_token: outcome.tokens.accessToken,
+        expires_in: outcome.tokens.expiresIn,
       },
       request_id: crypto.randomUUID(),
     };
+  }
+
+  @Post('login/totp')
+  @HttpCode(HttpStatus.OK)
+  async loginTotp(
+    @Body() body: TotpLoginDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<ApiResponse<{ access_token: string; expires_in: number; username: string }>> {
+    const result = await this.authService.verifyTotpLogin(body.login_challenge, body.totp_code, req.ip);
+    res.cookie(REFRESH_COOKIE, result.refreshToken, REFRESH_COOKIE_OPTIONS);
+    return {
+      code: 'OK',
+      message: 'Login successful',
+      data: { access_token: result.accessToken, expires_in: result.expiresIn, username: result.username },
+      request_id: crypto.randomUUID(),
+    };
+  }
+
+  @Post('totp/setup')
+  @UseGuards(JwtAuthGuard, AdminOnlyGuard)
+  async totpSetup(@Req() req: Request & { user: { id: string } }): Promise<ApiResponse<{
+    secret: string;
+    otpauth_url: string;
+    qr_code_data_url: string;
+  }>> {
+    const result = await this.authService.totpSetup(req.user.id);
+    return { code: 'OK', message: 'TOTP setup created', data: result, request_id: crypto.randomUUID() };
+  }
+
+  @Post('totp/confirm')
+  @UseGuards(JwtAuthGuard, AdminOnlyGuard)
+  async totpConfirm(
+    @Req() req: Request & { user: { id: string } },
+    @Body() body: TotpCodeDto,
+  ): Promise<ApiResponse<null>> {
+    await this.authService.totpConfirm(req.user.id, body.code);
+    return { code: 'OK', message: 'TOTP enabled', data: null, request_id: crypto.randomUUID() };
+  }
+
+  @Post('totp/disable')
+  @UseGuards(JwtAuthGuard, AdminOnlyGuard)
+  async totpDisable(
+    @Req() req: Request & { user: { id: string } },
+    @Body() body: TotpDisableDto,
+  ): Promise<ApiResponse<null>> {
+    await this.authService.totpDisable(req.user.id, body.password, body.code);
+    return { code: 'OK', message: 'TOTP disabled', data: null, request_id: crypto.randomUUID() };
   }
 
   @Post('api-token/exchange')

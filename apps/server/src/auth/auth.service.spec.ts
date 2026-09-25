@@ -13,6 +13,7 @@ import { UnauthorizedException, BadRequestException } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { ApiTokensService } from '../api-tokens/api-tokens.service';
 import { AuditService } from '../audit/audit.service';
+import { TotpService } from './totp.service';
 
 describe('AuthService', () => {
   let service: AuthService;
@@ -32,6 +33,15 @@ describe('AuthService', () => {
     touchLastUsed: jest.fn(),
   };
   const mockAuditService = { record: jest.fn().mockResolvedValue(undefined) };
+  const mockTotpService = {
+    hasActiveTotp: jest.fn().mockResolvedValue(false),
+    verifyCode: jest.fn(),
+    matchLoginCode: jest.fn().mockResolvedValue(null),
+    consumeLoginStep: jest.fn().mockResolvedValue(false),
+    setup: jest.fn(),
+    confirm: jest.fn(),
+    disable: jest.fn(),
+  };
 
   const mockSessionsRepository = {
     create: jest.fn(),
@@ -84,6 +94,12 @@ describe('AuthService', () => {
   };
 
   beforeEach(async () => {
+    mockTotpService.hasActiveTotp.mockResolvedValue(false);
+    mockTotpService.matchLoginCode.mockResolvedValue(null);
+    mockTotpService.consumeLoginStep.mockResolvedValue(false);
+    mockQueryRunner.query.mockReset().mockResolvedValue([]);
+    mockQueryRunner.manager.findOne.mockReset().mockResolvedValue(null);
+    mockQueryRunner.manager.save.mockReset().mockResolvedValue(undefined);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AuthService,
@@ -97,6 +113,7 @@ describe('AuthService', () => {
         { provide: SettingsService, useValue: mockSettingsService }, // v1.7 高优 10
         { provide: ApiTokensService, useValue: mockApiTokensService },
         { provide: AuditService, useValue: mockAuditService },
+        { provide: TotpService, useValue: mockTotpService },
       ],
     }).compile();
 
@@ -244,7 +261,10 @@ describe('AuthService', () => {
 
       const result = await service.login({ username: 'admin', password }, '198.51.100.45');
 
-      expect(result).toEqual({ accessToken: 'admin-access-token', refreshToken: expect.any(String), expiresIn: 86400 });
+      expect(result).toEqual({
+        kind: 'tokens',
+        tokens: { accessToken: 'admin-access-token', refreshToken: expect.any(String), expiresIn: 86400 },
+      });
       expect(mockAuditService.record).toHaveBeenCalledWith({
         accountId: 'account-1',
         action: 'auth.login',
@@ -320,6 +340,241 @@ describe('AuthService', () => {
         details: { username: 'admin' },
       });
       expect(mockAccountsService.findByUsername).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('TOTP login challenge', () => {
+    const getVerifier = () => {
+      const verifier = (service as any).verifyTotpLogin;
+      expect(typeof verifier).toBe('function');
+      return typeof verifier === 'function' ? verifier.bind(service) : null;
+    };
+
+    it('creates a five-minute one-time challenge after a valid password and withholds tokens', async () => {
+      mockSettingsService.getSecuritySettings.mockResolvedValue({
+        totp_required: false,
+        max_login_attempts: 5,
+        lockout_minutes: 15,
+      });
+      mockSystemMetaRepository.findOne.mockResolvedValue(null);
+      mockSystemMetaRepository.delete.mockResolvedValue(undefined);
+      mockChallengesRepository.save.mockResolvedValue(undefined);
+      mockAccountsService.findByUsername.mockResolvedValue({ id: 'account-1', username: 'admin' });
+      mockAccountsService.validatePassword.mockResolvedValue(true);
+      mockTotpService.hasActiveTotp.mockResolvedValue(true);
+
+      const result = await service.login({ username: 'admin', password: 'valid-password' }, '198.51.100.45');
+      expect(mockChallengesRepository.save).toHaveBeenCalled();
+      if (mockChallengesRepository.save.mock.calls.length === 0) return;
+      const [challenge] = mockChallengesRepository.save.mock.calls[0];
+
+      expect(result).toMatchObject({ kind: 'second_factor', availableMethods: ['totp'] });
+      if (result.kind !== 'second_factor') return;
+      expect(result.loginChallenge).toMatch(/^ch_/);
+      expect(challenge).toMatchObject({
+        id: result.loginChallenge,
+        accountId: 'account-1',
+        challengeType: 'totp',
+        challengeData: null,
+        usedAt: null,
+      });
+      expect(challenge.expiresAt - challenge.createdAt).toBe(5 * 60 * 1000);
+      expect(mockSessionsRepository.save).not.toHaveBeenCalled();
+      expect(mockJwtService.sign).not.toHaveBeenCalled();
+      expect(mockAuditService.record).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auth.login' }));
+    });
+
+    it('retains TOTP failures across new challenges and blocks outstanding challenges during account lockout', async () => {
+      const verifier = getVerifier();
+      if (!verifier) return;
+      const firstIp = '198.51.100.51';
+      const otherIp = '198.51.100.52';
+      const meta = new Map<string, Record<string, any>>();
+      const challenges = new Map<string, any>();
+      mockSettingsService.getSecuritySettings.mockResolvedValue({
+        max_login_attempts: 2,
+        lockout_minutes: 15,
+      });
+      mockSystemMetaRepository.findOne.mockImplementation(async ({ where: { key } }: { where: { key: string } }) => {
+        const state = meta.get(key);
+        return state ? { key, value: JSON.stringify(state) } : null;
+      });
+      mockQueryRunner.query.mockImplementation(async (sql: string, parameters: unknown[] = []) => {
+        if (sql.startsWith('SELECT value FROM system_meta')) {
+          const key = String(parameters[0]);
+          const state = meta.get(key);
+          return state ? [{ value: JSON.stringify(state) }] : [];
+        }
+        if (sql.startsWith('INSERT INTO system_meta')) {
+          meta.set(String(parameters[0]), JSON.parse(String(parameters[1])));
+        }
+        return [];
+      });
+      mockSystemMetaRepository.delete.mockImplementation(async ({ key }: { key: string }) => {
+        const affected = meta.delete(key) ? 1 : 0;
+        return { affected };
+      });
+      mockChallengesRepository.save.mockImplementation(async (challenge: any) => {
+        challenges.set(challenge.id, { ...challenge });
+        return challenge;
+      });
+      mockChallengesRepository.update.mockImplementation(async ({ id }: { id: string }, patch: any) => {
+        const challenge = challenges.get(id);
+        if (!challenge || challenge.usedAt !== null) return { affected: 0 };
+        Object.assign(challenge, patch);
+        return { affected: 1 };
+      });
+      mockChallengesRepository.findOne.mockImplementation(async ({ where }: { where: { id: string } }) => challenges.get(where.id) ?? null);
+      mockAccountsService.findByUsername.mockResolvedValue({ id: 'account-1', username: 'admin' });
+      mockAccountsService.findById.mockResolvedValue({ id: 'account-1', username: 'admin' });
+      mockAccountsService.validatePassword.mockResolvedValue(true);
+      mockTotpService.hasActiveTotp.mockResolvedValue(true);
+      mockTotpService.matchLoginCode.mockResolvedValue(null);
+
+      const first = await service.login({ username: 'admin', password: 'valid-password' }, firstIp);
+      if (first.kind !== 'second_factor') throw new Error('Expected a second-factor challenge');
+      await expect(verifier(first.loginChallenge, '000000', firstIp)).rejects.toThrow(UnauthorizedException);
+      expect(meta.get('login_lockout_admin')?.failed_count).toBe(1);
+
+      const second = await service.login({ username: 'admin', password: 'valid-password' }, firstIp);
+      const third = await service.login({ username: 'admin', password: 'valid-password' }, firstIp);
+      if (second.kind !== 'second_factor' || third.kind !== 'second_factor') {
+        throw new Error('Expected second-factor challenges');
+      }
+      expect(meta.get('login_lockout_admin')?.failed_count).toBe(1);
+      expect(meta.get(`login_ip_${firstIp}`)?.failed_count).toBe(1);
+
+      await expect(verifier(second.loginChallenge, '000000', firstIp)).rejects.toThrow(UnauthorizedException);
+      expect(mockTotpService.matchLoginCode).toHaveBeenCalledTimes(2);
+      expect(meta.get('login_lockout_admin')).toEqual({ failed_count: 0, locked_until: expect.any(Number) });
+      const checksBeforeLockedChallenge = mockTotpService.matchLoginCode.mock.calls.length;
+
+      await expect(verifier(third.loginChallenge, '000000', otherIp)).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'ACCOUNT_LOCKED' }),
+      });
+      expect(mockTotpService.matchLoginCode).toHaveBeenCalledTimes(checksBeforeLockedChallenge);
+      expect(mockSessionsRepository.save).not.toHaveBeenCalled();
+    });
+
+    it('consumes an incorrect code, counts both account and IP failures, and keeps audit details redacted', async () => {
+      const verifier = getVerifier();
+      if (!verifier) return;
+      const ip = '198.51.100.46';
+      const challenge = {
+        id: 'ch-failed', accountId: 'account-1', challengeType: 'totp', expiresAt: Date.now() + 60_000, usedAt: null,
+      };
+      mockSystemMetaRepository.findOne.mockResolvedValue(null);
+      mockSystemMetaRepository.save.mockResolvedValue(undefined);
+      mockSettingsService.getSecuritySettings.mockResolvedValue({ max_login_attempts: 5, lockout_minutes: 15 });
+      mockChallengesRepository.update.mockResolvedValue({ affected: 1 });
+      mockChallengesRepository.findOne.mockResolvedValue(challenge);
+      mockAccountsService.findById.mockResolvedValue({ id: 'account-1', username: 'admin' });
+      mockTotpService.matchLoginCode.mockResolvedValue(null);
+
+      await expect(verifier('ch-failed', '123456', ip)).rejects.toThrow(UnauthorizedException);
+
+      expect(mockChallengesRepository.update).toHaveBeenCalledWith(
+        { id: 'ch-failed', usedAt: expect.objectContaining({ _type: 'isNull' }) },
+        { usedAt: expect.any(Number) },
+      );
+      const upserts = mockQueryRunner.query.mock.calls
+        .filter(([sql]) => typeof sql === 'string' && sql.startsWith('INSERT INTO system_meta'))
+        .map(([_sql, parameters]) => ({
+          key: parameters[0],
+          value: JSON.parse(String(parameters[1])),
+        }));
+      expect(upserts.map(({ key }) => key)).toEqual(
+        expect.arrayContaining(['login_lockout_admin', `login_ip_${ip}`]),
+      );
+      expect(mockAuditService.record).toHaveBeenCalledWith({
+        accountId: 'account-1',
+        action: 'auth.totp_failed',
+        ip,
+      });
+      const savedStates = upserts.map(({ value }) => value);
+      expect(savedStates).toEqual(expect.arrayContaining([
+        expect.objectContaining({ failed_count: 1, locked_until: null }),
+        expect.objectContaining({ failed_count: 1, delay_until: null }),
+      ]));
+      expect(mockSessionsRepository.save).not.toHaveBeenCalled();
+      expect(JSON.stringify(mockAuditService.record.mock.calls)).not.toContain('123456');
+      expect(JSON.stringify(mockAuditService.record.mock.calls)).not.toContain('ch-failed');
+    });
+
+    it('rejects a replayed or unknown challenge without looking up the factor or issuing tokens', async () => {
+      const verifier = getVerifier();
+      if (!verifier) return;
+      mockSystemMetaRepository.findOne.mockResolvedValue(null);
+      mockChallengesRepository.update.mockResolvedValue({ affected: 0 });
+
+      await expect(verifier('ch-used', '123456', '198.51.100.47')).rejects.toThrow(UnauthorizedException);
+
+      expect(mockChallengesRepository.findOne).not.toHaveBeenCalled();
+      expect(mockTotpService.matchLoginCode).not.toHaveBeenCalled();
+      expect(mockSessionsRepository.save).not.toHaveBeenCalled();
+      expect(mockJwtService.sign).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['expired', { id: 'ch-expired', accountId: 'account-1', challengeType: 'totp', expiresAt: Date.now() - 1, usedAt: null }],
+      ['wrong type', { id: 'ch-wrong-type', accountId: 'account-1', challengeType: 'webauthn', expiresAt: Date.now() + 60_000, usedAt: null }],
+    ])('does not issue tokens for an %s challenge', async (_label, challenge) => {
+      const verifier = getVerifier();
+      if (!verifier) return;
+      mockSystemMetaRepository.findOne.mockResolvedValue(null);
+      mockChallengesRepository.update.mockResolvedValue({ affected: 1 });
+      mockChallengesRepository.findOne.mockResolvedValue(challenge);
+
+      await expect(verifier(challenge.id, '123456', '198.51.100.48')).rejects.toThrow(UnauthorizedException);
+
+      expect(mockTotpService.matchLoginCode).not.toHaveBeenCalled();
+      expect(mockSessionsRepository.save).not.toHaveBeenCalled();
+      expect(mockJwtService.sign).not.toHaveBeenCalled();
+    });
+
+    it('issues tokens only after the active account challenge verifies and clears both failure counters', async () => {
+      const verifier = getVerifier();
+      if (!verifier) return;
+      const ip = '198.51.100.49';
+      mockSystemMetaRepository.findOne.mockResolvedValue(null);
+      mockSystemMetaRepository.delete.mockResolvedValue(undefined);
+      mockChallengesRepository.update.mockResolvedValue({ affected: 1 });
+      mockChallengesRepository.findOne.mockResolvedValue({
+        id: 'ch-valid', accountId: 'account-1', challengeType: 'totp', expiresAt: Date.now() + 60_000, usedAt: null,
+      });
+      mockAccountsService.findById.mockResolvedValue({ id: 'account-1', username: 'admin' });
+      mockTotpService.matchLoginCode.mockResolvedValue({ authenticatorId: 'auth-1', timestamp: 1_800_000_000_000 });
+      mockTotpService.consumeLoginStep.mockResolvedValue(true);
+      mockJwtService.sign.mockReturnValue('access');
+
+      const result = await verifier('ch-valid', '654321', ip);
+
+      expect(result).toEqual({ accessToken: 'access', refreshToken: expect.any(String), expiresIn: 86400, username: 'admin' });
+      const clearedKeys = mockQueryRunner.query.mock.calls
+        .filter(([sql]) => typeof sql === 'string' && sql.startsWith('DELETE FROM system_meta'))
+        .map(([_sql, parameters]) => parameters[0]);
+      expect(clearedKeys).toEqual(expect.arrayContaining(['login_lockout_admin', `login_ip_${ip}`]));
+      expect(mockAuditService.record).toHaveBeenCalledWith({
+        accountId: 'account-1', action: 'auth.login', details: { second_factor: 'totp' }, ip,
+      });
+      expect(mockQueryRunner.query.mock.calls.some(([sql]) => typeof sql === 'string' && sql.startsWith('INSERT INTO sessions'))).toBe(true);
+      expect(JSON.stringify(mockAuditService.record.mock.calls)).not.toContain('654321');
+      expect(JSON.stringify(mockAuditService.record.mock.calls)).not.toContain('ch-valid');
+    });
+
+    it('checks IP throttling before consuming a challenge', async () => {
+      const verifier = getVerifier();
+      if (!verifier) return;
+      mockSystemMetaRepository.findOne.mockResolvedValue({
+        key: 'login_ip_198.51.100.50',
+        value: JSON.stringify({ failed_count: 10, delay_until: Date.now() + 60_000 }),
+      });
+
+      await expect(verifier('ch-throttled', '123456', '198.51.100.50')).rejects.toThrow(UnauthorizedException);
+
+      expect(mockChallengesRepository.update).not.toHaveBeenCalled();
+      expect(mockTotpService.matchLoginCode).not.toHaveBeenCalled();
+      expect(mockSessionsRepository.save).not.toHaveBeenCalled();
     });
   });
 

@@ -1,8 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
+import { DataSource } from 'typeorm';
 import { Setting } from './entities/setting.entity';
+import { Authenticator } from '../auth/entities/authenticator.entity';
+import { beginImmediate, safeRollback } from '../common/database/tx.helper';
 
 export interface SiteSettings {
   name: string;
@@ -12,6 +15,8 @@ export interface SiteSettings {
 
 export interface SecuritySettings {
   totp_required: boolean;
+  /** Derived at read time; never persisted. */
+  totp_active?: boolean;
   max_login_attempts: number;
   lockout_minutes: number;
 }
@@ -40,6 +45,9 @@ export class SettingsService {
     @InjectRepository(Setting)
     private settingsRepository: Repository<Setting>,
     private configService: ConfigService,
+    @InjectRepository(Authenticator)
+    private authenticatorsRepository: Repository<Authenticator>,
+    private dataSource: DataSource,
   ) {}
 
   async get<T>(key: string, defaultValue: T): Promise<T> {
@@ -66,11 +74,45 @@ export class SettingsService {
   }
 
   async getSecuritySettings(): Promise<SecuritySettings> {
-    return this.get<SecuritySettings>('security', {
+    const stored = await this.get<SecuritySettings>('security', {
       totp_required: false,
       max_login_attempts: 5,
       lockout_minutes: 15,
     });
+    const active = await this.authenticatorsRepository.count({ where: { type: 'totp', isActive: 1 } });
+    return { ...stored, totp_active: active > 0 };
+  }
+
+  async setSecuritySettings(value: SecuritySettings, updatedBy?: string): Promise<void> {
+    const { totp_active: _derived, ...toStore } = value;
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    try {
+      await beginImmediate(queryRunner);
+      if (toStore.totp_required === true) {
+        const rows = await queryRunner.query(
+          'SELECT COUNT(1) AS count FROM authenticators WHERE type = ? AND is_active = ?',
+          ['totp', 1],
+        );
+        const active = Number(rows[0]?.count ?? 0);
+        if (active === 0) {
+          throw new BadRequestException({
+            code: 'TOTP_NOT_ENABLED',
+            message: 'Enable TOTP for your account before requiring it',
+          });
+        }
+      }
+      await queryRunner.query(
+        'INSERT INTO settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by',
+        ['security', JSON.stringify(toStore), Date.now(), updatedBy || null],
+      );
+      await queryRunner.query('COMMIT');
+    } catch (error) {
+      await safeRollback(queryRunner);
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
   }
 
   async getTransferSettings(): Promise<TransferSettings> {
