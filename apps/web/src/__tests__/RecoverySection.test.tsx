@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type { ReactElement } from 'react';
+import { act, cleanup, fireEvent, render as testingLibraryRender, screen, waitFor } from '@testing-library/react';
+import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
 import RecoverySection from '../pages/settings/RecoverySection';
+import { RecoveryGenerationProvider } from '../contexts/RecoveryGenerationContext';
 import { api } from '../lib/api';
 
 vi.mock('../lib/api', () => ({
@@ -17,6 +20,31 @@ const recoveryCodes = [
   'ABCD-EFGH-JK', 'BCDE-FGHJ-KM', 'CDEF-GHJK-MN', 'DEFG-HJKM-NP', 'EFGH-JKMN-PQ',
   'FGHJ-KMNP-QR', 'GHJK-MNPQ-RS', 'HJKM-NPQR-ST', 'JKMN-PQRS-TV', 'KMNP-QRST-VW',
 ];
+
+function render(ui: ReactElement) {
+  const result = testingLibraryRender(<RecoveryGenerationProvider>{ui}</RecoveryGenerationProvider>);
+  return {
+    ...result,
+    rerender: (nextUi: ReactElement) => result.rerender(<RecoveryGenerationProvider>{nextUi}</RecoveryGenerationProvider>),
+  };
+}
+
+function RecoveryNavigationHarness() {
+  return (
+    <RecoveryGenerationProvider>
+      <MemoryRouter initialEntries={['/settings']}>
+        <nav>
+          <Link to="/other">离开设置</Link>
+          <Link to="/settings">返回设置</Link>
+        </nav>
+        <Routes>
+          <Route path="/settings" element={<RecoverySection totpActive={false} />} />
+          <Route path="/other" element={<p>已离开设置</p>} />
+        </Routes>
+      </MemoryRouter>
+    </RecoveryGenerationProvider>
+  );
+}
 
 describe('RecoverySection', () => {
   beforeEach(() => {
@@ -48,7 +76,7 @@ describe('RecoverySection', () => {
     expect(setItem).not.toHaveBeenCalled();
     expect(localStorage.length).toBe(0);
 
-    fireEvent.click(screen.getByRole('button', { name: '我已安全保存，关闭' }));
+    fireEvent.click(screen.getByRole('button', { name: '我已安全保存，清除恢复码' }));
     expect(screen.queryByText(recoveryCodes[0])).not.toBeInTheDocument();
     expect(screen.queryByLabelText('当前密码')).not.toBeInTheDocument();
     setItem.mockRestore();
@@ -147,18 +175,48 @@ describe('RecoverySection', () => {
     expect(screen.getByLabelText('当前 6 位 TOTP 验证码')).toHaveValue('');
   });
 
-  it('does not publish codes when generation resolves after the section unmounts', async () => {
+  it('keeps one pending request attached across an in-app unmount and remount', async () => {
     let resolveGeneration!: (response: unknown) => void;
     mockedApi.post.mockImplementationOnce(() => new Promise((resolve) => { resolveGeneration = resolve; }) as never);
-    const first = render(<RecoverySection totpActive={false} />);
+    testingLibraryRender(<RecoveryNavigationHarness />);
     fireEvent.click(screen.getByRole('button', { name: '生成新的一组' }));
     fireEvent.change(screen.getByLabelText('当前密码'), { target: { value: 'password-placeholder' } });
     fireEvent.click(screen.getByRole('button', { name: '确认生成' }));
-    first.unmount();
 
+    fireEvent.click(screen.getByRole('link', { name: '离开设置' }));
+    expect(await screen.findByText('已离开设置')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('link', { name: '返回设置' }));
+    expect(screen.getByRole('button', { name: '正在生成…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '取消' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent('请保持此页面打开');
+    fireEvent.submit(screen.getByRole('button', { name: '正在生成…' }).closest('form')!);
+    expect(mockedApi.post).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('link', { name: '离开设置' }));
+    const pendingUnload = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+    window.dispatchEvent(pendingUnload);
+    expect(pendingUnload.defaultPrevented).toBe(true);
     await act(async () => resolveGeneration({ data: { codes: recoveryCodes } }));
-    render(<RecoverySection totpActive={false} />);
-    expect(screen.queryByText(recoveryCodes[0])).not.toBeInTheDocument();
+    const settledUnload = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+    window.dispatchEvent(settledUnload);
+    expect(settledUnload.defaultPrevented).toBe(false);
+    fireEvent.click(screen.getByRole('link', { name: '返回设置' }));
+    expect(await screen.findByText(recoveryCodes[0])).toBeInTheDocument();
+    expect(localStorage.length).toBe(0);
+  });
+
+  it('preserves a generation error across unmount and remount without persisting it', async () => {
+    let rejectGeneration!: (reason: Error) => void;
+    mockedApi.post.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectGeneration = reject; }) as never);
+    testingLibraryRender(<RecoveryNavigationHarness />);
+    fireEvent.click(screen.getByRole('button', { name: '生成新的一组' }));
+    fireEvent.change(screen.getByLabelText('当前密码'), { target: { value: 'password-placeholder' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认生成' }));
+
+    fireEvent.click(screen.getByRole('link', { name: '离开设置' }));
+    await act(async () => rejectGeneration(new Error('generation rejected')));
+    fireEvent.click(screen.getByRole('link', { name: '返回设置' }));
+    expect(screen.getByRole('alert')).toHaveTextContent('generation rejected');
     expect(localStorage.length).toBe(0);
   });
 
@@ -196,7 +254,7 @@ describe('RecoverySection', () => {
     fireEvent.click(screen.getByRole('button', { name: '确认生成' }));
     await screen.findByText(recoveryCodes[0]);
     fireEvent.click(screen.getByRole('button', { name: '复制全部' }));
-    fireEvent.click(screen.getByRole('button', { name: '我已安全保存，关闭' }));
+    fireEvent.click(screen.getByRole('button', { name: '我已安全保存，清除恢复码' }));
     fireEvent.click(screen.getByRole('button', { name: '生成新的一组' }));
 
     await act(async () => resolveCopy());
@@ -308,9 +366,9 @@ describe('RecoverySection', () => {
     });
   });
 
-  it('clears the password on cancel and does not restore codes after unmount', async () => {
+  it('clears the password on cancel and keeps codes until explicit save confirmation', async () => {
     mockedApi.post.mockResolvedValue({ data: { codes: recoveryCodes } } as never);
-    const first = render(<RecoverySection totpActive={false} />);
+    testingLibraryRender(<RecoveryNavigationHarness />);
     fireEvent.click(screen.getByRole('button', { name: '生成新的一组' }));
     fireEvent.change(screen.getByLabelText('当前密码'), { target: { value: 'password-placeholder' } });
     fireEvent.click(screen.getByRole('button', { name: '取消' }));
@@ -320,8 +378,14 @@ describe('RecoverySection', () => {
     fireEvent.click(screen.getByRole('button', { name: '确认生成' }));
     await screen.findByText(recoveryCodes[0]);
 
-    first.unmount();
-    render(<RecoverySection totpActive={false} />);
+    fireEvent.click(screen.getByRole('link', { name: '离开设置' }));
+    fireEvent.click(screen.getByRole('link', { name: '返回设置' }));
+    expect(screen.getByText(recoveryCodes[0])).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('link', { name: '离开设置' }));
+    fireEvent.click(screen.getByRole('link', { name: '返回设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '我已安全保存，清除恢复码' }));
+    fireEvent.click(screen.getByRole('link', { name: '离开设置' }));
+    fireEvent.click(screen.getByRole('link', { name: '返回设置' }));
     expect(screen.queryByText(recoveryCodes[0])).not.toBeInTheDocument();
     expect(document.body).not.toHaveTextContent(recoveryCodes[0]);
   });

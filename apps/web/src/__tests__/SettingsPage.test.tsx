@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import type { ReactElement } from 'react';
+import { act, cleanup, fireEvent, render as testingLibraryRender, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import SettingsPage from '../pages/SettingsPage';
+import { RecoveryGenerationProvider } from '../contexts/RecoveryGenerationContext';
 import { api } from '../lib/api';
 import { useAuthStore } from '../stores/authStore';
 
@@ -15,6 +17,11 @@ vi.mock('../lib/api', () => ({
 }));
 
 const mockedApi = vi.mocked(api);
+
+function render(ui: ReactElement) {
+  return testingLibraryRender(<RecoveryGenerationProvider>{ui}</RecoveryGenerationProvider>);
+}
+
 const baseSettings = {
   site: { name: 'FileStation', icon: null, theme_color: '#2563eb' },
   security: { totp_required: false, totp_active: false, max_login_attempts: 5, lockout_minutes: 15 },

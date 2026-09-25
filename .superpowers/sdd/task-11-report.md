@@ -2,7 +2,7 @@
 
 ## 结果
 
-- `SettingsPage` 在 TOTP 区之后挂载 `RecoverySection`，并按后端派生的 `totp_active` 决定是否收集 6 位验证码。组件使用 Task 10 的 `POST /auth/recovery/generate` `{ password, totp_code? }` 契约，从 `ApiResponse.data.codes` 读取且验证完整 10 码；生成请求发出时清空密码/TOTP 输入，成功后只在组件内存展示，关闭或卸载即清除，没有 localStorage/日志写入。
+- `SettingsPage` 在 TOTP 区之后挂载 `RecoverySection`，并按后端派生的 `totp_active` 决定是否收集 6 位验证码。组件使用 Task 10 的 `POST /auth/recovery/generate` `{ password, totp_code? }` 契约，从 `ApiResponse.data.codes` 读取且验证完整 10 码；生成请求发出时清空密码/TOTP 输入。应用作用域 Provider 在 React Router 页间卸载时继续持有 single-flight 请求、结果和错误；恢复码只存在应用内存，直到用户明确确认已安全保存并清除，不写入 localStorage/sessionStorage/日志。
 - 提供完整复制与 `text/plain` 下载；Clipboard 缺失/拒绝、Blob、object URL 创建、链接点击与 object URL 释放失败均有可访问的反馈。下载链接会在下一轮事件后撤销其 object URL，给浏览器启动下载留出时间；用户关闭码组或组件卸载后的剪贴板迟到结果不会覆盖新状态。
 - `LoginPage` 添加密码页和 TOTP challenge 页的恢复入口，恢复表单按 Task 10 契约提交 `{ username, code }`；成功用返回的 access token 和用户名走现有 auth store / 导航。所有恢复验证失败共用一条错误，不显示原始服务端错误或账户/码状态差异。空闲时切换模式会清 challenge、密码、TOTP/恢复码和错误；认证 pending 时锁定所有模式入口，卸载后的响应仍不会回写组件状态。
 - 恢复码列表和操作区使用单列到双列的窄屏布局契约、长码换行、语义 label/list、inline `role=alert` / `role=status`。
@@ -17,9 +17,16 @@
 - `npm run lint` 无法运行：server/web 缺 ESLint executable，shared 无 lint script；未安装工具链。
 - 工作区 `git diff --check`、暂存后 `git diff --cached --check` 均通过；提交前仅暂存 Task 11 源码、测试、CURRENT-STATE 及平铺 SDD brief/report/progress。
 
+## 第二轮复审修复
+
+- 复审指出 beforeunload 无法拦截 AppLayout 的 React Router 导航：设置页卸载会释放组件本地锁并丢弃 A 的迟到结果，返回设置可再次请求 B。核对 `App.tsx` 路由与 `RecoverySection` cleanup 后确认成立。
+- RED：新增 MemoryRouter Link 导航测试，覆盖 pending 离页/返回仍为同一请求且禁用二次生成、A 在设置页卸载期间完成后返回可见同一码组、生成错误跨卸载保留、用户确认已保存后码组才从内存清除。修复前 RecoverySection 聚焦测试 17 项有 3 项按预期失败。
+- 修复：在 `App` 实例内、BrowserRouter 外挂载 `RecoveryGenerationProvider`，状态与 single-flight 锁不使用 module singleton，测试中的 Provider 按用例隔离。request settle 后即使 SettingsPage 已卸载，成功码组/失败信息仍留在 Provider 供下次进入显示；仅“我已安全保存，清除恢复码”会清除码组。beforeunload 监听也上移至 Provider，React Router 导航后仍对刷新/关闭生效。明文恢复码不进入任何持久化存储或日志。
+- GREEN：RecoverySection/SettingsPage/AppLayout 聚焦 36/36；Web 全量 12 files / 92 passed；Recovery E2E 12/12；TOTP E2E 12/12；根目录 typecheck/build、`git diff --check` 通过。第一次定向命令因 Vitest 写 `.vite/vitest/results.json` 遇 EPERM 而以失败码退出，随后加 `--no-cache` 重跑通过。lint 仍不可用（无 ESLint executable / shared 无 lint script）；React Router future-flag 警告保持既有状态。
+
 ## 运行边界
 
-- 生成请求 pending 时取消和提交按钮禁用，单飞锁保持到请求 settle；`beforeunload` 会提示用户不要刷新/关闭。该接口没有取消信号、幂等请求键或可恢复结果，浏览器崩溃、断网、SPA 卸载或服务端完成但响应丢失时，服务端可能已替换旧码组而新明文码无法送达。前端不持久化恢复码，并明确提示此状态不能依赖恢复码且应确保存在其他认证途径。
+- 生成请求 pending 时取消和提交按钮禁用，应用作用域 single-flight 锁保持到请求 settle；`beforeunload` 会提示用户不要刷新/关闭，React Router 页间导航则由 Provider 保留 pending 与响应结果。该接口没有取消信号、幂等请求键或可恢复结果，浏览器崩溃、断网、整个 App/页面卸载或服务端完成但响应丢失时，服务端可能已替换旧码组而新明文码无法送达。前端不持久化恢复码，并明确提示此状态不能依赖恢复码且应确保存在其他认证途径。
 
 ## 视觉验收与限制
 
@@ -40,4 +47,4 @@
 
 ### 协议级残余风险
 
-`beforeunload` 只为可拦截的刷新/关闭提供浏览器提示；它无法保证浏览器崩溃、网络中断、SPA 导航卸载或服务端已提交而响应丢失时，新生成的明文码一定送达客户端。当前接口没有幂等请求键/可恢复结果，也不应在客户端持久化明文恢复码；不确定时旧码可能已失效、新码可能未送达，前端无法确认服务器此刻采用的恢复码组。此限制已在 UI 和本报告明确告知。
+应用作用域 Provider 消除了 React Router 页面切换造成的锁释放与结果丢失；`beforeunload` 仍只为可拦截的刷新/关闭提供浏览器提示，无法保证浏览器崩溃、网络中断、整个 App/页面卸载或服务端已提交而响应丢失时，新生成的明文码一定送达客户端。当前接口没有幂等请求键/可恢复结果，也不应在客户端持久化明文恢复码；不确定时旧码可能已失效、新码可能未送达，前端无法确认服务器此刻采用的恢复码组。此限制已在 UI 和本报告明确告知。

@@ -1,31 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
-import { api } from '../../lib/api';
+import { useRecoveryGeneration } from '../../contexts/RecoveryGenerationContext';
 
 interface RecoverySectionProps {
   totpActive: boolean;
-}
-
-interface RecoveryGenerateResponse {
-  codes: string[];
-}
-
-function getErrorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
 }
 
 export default function RecoverySection({ totpActive }: RecoverySectionProps) {
   const [formOpen, setFormOpen] = useState(false);
   const [password, setPassword] = useState('');
   const [totpCode, setTotpCode] = useState('');
-  const [codes, setCodes] = useState<string[] | null>(null);
-  const [generating, setGenerating] = useState(false);
   const [copying, setCopying] = useState(false);
   const [downloading, setDownloading] = useState(false);
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+  const {
+    codes, generating, error, notice, generate: generateRecovery,
+    clearCodes, clearFeedback, setError, setNotice,
+  } = useRecoveryGeneration();
   const mounted = useRef(true);
-  const requestGeneration = useRef(0);
-  const requestInFlight = useRef(false);
   const codesGeneration = useRef(0);
   const copyInFlight = useRef(false);
   const downloadInFlight = useRef(false);
@@ -34,9 +24,7 @@ export default function RecoverySection({ totpActive }: RecoverySectionProps) {
     mounted.current = true;
     return () => {
       mounted.current = false;
-      requestGeneration.current += 1;
       codesGeneration.current += 1;
-      requestInFlight.current = false;
       copyInFlight.current = false;
       downloadInFlight.current = false;
     };
@@ -46,83 +34,37 @@ export default function RecoverySection({ totpActive }: RecoverySectionProps) {
     if (!totpActive) setTotpCode('');
   }, [totpActive]);
 
-  useEffect(() => {
-    if (!generating) return;
-    const preventUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = '';
-    };
-    window.addEventListener('beforeunload', preventUnload);
-    return () => window.removeEventListener('beforeunload', preventUnload);
-  }, [generating]);
-
   const openForm = () => {
     setPassword('');
     setTotpCode('');
-    setError('');
-    setNotice('');
+    clearFeedback();
     setFormOpen(true);
   };
 
   const cancelForm = () => {
-    if (requestInFlight.current) return;
-    requestGeneration.current += 1;
-    requestInFlight.current = false;
+    if (generating) return;
     codesGeneration.current += 1;
     copyInFlight.current = false;
     downloadInFlight.current = false;
-    setGenerating(false);
     setCopying(false);
     setDownloading(false);
     setFormOpen(false);
     setPassword('');
     setTotpCode('');
-    setCodes(null);
-    setError('');
-    setNotice('');
+    clearFeedback();
   };
 
-  const generate = async (event: React.FormEvent) => {
+  const handleGenerate = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (requestInFlight.current || !password || (totpActive && !/^\d{6}$/.test(totpCode))) return;
+    if (generating || !password || (totpActive && !/^\d{6}$/.test(totpCode))) return;
 
-    const generation = ++requestGeneration.current;
     const submittedPassword = password;
     const submittedTotpCode = totpCode;
-    requestInFlight.current = true;
-    setGenerating(true);
-    setError('');
-    setNotice('');
     setPassword('');
     setTotpCode('');
 
-    try {
-      const response = await api.post<RecoveryGenerateResponse>('/auth/recovery/generate', {
-        password: submittedPassword,
-        ...(totpActive ? { totp_code: submittedTotpCode } : {}),
-      });
-      if (!mounted.current || generation !== requestGeneration.current) return;
-
-      const generatedCodes = response.data?.codes;
-      if (!Array.isArray(generatedCodes) || generatedCodes.length !== 10
-        || generatedCodes.some((code) => typeof code !== 'string' || code.length === 0)) {
-        throw new Error('服务返回的恢复码不完整，请重试生成。');
-      }
-
-      codesGeneration.current += 1;
-      setCodes(generatedCodes);
-      setFormOpen(false);
-      setNotice('恢复码只会展示一次，请立即保存；关闭后无法再次查看。');
-    } catch (requestError) {
-      if (mounted.current && generation === requestGeneration.current) {
-        setError(getErrorMessage(requestError, '生成恢复码失败，请重试。'));
-      }
-    } finally {
-      if (mounted.current && generation === requestGeneration.current) {
-        requestInFlight.current = false;
-        setGenerating(false);
-      }
-    }
+    const succeeded = await generateRecovery(submittedPassword, submittedTotpCode, totpActive);
+    if (mounted.current && succeeded) setFormOpen(false);
   };
 
   const copyCodes = async () => {
@@ -205,18 +147,18 @@ export default function RecoverySection({ totpActive }: RecoverySectionProps) {
     }
   };
 
-  const dismissCodes = () => {
+  const confirmCodesSaved = () => {
     codesGeneration.current += 1;
     copyInFlight.current = false;
     downloadInFlight.current = false;
     setCopying(false);
     setDownloading(false);
-    setCodes(null);
-    setError('');
-    setNotice('');
+    clearCodes();
+    clearFeedback();
   };
 
   const validTotp = /^\d{6}$/.test(totpCode);
+  const showForm = formOpen || generating;
 
   return (
     <section className="bg-white shadow rounded-lg p-4 md:p-6 mb-6 min-w-0" aria-labelledby="recovery-heading">
@@ -237,7 +179,7 @@ export default function RecoverySection({ totpActive }: RecoverySectionProps) {
       {error && <p role="alert" className="text-red-700 bg-red-50 border border-red-200 rounded p-3 mb-3 break-words">{error}</p>}
       {notice && <p role="status" className="text-green-700 bg-green-50 border border-green-200 rounded p-3 mb-3 break-words">{notice}</p>}
 
-      {!formOpen && !codes && (
+      {!showForm && !codes && (
         <button
           type="button"
           onClick={openForm}
@@ -247,8 +189,8 @@ export default function RecoverySection({ totpActive }: RecoverySectionProps) {
         </button>
       )}
 
-      {formOpen && (
-        <form className="space-y-4 min-w-0" onSubmit={generate} aria-labelledby="recovery-generate-heading">
+      {showForm && (
+        <form className="space-y-4 min-w-0" onSubmit={handleGenerate} aria-labelledby="recovery-generate-heading">
           <h3 id="recovery-generate-heading" className="text-sm font-medium text-gray-800">确认身份以生成恢复码</h3>
           <div>
             <label htmlFor="recovery-current-password" className="block text-sm font-medium text-gray-700">当前密码</label>
@@ -334,10 +276,10 @@ export default function RecoverySection({ totpActive }: RecoverySectionProps) {
             </button>
             <button
               type="button"
-              onClick={dismissCodes}
+              onClick={confirmCodesSaved}
               className="px-3 py-2 border rounded text-sm hover:bg-gray-50"
             >
-              我已安全保存，关闭
+              我已安全保存，清除恢复码
             </button>
           </div>
         </div>

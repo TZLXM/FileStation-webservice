@@ -8,6 +8,7 @@ import SharePage from './pages/SharePage';
 import SettingsPage from './pages/SettingsPage';
 import AuditPage from './pages/AuditPage';
 import PageErrorBoundary from './components/PageErrorBoundary';
+import { RecoveryGenerationProvider } from './contexts/RecoveryGenerationContext';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, checkAuth } = useAuthStore();
@@ -30,39 +31,41 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
 function App() {
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/init" element={<InitPage />} />
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/s/:id" element={<SharePage />} />
-        <Route
-          path="/"
-          element={
-            <ProtectedRoute>
-              <FilesPage />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/settings"
-          element={
-            <ProtectedRoute>
-              <SettingsPage />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/audit"
-          element={
-            <ProtectedRoute>
-              <PageErrorBoundary>
-                <AuditPage />
-              </PageErrorBoundary>
-            </ProtectedRoute>
-          }
-        />
-      </Routes>
-    </BrowserRouter>
+    <RecoveryGenerationProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/init" element={<InitPage />} />
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/s/:id" element={<SharePage />} />
+          <Route
+            path="/"
+            element={
+              <ProtectedRoute>
+                <FilesPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <ProtectedRoute>
+                <SettingsPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/audit"
+            element={
+              <ProtectedRoute>
+                <PageErrorBoundary>
+                  <AuditPage />
+                </PageErrorBoundary>
+              </ProtectedRoute>
+            }
+          />
+        </Routes>
+      </BrowserRouter>
+    </RecoveryGenerationProvider>
   );
 }
 
