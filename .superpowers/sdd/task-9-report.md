@@ -35,4 +35,5 @@
 - 修复轮 1 提交：`bb51b70`。刷新只覆盖派生 `totp_active`，保留未保存设置草稿；以递增 generation 忽略迟到的 TOTP 状态刷新。SettingsPage 9/9 通过。
 - GPT-5.6 Sol 二轮复审确认前两项已解决，但发现旧 refresh 的 reject 仍会形成矛盾错误提示。补测在 10 项设置页测试中得到 1 个预期失败；增加代际错误过滤后 SettingsPage 10/10 通过。
 - 修复轮 2 提交：`af71ec6`；generation-aware catch 忽略过期请求的 reject，仍将最新 refresh 错误传播给当前 TOTP 操作。GPT-5.6 Sol 第三轮指出当前 generation 的错误传播缺回归覆盖；现已分别补充启用/停用刷新失败测试（SettingsPage 12/12）。
-- 最终复审和本轮测试/文档提交待完成。
+- 测试与状态文档提交：`9b33240`。GPT-5.6 Sol 最终复审（`af71ec6..9b33240`）结论 APPROVED，无 Critical/Important；确认当前代际 enable/disable 错误、过期响应、未保存开关草稿均符合预期。
+- 本地浏览器受环境限制，桌面/移动像素验收仍需在可用浏览器补做；lint 缺 ESLint 可执行文件。其余 Task 9 验收通过。
