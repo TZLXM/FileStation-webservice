@@ -121,9 +121,7 @@ export default function LoginPage() {
   };
 
   const returnToPasswordStep = () => {
-    requestGeneration.current += 1;
-    requestInFlight.current = false;
-    setLoading(false);
+    if (requestInFlight.current) return;
     setSecondFactor(null);
     setTotpCode('');
     setPassword('');
@@ -132,9 +130,7 @@ export default function LoginPage() {
   };
 
   const switchToRecoveryMode = () => {
-    requestGeneration.current += 1;
-    requestInFlight.current = false;
-    setLoading(false);
+    if (requestInFlight.current) return;
     setSecondFactor(null);
     setPassword('');
     setTotpCode('');
@@ -146,9 +142,7 @@ export default function LoginPage() {
   };
 
   const returnFromRecoveryMode = () => {
-    requestGeneration.current += 1;
-    requestInFlight.current = false;
-    setLoading(false);
+    if (requestInFlight.current) return;
     setSecondFactor(null);
     setPassword('');
     setTotpCode('');
@@ -253,6 +247,7 @@ export default function LoginPage() {
             <button
               type="button"
               onClick={returnFromRecoveryMode}
+              disabled={loading}
               className="w-full py-2 text-sm text-blue-700 underline underline-offset-2"
             >
               返回账号登录
@@ -291,6 +286,7 @@ export default function LoginPage() {
             <button
               type="button"
               onClick={returnToPasswordStep}
+              disabled={loading}
               className="w-full py-2 text-sm text-blue-700 underline underline-offset-2"
             >
               返回账号登录
@@ -298,6 +294,7 @@ export default function LoginPage() {
             <button
               type="button"
               onClick={switchToRecoveryMode}
+              disabled={loading}
               className="w-full py-2 text-xs text-gray-500 underline underline-offset-2 hover:text-gray-700"
             >
               无法使用验证器？使用恢复码登录
@@ -350,6 +347,7 @@ export default function LoginPage() {
             <button
               type="button"
               onClick={switchToRecoveryMode}
+              disabled={loading}
               className="w-full py-2 text-xs text-gray-500 underline underline-offset-2 hover:text-gray-700"
             >
               无法使用验证器？使用恢复码登录

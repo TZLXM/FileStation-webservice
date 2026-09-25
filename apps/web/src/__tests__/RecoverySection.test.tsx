@@ -97,30 +97,54 @@ describe('RecoverySection', () => {
     expect(await screen.findByText(recoveryCodes[0])).toBeInTheDocument();
   });
 
-  it('ignores a cancelled stale response without unlocking a newer generation request', async () => {
-    let resolveFirst!: (response: unknown) => void;
-    let resolveSecond!: (response: unknown) => void;
-    mockedApi.post
-      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }) as never)
-      .mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve; }) as never);
+  it('keeps generation single-flight and prevents cancellation while the server request is pending', async () => {
+    let resolveGeneration!: (response: unknown) => void;
+    mockedApi.post.mockImplementationOnce(() => new Promise((resolve) => { resolveGeneration = resolve; }) as never);
     render(<RecoverySection totpActive={false} />);
     fireEvent.click(screen.getByRole('button', { name: '生成新的一组' }));
-    fireEvent.change(screen.getByLabelText('当前密码'), { target: { value: 'first-password-placeholder' } });
-    const firstForm = screen.getByRole('button', { name: '确认生成' }).closest('form')!;
-    fireEvent.submit(firstForm);
-    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    fireEvent.change(screen.getByLabelText('当前密码'), { target: { value: 'password-placeholder' } });
+    const form = screen.getByRole('button', { name: '确认生成' }).closest('form')!;
+    fireEvent.submit(form);
 
-    fireEvent.click(screen.getByRole('button', { name: '生成新的一组' }));
-    fireEvent.change(screen.getByLabelText('当前密码'), { target: { value: 'second-password-placeholder' } });
-    const secondForm = screen.getByRole('button', { name: '确认生成' }).closest('form')!;
-    fireEvent.submit(secondForm);
-    expect(mockedApi.post).toHaveBeenCalledTimes(2);
-
-    await act(async () => resolveFirst({ data: { codes: ['STALE-CODE'] } }));
+    expect(screen.getByRole('button', { name: '取消' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '正在生成…' })).toBeDisabled();
-    expect(screen.queryByText('STALE-CODE')).not.toBeInTheDocument();
-    await act(async () => resolveSecond({ data: { codes: recoveryCodes } }));
+    expect(screen.getByRole('status')).toHaveTextContent('请保持此页面打开');
+    fireEvent.submit(form);
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    expect(mockedApi.post).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText('当前密码')).toBeInTheDocument();
+
+    await act(async () => resolveGeneration({ data: { codes: recoveryCodes } }));
     expect(await screen.findByText(recoveryCodes[0])).toBeInTheDocument();
+  });
+
+  it('warns before unloading while generation is pending and releases the guard after settlement', async () => {
+    let resolveGeneration!: (response: unknown) => void;
+    mockedApi.post.mockImplementationOnce(() => new Promise((resolve) => { resolveGeneration = resolve; }) as never);
+    render(<RecoverySection totpActive={false} />);
+    fireEvent.click(screen.getByRole('button', { name: '生成新的一组' }));
+    fireEvent.change(screen.getByLabelText('当前密码'), { target: { value: 'password-placeholder' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认生成' }));
+
+    const pendingUnload = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+    window.dispatchEvent(pendingUnload);
+    expect(pendingUnload.defaultPrevented).toBe(true);
+
+    await act(async () => resolveGeneration({ data: { codes: recoveryCodes } }));
+    const settledUnload = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+    window.dispatchEvent(settledUnload);
+    expect(settledUnload.defaultPrevented).toBe(false);
+  });
+
+  it('clears a hidden TOTP code when the parent disables TOTP', () => {
+    const view = render(<RecoverySection totpActive />);
+    fireEvent.click(screen.getByRole('button', { name: '生成新的一组' }));
+    fireEvent.change(screen.getByLabelText('当前 6 位 TOTP 验证码'), { target: { value: '123456' } });
+
+    view.rerender(<RecoverySection totpActive={false} />);
+    expect(screen.queryByLabelText('当前 6 位 TOTP 验证码')).not.toBeInTheDocument();
+    view.rerender(<RecoverySection totpActive />);
+    expect(screen.getByLabelText('当前 6 位 TOTP 验证码')).toHaveValue('');
   });
 
   it('does not publish codes when generation resolves after the section unmounts', async () => {

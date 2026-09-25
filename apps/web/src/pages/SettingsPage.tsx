@@ -45,8 +45,17 @@ export default function SettingsPage() {
       : response.data!);
   };
 
-  const refreshTotpStatus = async () => {
+  const refreshTotpStatus = async (active: boolean) => {
     const generation = ++totpRefreshGeneration.current;
+    setSettings((current) => current
+      ? {
+        ...current,
+        security: {
+          ...current.security,
+          totp_active: active,
+        },
+      }
+      : current);
     try {
       const response = await api.get<Settings>('/settings');
       if (generation !== totpRefreshGeneration.current) return;

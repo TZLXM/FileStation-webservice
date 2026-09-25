@@ -113,7 +113,28 @@ describe('LoginPage TOTP flow', () => {
     expect(login).toHaveBeenCalledWith('fresh-access-placeholder', 'alice');
   });
 
-  it('ignores a late verification response after returning to password login', async () => {
+  it('keeps password mode switching disabled until the cookie-setting password response settles', async () => {
+    let resolvePasswordLogin!: (value: unknown) => void;
+    mockedApi.post.mockImplementationOnce(() => new Promise((resolve) => { resolvePasswordLogin = resolve; }) as never);
+    renderLogin();
+    fireEvent.change(screen.getByLabelText('用户名'), { target: { value: 'alice' } });
+    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'password-placeholder' } });
+    fireEvent.click(screen.getByRole('button', { name: '登录' }));
+
+    const recoveryEntry = screen.getByRole('button', { name: '无法使用验证器？使用恢复码登录' });
+    expect(recoveryEntry).toBeDisabled();
+    fireEvent.click(recoveryEntry);
+    expect(screen.getByLabelText('密码')).toBeInTheDocument();
+    expect(screen.queryByLabelText('恢复码')).not.toBeInTheDocument();
+
+    await act(async () => resolvePasswordLogin({ data: {
+      access_token: 'password-access-placeholder', expires_in: 86400,
+    } }));
+    expect(await screen.findByText('首页已加载')).toBeInTheDocument();
+    expect(login).toHaveBeenCalledWith('password-access-placeholder', 'alice');
+  });
+
+  it('keeps both TOTP mode switches disabled until the cookie-setting verification settles', async () => {
     let resolveVerification!: (value: unknown) => void;
     mockedApi.post
       .mockResolvedValueOnce({ data: { requires_second_factor: true, login_challenge: challengeOne, available_methods: ['totp'] } } as never)
@@ -123,14 +144,20 @@ describe('LoginPage TOTP flow', () => {
     await submitPassword();
     fireEvent.change(await screen.findByLabelText('验证器验证码'), { target: { value: '123456' } });
     fireEvent.click(screen.getByRole('button', { name: '验证并登录' }));
-    fireEvent.click(screen.getByRole('button', { name: '返回账号登录' }));
+
+    const returnButton = screen.getByRole('button', { name: '返回账号登录' });
+    const recoveryEntry = screen.getByRole('button', { name: '无法使用验证器？使用恢复码登录' });
+    expect(returnButton).toBeDisabled();
+    expect(recoveryEntry).toBeDisabled();
+    fireEvent.click(returnButton);
+    fireEvent.click(recoveryEntry);
+    expect(screen.getByLabelText('验证器验证码')).toBeInTheDocument();
 
     await act(async () => {
-      resolveVerification({ data: { access_token: 'stale-access-placeholder', expires_in: 900, username: 'alice' } });
+      resolveVerification({ data: { access_token: 'totp-access-placeholder', expires_in: 900, username: 'alice' } });
     });
-    await waitFor(() => expect(screen.getByLabelText('密码')).toBeInTheDocument());
-    expect(screen.queryByText('首页已加载')).not.toBeInTheDocument();
-    expect(login).not.toHaveBeenCalled();
+    expect(await screen.findByText('首页已加载')).toBeInTheDocument();
+    expect(login).toHaveBeenCalledWith('totp-access-placeholder', 'alice');
   });
 
   it('does not send duplicate password requests when submit fires twice before the first response', async () => {
@@ -211,7 +238,7 @@ describe('LoginPage TOTP flow', () => {
     expect(mockedApi.post).toHaveBeenCalledTimes(2);
   });
 
-  it('prevents duplicate recovery requests and ignores a response after returning to password login', async () => {
+  it('keeps recovery mode locked until the cookie-setting recovery response settles', async () => {
     let resolveRecovery!: (response: unknown) => void;
     mockedApi.post.mockImplementationOnce(() => new Promise((resolve) => { resolveRecovery = resolve; }) as never);
     renderLogin();
@@ -223,13 +250,15 @@ describe('LoginPage TOTP flow', () => {
     fireEvent.submit(form);
     expect(mockedApi.post).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByRole('button', { name: '返回账号登录' }));
+    const returnButton = screen.getByRole('button', { name: '返回账号登录' });
+    expect(returnButton).toBeDisabled();
+    fireEvent.click(returnButton);
+    expect(screen.getByLabelText('恢复码')).toBeInTheDocument();
     await act(async () => resolveRecovery({ data: {
-      access_token: 'stale-recovery-access-placeholder', expires_in: 86400, username: 'alice',
+      access_token: 'recovery-access-after-pending-placeholder', expires_in: 86400, username: 'alice',
     } }));
-    expect(screen.getByLabelText('密码')).toBeInTheDocument();
-    expect(screen.queryByText('首页已加载')).not.toBeInTheDocument();
-    expect(login).not.toHaveBeenCalled();
+    expect(await screen.findByText('首页已加载')).toBeInTheDocument();
+    expect(login).toHaveBeenCalledWith('recovery-access-after-pending-placeholder', 'alice');
   });
 
   it('does not establish a session if a recovery response arrives after unmount', async () => {

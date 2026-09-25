@@ -42,6 +42,20 @@ export default function RecoverySection({ totpActive }: RecoverySectionProps) {
     };
   }, []);
 
+  useEffect(() => {
+    if (!totpActive) setTotpCode('');
+  }, [totpActive]);
+
+  useEffect(() => {
+    if (!generating) return;
+    const preventUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', preventUnload);
+    return () => window.removeEventListener('beforeunload', preventUnload);
+  }, [generating]);
+
   const openForm = () => {
     setPassword('');
     setTotpCode('');
@@ -51,6 +65,7 @@ export default function RecoverySection({ totpActive }: RecoverySectionProps) {
   };
 
   const cancelForm = () => {
+    if (requestInFlight.current) return;
     requestGeneration.current += 1;
     requestInFlight.current = false;
     codesGeneration.current += 1;
@@ -209,6 +224,15 @@ export default function RecoverySection({ totpActive }: RecoverySectionProps) {
       <p className="text-sm text-gray-600 mb-4">
         验证器无法使用时，可用恢复码登录。每组 10 个、每个只能使用一次，生成后 24 小时内有效；使用后会撤销所有现有登录会话。
       </p>
+      <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-3 mb-4 break-words">
+        若生成请求期间连接中断，本页无法确认服务器是否已替换旧恢复码；结果不确定时请先不要依赖恢复码，并确保仍有其他可用认证途径。
+      </p>
+
+      {generating && (
+        <p role="status" className="text-sm text-blue-800 bg-blue-50 border border-blue-200 rounded p-3 mb-3">
+          恢复码正在生成，请保持此页面打开并等待结果；完成前不能取消或再次提交。
+        </p>
+      )}
 
       {error && <p role="alert" className="text-red-700 bg-red-50 border border-red-200 rounded p-3 mb-3 break-words">{error}</p>}
       {notice && <p role="status" className="text-green-700 bg-green-50 border border-green-200 rounded p-3 mb-3 break-words">{notice}</p>}
@@ -272,6 +296,7 @@ export default function RecoverySection({ totpActive }: RecoverySectionProps) {
             <button
               type="button"
               onClick={cancelForm}
+              disabled={generating}
               className="px-4 py-2 border rounded-md text-sm"
             >
               取消

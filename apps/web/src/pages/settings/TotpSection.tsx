@@ -8,7 +8,7 @@ interface TotpSetupData {
 
 interface TotpSectionProps {
   totpActive: boolean;
-  onChanged: () => void | Promise<void>;
+  onChanged: (active: boolean) => void | Promise<void>;
 }
 
 function getErrorMessage(error: unknown, fallback: string): string {
@@ -123,7 +123,7 @@ export default function TotpSection({ totpActive, onChanged }: TotpSectionProps)
       setOptimisticActive(true);
       setNotice('TOTP 已启用。');
       try {
-        await onChanged();
+        await onChanged(true);
       } catch {
         setRefreshError('TOTP 已启用，但状态刷新失败；请重新载入设置确认状态。');
       }
@@ -176,7 +176,7 @@ export default function TotpSection({ totpActive, onChanged }: TotpSectionProps)
       setOptimisticActive(false);
       setNotice('TOTP 已停用。');
       try {
-        await onChanged();
+        await onChanged(false);
       } catch {
         setRefreshError('TOTP 已停用，但状态刷新失败；请重新载入设置确认状态。');
       }

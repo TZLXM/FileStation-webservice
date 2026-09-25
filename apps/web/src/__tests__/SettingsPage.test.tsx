@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import SettingsPage from '../pages/SettingsPage';
 import { api } from '../lib/api';
@@ -170,6 +170,97 @@ describe('SettingsPage Phase 2 sections', () => {
     const savedSettings = mockedApi.put.mock.calls[1][1] as { security: Record<string, unknown> };
     expect(savedSettings.security).toMatchObject({ totp_required: true });
     expect(savedSettings.security).not.toHaveProperty('totp_active');
+  });
+
+  it('syncs derived TOTP activation and deactivation before refresh settles without overwriting the required draft', async () => {
+    let activeOnServer = false;
+    let settingsReads = 0;
+    let resolveEnableRefresh!: (response: unknown) => void;
+    let resolveDisableRefresh!: (response: unknown) => void;
+    const settingsResponse = (active: boolean) => ({
+      ...baseSettings,
+      security: { ...baseSettings.security, totp_active: active },
+      agent: { mcp_enabled: false, mcp_max_upload_mb: 32 },
+    });
+    mockedApi.get.mockImplementation(async (path: string) => {
+      if (path === '/settings') {
+        settingsReads += 1;
+        if (settingsReads === 1) return { data: settingsResponse(false) } as never;
+        if (settingsReads === 2) return new Promise((resolve) => { resolveEnableRefresh = resolve; }) as never;
+        if (settingsReads === 3) return new Promise((resolve) => { resolveDisableRefresh = resolve; }) as never;
+      }
+      if (path === '/api-tokens') return { data: [] } as never;
+      return { data: [] } as never;
+    });
+    mockedApi.post.mockImplementation(async (path: string) => {
+      if (path === '/auth/totp/setup') return { data: {
+        secret: 'activation-secret-placeholder',
+        otpauth_url: 'otpauth://totp/activation-placeholder',
+        qr_code_data_url: 'data:image/png;base64,YWN0aXZhdGlvbg==',
+      } } as never;
+      if (path === '/auth/totp/confirm') activeOnServer = true;
+      if (path === '/auth/totp/disable') activeOnServer = false;
+      return { data: null } as never;
+    });
+
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+    const required = await screen.findByLabelText('要求登录时使用 TOTP');
+    fireEvent.click(required);
+    fireEvent.click(await screen.findByRole('button', { name: '启用 TOTP' }));
+    fireEvent.change(await screen.findByLabelText('确认验证码'), { target: { value: '123456' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认启用' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('TOTP 已启用');
+
+    fireEvent.click(screen.getByRole('button', { name: '生成新的一组' }));
+    expect(screen.getByLabelText('当前 6 位 TOTP 验证码')).toBeInTheDocument();
+    expect(required).toBeChecked();
+    await act(async () => resolveEnableRefresh({ data: settingsResponse(activeOnServer) }));
+
+    const totpSection = (await screen.findByRole('heading', { name: '两步验证（TOTP）' })).closest('section')!;
+    fireEvent.click(within(totpSection).getByRole('button', { name: '停用 TOTP' }));
+    fireEvent.change(within(totpSection).getByLabelText('当前密码'), { target: { value: 'password-placeholder' } });
+    fireEvent.change(within(totpSection).getByLabelText('当前验证码'), { target: { value: '654321' } });
+    fireEvent.click(within(totpSection).getByRole('button', { name: '确认停用' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('TOTP 已停用');
+    await waitFor(() => expect(screen.queryByLabelText('当前 6 位 TOTP 验证码')).not.toBeInTheDocument());
+    expect(required).toBeChecked();
+    await act(async () => resolveDisableRefresh({ data: settingsResponse(activeOnServer) }));
+    expect(required).toBeChecked();
+  });
+
+  it('updates the recovery requirement immediately after confirmed TOTP deactivation', async () => {
+    let refreshStatus!: (response: unknown) => void;
+    let settingsReads = 0;
+    mockedApi.get.mockImplementation(async (path: string) => {
+      if (path === '/settings') {
+        settingsReads += 1;
+        if (settingsReads === 1) return { data: {
+          ...baseSettings,
+          security: { ...baseSettings.security, totp_active: true },
+          agent: { mcp_enabled: false, mcp_max_upload_mb: 32 },
+        } } as never;
+        return new Promise((resolve) => { refreshStatus = resolve; }) as never;
+      }
+      if (path === '/api-tokens') return { data: [] } as never;
+      return { data: [] } as never;
+    });
+    mockedApi.post.mockResolvedValue({ data: null } as never);
+
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+    const totpSection = (await screen.findByRole('heading', { name: '两步验证（TOTP）' })).closest('section')!;
+    fireEvent.click(within(totpSection).getByRole('button', { name: '停用 TOTP' }));
+    fireEvent.change(within(totpSection).getByLabelText('当前密码'), { target: { value: 'password-placeholder' } });
+    fireEvent.change(within(totpSection).getByLabelText('当前验证码'), { target: { value: '654321' } });
+    fireEvent.click(within(totpSection).getByRole('button', { name: '确认停用' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('TOTP 已停用');
+
+    fireEvent.click(screen.getByRole('button', { name: '生成新的一组' }));
+    expect(screen.queryByLabelText('当前 6 位 TOTP 验证码')).not.toBeInTheDocument();
+    await act(async () => refreshStatus({ data: {
+      ...baseSettings,
+      security: { ...baseSettings.security, totp_active: false },
+      agent: { mcp_enabled: false, mcp_max_upload_mb: 32 },
+    } }));
   });
 
   it('ignores an older TOTP status refresh that returns after a newer disable refresh', async () => {
