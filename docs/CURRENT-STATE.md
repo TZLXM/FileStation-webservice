@@ -11,7 +11,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 | 设计文档 | v2.2 已完成；Phase 1 实施计划迭代至 v1.7（经两轮外部评审） |
 | 项目管理 | AGENTS.md 已建立 |
 | 代码实现 | Phase 1 MVP 完成；Phase 2 TOTP 两步登录与设置页管理、API Token、审计日志、MCP 服务及对应 Web 页面已实现 |
-| 测试 | server 24 suites / 143 passed / 20 todo；web 61 passed；Task 8 TOTP E2E 12 passed；server E2E 5 suites / 52 passed；Phase 1 浏览器端到端手动验证通过 |
+| 测试 | server 24 suites / 143 passed / 20 todo；web 65 passed；Task 8 TOTP E2E 12 passed；server E2E 5 suites / 52 passed；Phase 1 浏览器端到端手动验证通过 |
 | 部署 | 单进程模式（默认）与 Nginx 反代模式均可用；已推送至 GitHub |
 
 ## 设计决策摘要

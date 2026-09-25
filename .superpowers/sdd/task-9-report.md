@@ -10,7 +10,7 @@
 ## 验证
 
 - TDD：先运行新增行为测试，观察到预期 RED（7 个预期失败、原有设置页测试通过），再完成实现并转绿。
-- Web 全量：11 个测试文件，62 项通过（含 review fix-round 回归）。
+- Web 全量：11 个测试文件，65 项通过（含 review fix-round 回归）。
 - Server 单元：24 suites，143 passed、20 todo。
 - Task 8 TOTP e2e：12 项通过，覆盖服务端实际 challenge、消费与 settings 契约。
 - `npm run typecheck`：通过。
@@ -34,4 +34,5 @@
 - GPT-5.6 Sol 首轮审阅指出两项 Important：TOTP 状态刷新覆盖未保存的 `totp_required` 草稿，以及并发 refresh 缺少陈旧响应保护；均已先补充回归测试并验证 RED，再修复为 GREEN。
 - 修复轮 1 提交：`bb51b70`。刷新只覆盖派生 `totp_active`，保留未保存设置草稿；以递增 generation 忽略迟到的 TOTP 状态刷新。SettingsPage 9/9 通过。
 - GPT-5.6 Sol 二轮复审确认前两项已解决，但发现旧 refresh 的 reject 仍会形成矛盾错误提示。补测在 10 项设置页测试中得到 1 个预期失败；增加代际错误过滤后 SettingsPage 10/10 通过。
-- 修复轮 2 提交与 GPT-5.6 Sol 最终复审结论待补记。
+- 修复轮 2 提交：`af71ec6`；generation-aware catch 忽略过期请求的 reject，仍将最新 refresh 错误传播给当前 TOTP 操作。GPT-5.6 Sol 第三轮指出当前 generation 的错误传播缺回归覆盖；现已分别补充启用/停用刷新失败测试（SettingsPage 12/12）。
+- 最终复审和本轮测试/文档提交待完成。
