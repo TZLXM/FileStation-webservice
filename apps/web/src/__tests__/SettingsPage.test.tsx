@@ -106,8 +106,15 @@ describe('SettingsPage Phase 2 sections', () => {
       }
       return { data: null } as never;
     });
+    mockedApi.put.mockRejectedValue(new Error('Enable TOTP for your account before requiring it'));
 
     render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+    const required = await screen.findByLabelText('要求登录时使用 TOTP');
+    fireEvent.click(required);
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Enable TOTP for your account before requiring it');
+    expect(required).toBeChecked();
+
     fireEvent.click(await screen.findByRole('button', { name: '启用 TOTP' }));
     expect(await screen.findByAltText('TOTP 设置二维码')).toHaveAttribute('src', 'data:image/png;base64,c3ludGhldGlj');
     expect(screen.getByText('synthetic-secret-placeholder')).toBeInTheDocument();
@@ -126,14 +133,68 @@ describe('SettingsPage Phase 2 sections', () => {
     expect(mockedApi.post).toHaveBeenNthCalledWith(1, '/auth/totp/setup', {});
     expect(mockedApi.post).toHaveBeenNthCalledWith(2, '/auth/totp/confirm', { code: '123456' });
     expect(mockedApi.get).toHaveBeenCalledTimes(3);
+    expect(required).toBeChecked();
 
     mockedApi.put.mockResolvedValue({ data: null } as never);
-    fireEvent.click(screen.getByLabelText('要求登录时使用 TOTP'));
     fireEvent.click(screen.getByRole('button', { name: '保存设置' }));
     expect(await screen.findByText('设置已保存。')).toBeInTheDocument();
-    const savedSettings = mockedApi.put.mock.calls[0][1] as { security: Record<string, unknown> };
+    const savedSettings = mockedApi.put.mock.calls[1][1] as { security: Record<string, unknown> };
     expect(savedSettings.security).toMatchObject({ totp_required: true });
     expect(savedSettings.security).not.toHaveProperty('totp_active');
+  });
+
+  it('ignores an older TOTP status refresh that returns after a newer disable refresh', async () => {
+    let activeOnServer = false;
+    let settingsReads = 0;
+    let resolveEnableRefresh!: (value: unknown) => void;
+    let resolveDisableRefresh!: (value: unknown) => void;
+    const settingsResponse = (active: boolean) => ({
+      ...baseSettings,
+      security: { ...baseSettings.security, totp_active: active },
+      agent: { mcp_enabled: false, mcp_max_upload_mb: 32 },
+    });
+    mockedApi.get.mockImplementation(async (path: string) => {
+      if (path === '/settings') {
+        settingsReads += 1;
+        if (settingsReads === 1) return { data: settingsResponse(false) } as never;
+        if (settingsReads === 2) return new Promise((resolve) => { resolveEnableRefresh = resolve; }) as never;
+        if (settingsReads === 3) return new Promise((resolve) => { resolveDisableRefresh = resolve; }) as never;
+      }
+      if (path === '/api-tokens') return { data: [] } as never;
+      return { data: [] } as never;
+    });
+    mockedApi.post.mockImplementation(async (path: string) => {
+      if (path === '/auth/totp/setup') {
+        return { data: {
+          secret: 'race-secret-placeholder',
+          otpauth_url: 'otpauth://totp/race-placeholder',
+          qr_code_data_url: 'data:image/png;base64,cmFjZQ==',
+        } } as never;
+      }
+      if (path === '/auth/totp/confirm') activeOnServer = true;
+      if (path === '/auth/totp/disable') activeOnServer = false;
+      return { data: null } as never;
+    });
+
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: '启用 TOTP' }));
+    fireEvent.change(await screen.findByLabelText('确认验证码'), { target: { value: '123456' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认启用' }));
+    expect(await screen.findByRole('button', { name: '停用 TOTP' })).toBeInTheDocument();
+    await waitFor(() => expect(settingsReads).toBe(2));
+
+    fireEvent.click(screen.getByRole('button', { name: '停用 TOTP' }));
+    fireEvent.change(screen.getByLabelText('当前密码'), { target: { value: 'password-placeholder' } });
+    fireEvent.change(screen.getByLabelText('当前验证码'), { target: { value: '654321' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认停用' }));
+    await waitFor(() => expect(settingsReads).toBe(3));
+
+    await act(async () => resolveDisableRefresh({ data: settingsResponse(activeOnServer) }));
+    expect(await screen.findByRole('button', { name: '启用 TOTP' })).toBeInTheDocument();
+    await act(async () => resolveEnableRefresh({ data: settingsResponse(true) }));
+
+    expect(screen.getByRole('button', { name: '启用 TOTP' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '停用 TOTP' })).not.toBeInTheDocument();
   });
 
   it('keeps the setup instructions visible when the confirmation code is rejected', async () => {

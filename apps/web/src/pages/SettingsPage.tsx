@@ -20,6 +20,7 @@ export default function SettingsPage() {
   const [saveError, setSaveError] = useState('');
   const [saveNotice, setSaveNotice] = useState('');
   const saveInFlight = useRef(false);
+  const totpRefreshGeneration = useRef(0);
 
   useEffect(() => {
     loadSettings();
@@ -44,7 +45,9 @@ export default function SettingsPage() {
   };
 
   const refreshTotpStatus = async () => {
+    const generation = ++totpRefreshGeneration.current;
     const response = await api.get<Settings>('/settings');
+    if (generation !== totpRefreshGeneration.current) return;
     const latest = response.data!;
     setSettings((current) => current
       ? {
@@ -52,7 +55,6 @@ export default function SettingsPage() {
         security: {
           ...current.security,
           totp_active: latest.security.totp_active,
-          totp_required: latest.security.totp_required,
         },
       }
       : latest);

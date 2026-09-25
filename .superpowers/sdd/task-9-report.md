@@ -10,7 +10,7 @@
 ## 验证
 
 - TDD：先运行新增行为测试，观察到预期 RED（7 个预期失败、原有设置页测试通过），再完成实现并转绿。
-- Web 全量：11 个测试文件，61 项通过。
+- Web 全量：11 个测试文件，62 项通过（含 review fix-round 回归）。
 - Server 单元：24 suites，143 passed、20 todo。
 - Task 8 TOTP e2e：12 项通过，覆盖服务端实际 challenge、消费与 settings 契约。
 - `npm run typecheck`：通过。
@@ -30,4 +30,7 @@
 
 ## 提交 / 审阅
 
-- 待提交；提交后补充 commit SHA 与 GPT-5.6 Sol 审阅结论。
+- 初始实现提交：`40bfb8a`（GPT-6 Luna）。
+- GPT-5.6 Sol 首轮审阅指出两项 Important：TOTP 状态刷新覆盖未保存的 `totp_required` 草稿，以及并发 refresh 缺少陈旧响应保护；均已先补充回归测试并验证 RED，再修复为 GREEN。
+- 修复轮改变：刷新只覆盖派生 `totp_active`，保留未保存设置草稿；以递增 generation 忽略迟到的 TOTP 状态刷新。回归测试前 9 项中 2 项按预期失败，修复后 SettingsPage 9/9 通过。
+- 修复轮完整 Web 11 files / 62 passed，typecheck、build、diff-check 通过；修复提交与 GPT-5.6 Sol 复审结论待补记。
