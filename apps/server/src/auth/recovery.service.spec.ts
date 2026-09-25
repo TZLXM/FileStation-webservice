@@ -13,6 +13,8 @@ import { Authenticator } from './entities/authenticator.entity';
 import { RecoveryCode } from './entities/recovery-code.entity';
 import { Session } from './entities/session.entity';
 import { SystemMeta } from './entities/system-meta.entity';
+import type { RecoverySessionMaterial } from './recovery.service';
+import { v4 as uuidv4 } from 'uuid';
 
 type RecoveryServiceModule = { RecoveryService: new (...args: any[]) => any };
 
@@ -44,6 +46,18 @@ describe('RecoveryService', () => {
   };
   const auditService = { record: jest.fn().mockResolvedValue(undefined) };
   let passwordHash = '';
+
+  function preparedSessionMaterial(): RecoverySessionMaterial {
+    const id = uuidv4();
+    const now = Date.now();
+    return {
+      id,
+      accountId: 'account-1',
+      refreshTokenHash: `prepared-refresh-hash-${id}`,
+      createdAt: now,
+      expiresAt: now + 7 * 24 * 60 * 60 * 1000,
+    };
+  }
 
   beforeAll(async () => {
     if (!recoveryModule) return;
@@ -155,7 +169,8 @@ describe('RecoveryService', () => {
     await expect(subject.verify('admin', first[0])).rejects.toMatchObject({
       response: { code: 'INVALID_RECOVERY_CODE' },
     });
-    await expect(subject.verify('admin', second[0])).resolves.toEqual({ accountId: 'account-1' });
+    await expect(subject.verify('admin', second[0], undefined, preparedSessionMaterial()))
+      .resolves.toEqual({ accountId: 'account-1' });
   });
 
   it('keeps the old group usable if any insert in a replacement group fails', async () => {
@@ -171,7 +186,8 @@ describe('RecoveryService', () => {
     try {
       await expect(subject.generate('account-1', 'current-password')).rejects.toThrow('injected recovery insert failure');
       expect(await codeRepository.findBy({ accountId: 'account-1' })).toEqual(previousRows);
-      await expect(subject.verify('admin', previousCodes[0])).resolves.toEqual({ accountId: 'account-1' });
+      await expect(subject.verify('admin', previousCodes[0], undefined, preparedSessionMaterial()))
+        .resolves.toEqual({ accountId: 'account-1' });
     } finally {
       await dataSource.query('DROP TRIGGER IF EXISTS fail_recovery_group_insert');
     }
@@ -209,6 +225,10 @@ describe('RecoveryService', () => {
     await accountRepository.save({
       id: 'other-account', username: 'other', passwordHash, passwordChangedAt: now, createdAt: now, isActive: 1,
     });
+    await metaRepository.save({
+      key: 'login_ip_198.51.100.45',
+      value: JSON.stringify({ failed_count: 3, delay_until: null }),
+    });
     await sessionRepository.save([
       { id: 'session-active-1', accountId: 'account-1', refreshTokenHash: 'hash-1', deviceInfo: null, createdAt: now, expiresAt: now + 1_000, revokedAt: null },
       { id: 'session-active-2', accountId: 'account-1', refreshTokenHash: 'hash-2', deviceInfo: null, createdAt: now, expiresAt: now + 1_000, revokedAt: null },
@@ -216,22 +236,66 @@ describe('RecoveryService', () => {
       { id: 'session-other', accountId: 'other-account', refreshTokenHash: 'hash-4', deviceInfo: null, createdAt: now, expiresAt: now + 1_000, revokedAt: null },
     ]);
 
-    const result = await subject.verify('admin', code.toLowerCase().replace('-', ' '), '198.51.100.45');
+    const recoverySession = preparedSessionMaterial();
+    const result = await subject.verify('admin', code.toLowerCase().replace('-', ' '), '198.51.100.45', recoverySession);
     const consumed = (await codeRepository.findBy({ accountId: 'account-1' })).find(({ usedAt }) => usedAt !== null) ?? null;
     const sessions = await sessionRepository.find();
 
     expect(result).toEqual({ accountId: 'account-1' });
     expect(consumed).not.toBeNull();
     expect(consumed?.usedAt).toEqual(expect.any(Number));
+    expect(sessions.find(({ id }) => id === recoverySession.id)).toMatchObject({
+      accountId: recoverySession.accountId,
+      refreshTokenHash: recoverySession.refreshTokenHash,
+      createdAt: recoverySession.createdAt,
+      expiresAt: recoverySession.expiresAt,
+      revokedAt: null,
+    });
     expect(sessions.find(({ id }) => id === 'session-active-1')?.revokedAt).toEqual(expect.any(Number));
     expect(sessions.find(({ id }) => id === 'session-active-2')?.revokedAt).toEqual(expect.any(Number));
     expect(sessions.find(({ id }) => id === 'session-old')?.revokedAt).toBe(now - 1);
     expect(sessions.find(({ id }) => id === 'session-other')?.revokedAt).toBeNull();
     expect(await metaRepository.findOneBy({ key: 'recovery_fail_admin' })).toBeNull();
+    expect(await metaRepository.findOneBy({ key: 'login_ip_198.51.100.45' })).toBeNull();
     expect(auditService.record).toHaveBeenCalledWith({
       accountId: 'account-1', action: 'recovery.used', ip: '198.51.100.45',
     });
     await expect(subject.verify('admin', code)).rejects.toMatchObject({ response: { code: 'INVALID_RECOVERY_CODE' } });
+  });
+
+  it('rolls back recovery consumption, revocation, and IP reset if prepared session insertion fails', async () => {
+    const subject = requireService();
+    if (!subject || !dataSource) return;
+
+    const [code] = await subject.generate('account-1', 'current-password') as string[];
+    const now = Date.now();
+    await sessionRepository.save({
+      id: 'session-before-failed-recovery', accountId: 'account-1', refreshTokenHash: 'old-refresh-hash',
+      deviceInfo: null, createdAt: now, expiresAt: now + 1_000, revokedAt: null,
+    });
+    await metaRepository.save({
+      key: 'login_ip_198.51.100.90',
+      value: JSON.stringify({ failed_count: 4, delay_until: null }),
+    });
+    const brokenSession: RecoverySessionMaterial = {
+      ...preparedSessionMaterial(),
+      id: 'session-insert-failure',
+    };
+    await dataSource.query(`CREATE TRIGGER fail_recovery_session_insert
+      BEFORE INSERT ON sessions WHEN NEW.id = 'session-insert-failure'
+      BEGIN SELECT RAISE(ABORT, 'injected recovery session failure'); END`);
+
+    try {
+      await expect(subject.verify('admin', code, '198.51.100.90', brokenSession))
+        .rejects.toThrow('injected recovery session failure');
+      expect((await codeRepository.findBy({ accountId: 'account-1' }))[0].usedAt).toBeNull();
+      expect((await sessionRepository.findOneByOrFail({ id: 'session-before-failed-recovery' })).revokedAt).toBeNull();
+      expect(JSON.parse((await metaRepository.findOneByOrFail({ key: 'login_ip_198.51.100.90' })).value))
+        .toEqual({ failed_count: 4, delay_until: null });
+      expect(auditService.record).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'recovery.used' }));
+    } finally {
+      await dataSource.query('DROP TRIGGER IF EXISTS fail_recovery_session_insert');
+    }
   });
 
   it('rejects an expired code without consuming it or revoking sessions', async () => {
@@ -309,13 +373,43 @@ describe('RecoveryService', () => {
 
     const [code] = await subject.generate('account-1', 'current-password') as string[];
     const outcomes = await Promise.allSettled([
-      subject.verify('admin', code),
-      subject.verify('admin', code),
+      subject.verify('admin', code, undefined, preparedSessionMaterial()),
+      subject.verify('admin', code, undefined, preparedSessionMaterial()),
     ]);
 
     expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
     expect(outcomes.filter((outcome) => outcome.status === 'rejected')).toHaveLength(1);
     expect((await codeRepository.findBy({ accountId: 'account-1' })).filter(({ usedAt }) => usedAt !== null)).toHaveLength(1);
     expect((await sessionRepository.findBy({ accountId: 'account-1' })).filter(({ revokedAt }) => revokedAt !== null)).toHaveLength(0);
+  });
+
+  it('linearizes distinct valid codes across independent service and SQLite transaction queues', async () => {
+    const subject = requireService();
+    if (!subject || !recoveryModule) return;
+
+    const codes: string[] = await subject.generate('account-1', 'current-password');
+    const otherTransactionService = new SqliteImmediateTransactionService({ get: () => dbPath } as any);
+    const otherService = new recoveryModule.RecoveryService(
+      codeRepository,
+      accountsService,
+      totpService,
+      auditService as unknown as AuditService,
+      otherTransactionService,
+    );
+    const firstSession = preparedSessionMaterial();
+    const secondSession = preparedSessionMaterial();
+    const outcomes = await Promise.all([
+      subject.verify('admin', codes[0], undefined, firstSession),
+      otherService.verify('admin', codes[1], undefined, secondSession),
+    ]);
+    const sessions = await sessionRepository.findBy({ accountId: 'account-1' });
+    const active = sessions.filter(({ revokedAt }) => revokedAt === null);
+    const used = await codeRepository.findBy({ accountId: 'account-1' });
+
+    expect(outcomes).toEqual([{ accountId: 'account-1' }, { accountId: 'account-1' }]);
+    expect(active).toHaveLength(1);
+    expect([firstSession.refreshTokenHash, secondSession.refreshTokenHash]).toContain(active[0].refreshTokenHash);
+    expect(used.filter(({ usedAt }) => usedAt !== null)).toHaveLength(2);
+    expect(sessions.filter(({ revokedAt }) => revokedAt !== null)).toHaveLength(1);
   });
 });

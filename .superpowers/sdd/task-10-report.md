@@ -4,12 +4,13 @@
 
 - 新增 Argon2id 恢复码生成/验证与 DTO，管理员端要求当前密码；账户激活 TOTP 时还要求有效的一次性 TOTP。每次生成 10 个 50-bit Crockford Base32 码，响应只返回一次，存储仅含 Argon2id 哈希，有效期为生成组发布时起 24 小时。
 - 重新生成在全部哈希完成后，通过一个独立即时 SQLite 事务作废旧未用组并插入完整新组；插入失败会回滚删除。实际验证了并发生成最终只发布一个完整组，以及注入 SQLite 插入错误后旧组完整可用。
-- 公开验证统一去除连字符/空白并转大写；最多进行 10 次 Argon2id 比较，未命中位置不提前返回。比较在写事务外完成；最终事务以当前提交时刻再次检查锁定及到期状态，条件更新抢占一次性码，并在同一事务吊销账户所有活跃会话、清失败计数。
-- 账户连续 5 次失败锁 15 分钟；同用户名验证在进程内串行，跨进程由 `BEGIN IMMEDIATE`、事务内重读和条件 UPDATE 保证失败计数与一次性消费正确。没有使用 TypeORM 共享 QueryRunner 执行这些原子操作。
-- `AuthService` 复用现有 IP 节流；恢复成功后清除该 IP 失败状态并签发新会话。管理员生成端点使用 `JwtAuthGuard` 与 `AdminOnlyGuard`；公开验证端点设置 refresh cookie，不在响应中回显提交的恢复码。
-- 未新增数据库迁移；初始 schema 已包含 `recovery_codes`。唯一新增生产依赖为计划要求的 `argon2`。
+- 公开验证统一去除连字符/空白并转大写；最多进行 10 次 Argon2id 比较，未命中位置不提前返回。比较和 token/session 准备均在写事务外完成；最终事务以当前提交时刻再次检查锁定及到期状态，条件更新抢占一次性码，并在同一事务吊销账户所有活跃会话、插入本次 prepared session、清理账户/IP失败状态。
+- 账户连续 5 次失败锁 15 分钟；同用户名验证在进程内串行，跨进程由 `BEGIN IMMEDIATE`、事务内重读和条件 UPDATE 保证消费及失败计数线性化。另用独立 RecoveryService/事务队列的真实 SQLite 测试覆盖不同恢复码并发，不依赖单实例的内存队列。没有使用 TypeORM 共享 QueryRunner 执行这些原子操作。
+- `AuthService` 在用户名查找及 Argon2 之前，以独立即时事务原子预留共享 IP 槽；失败保留计数，成功在恢复消费/旧 session 撤销/新 session 插入事务中清除 IP 状态。refresh cookie 哈希与 prepared session 一致，JWT 的 `sub`/用户名与该 session 账户一致；保持现有无 `session_id` claim 的 admin JWT 形状，未改造全站 access-JWT 撤销语义。
+- 管理员生成端点使用 `JwtAuthGuard` 与 `AdminOnlyGuard`；公开验证端点设置 refresh cookie，不在响应中回显提交的恢复码。新增 `@nestjs/swagger` 7.4.2 与 OpenAPI bootstrap，仅完整注解两个 Task 10 端点及其 DTO/响应；现存非 Task 10 控制器端点本轮不扩展注解范围，Swagger 文档初始化后也会列出这些旧路由但契约完整度留待对应任务补齐。
+- 未新增数据库迁移；初始 schema 已包含 `recovery_codes`。本轮新增生产依赖 `@nestjs/swagger` 7.4.2；Task 10 初始轮另新增计划要求的 `argon2`。
 
-## TDD 与验证
+## 初始实施轮 TDD 与验证记录
 
 - RED：新增服务测试最初 7 项均因 `RecoveryService` 缺失而失败；AuthService 新增 4 个 IP 防线测试在原有 22 项通过的同时失败；新增 E2E 在控制器尚未接线时因路由 404 失败。随后实现并转绿。
 - 服务单测覆盖格式/数量/哈希/24h、密码及 TOTP、旧组替换、替换事务失败回滚、并发生成只发布单组、归一/单次消费/会话吊销、过期和比较期间过期、5 次锁定及第 6 次拒绝、并发同码只成功一次。新增 AuthService 测试覆盖 IP 前置节流、失败计数及成功清理/签发。
@@ -32,3 +33,15 @@
 
 - 实施提交：随 Task 10 范围使用中文 Conventional Commit 提交；具体 commit id 在交接消息中提供。
 - 独立复审：由父任务安排 GPT-5.6 Sol / medium；本实施任务不自行选择审阅模型。
+
+## 独立复审修复轮次
+
+- 复审结论：REJECTED。确认的两项 P1 为同 IP admission 的读/失败计数非原子，及恢复码消费/旧 session 撤销与新 session 插入处于不同线性化点；另有 P2 为新端点缺 Swagger 契约且项目未安装 `@nestjs/swagger`。
+- RED：同 IP 的 11 个不同用户名请求被 gate 在恢复 verifier 时，旧实现没有任何 IP_THROTTLED 响应且 11 项因子工作全进入；在第一个不同有效码消费后挂起 AuthService，第二个有效码完成后旧实现留下 2 个活跃 session；`/api/docs-json` 返回 404。三项均为实现前失败证据。
+- 修复：IP 槽在 Argon2 前 `BEGIN IMMEDIATE` 预留；verified code 的消费、旧 session 撤销、预制新 session 插入和 recovery/IP failure 清理现在同事务提交，cookie/token 只在成功提交后返回。测试也实际证明旧 refresh cookie 401、最终 winner cookie 可 refresh 并正确轮换 session。
+- 并发覆盖：增加两个独立 `RecoveryService` 与两个独立 SQLite 事务队列对不同有效码的竞态，证明最终只留一个活跃 session；注入新 session INSERT 失败，确认旧 session、未用码及 IP 错误状态均因事务回滚保留。
+- Swagger裁定：引入与 Nest 10 peers 兼容的官方 `@nestjs/swagger@7.4.2`，公开 `/api/docs`、`/api/docs-json`，仅为两个新增恢复端点完整添加 auth tag、鉴权、状态码、输入与响应 schemas；本轮不扩展所有历史 controller 的 annotations，旧路由虽然列入全局文档但需后续各自任务补契约。
+- token 语义裁定：现有 admin JWT schema/strategy 不含或校验 session id；本轮令 JWT 主体、refresh cookie 哈希及新 session account/id 由同一预备材料产生，不只为 recovery 新 token 引入失效不一致的 `sid` claim。访问 JWT 的现有 stateless 过期语义未扩展。
+- fix-round 完整验证：server 单测 25 suites / 159 passed / 20 todo；完整 server E2E 6 suites / 61 passed（含恢复码 9/9）；Web Vitest 11 files / 65 passed；根目录 `npm run typecheck` 与 `npm run build` 通过；`git diff --check` 通过。
+- lint 复核仍不可运行：server/web 缺少 `eslint` 可执行文件，shared 无 lint script；没有安装 lint 工具链。为 Swagger 安装时 npm 报告当前依赖树有 39 项 audit findings（6 low、15 moderate、17 high、1 critical）；未运行 audit fix 或扩展升级。
+- `.claude/settings.local.json` 与未跟踪 Phase 2 计划保持未暂存；fix-round 提交 id 在交接消息中报告。

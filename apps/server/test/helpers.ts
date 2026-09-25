@@ -10,6 +10,7 @@ import { createHash } from 'crypto';
 import { AppModule } from '../src/app.module';
 import { AuthService } from '../src/auth/auth.service';
 import { RangeNotSatisfiableFilter } from '../src/common/http/range-not-satisfiable.filter';
+import { setupSwagger } from '../src/common/swagger/setup-swagger';
 
 export interface TestEnv { dir: string; dbPath: string; storagePath: string; tempPath: string; }
 
@@ -38,6 +39,7 @@ export async function createApp(): Promise<INestApplication> {
   const app = moduleFixture.createNestApplication();
   app.use(cookieParser());
   app.setGlobalPrefix('api/v1');
+  setupSwagger(app);
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }));
   app.useGlobalFilters(new RangeNotSatisfiableFilter());
   await app.init();

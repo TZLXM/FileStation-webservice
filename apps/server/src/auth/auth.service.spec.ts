@@ -129,6 +129,7 @@ describe('AuthService', () => {
   };
 
   beforeEach(async () => {
+    mockAccountsService.findByUsername.mockReset().mockResolvedValue(null);
     mockTotpService.hasActiveTotp.mockResolvedValue(false);
     mockTotpService.matchLoginCodeInTransaction.mockResolvedValue(null);
     mockTotpService.consumeLoginStep.mockResolvedValue(false);
@@ -398,46 +399,45 @@ describe('AuthService', () => {
       expect(mockRecoveryService.generate).toHaveBeenCalledWith('account-1', 'current-password', '654321');
     });
 
-    it('checks the IP throttle before asking RecoveryService to inspect a submitted code', async () => {
+    it('atomically rejects a throttled IP before asking RecoveryService to inspect a submitted code', async () => {
       const verify = getMethod('recoveryVerify');
       if (!verify) return;
       const ip = '198.51.100.45';
-      mockSystemMetaRepository.findOne.mockResolvedValue({
-        key: `login_ip_${ip}`,
-        value: JSON.stringify({ failed_count: 10, delay_until: Date.now() + 60_000 }),
+      mockQueryRunner.query.mockImplementation(async (sql: string, parameters?: unknown[]) => {
+        if (sql.startsWith('SELECT value FROM system_meta') && parameters?.[0] === `login_ip_${ip}`) {
+          return [{ value: JSON.stringify({ failed_count: 10, delay_until: Date.now() + 60_000 }) }];
+        }
+        return [];
       });
 
       await expect(verify('admin', 'recovery-test-input', ip)).rejects.toThrow(UnauthorizedException);
 
       expect(mockRecoveryService.verify).not.toHaveBeenCalled();
+      expect(mockQueryRunner.query).toHaveBeenCalledWith('BEGIN IMMEDIATE');
+      expect(mockQueryRunner.query.mock.calls.some(([sql]) => sql === 'ROLLBACK')).toBe(true);
       expect(mockSystemMetaRepository.delete).not.toHaveBeenCalled();
     });
 
-    it('records an IP failure when recovery verification rejects the code', async () => {
+    it('retains the atomically reserved IP slot when recovery verification rejects the code', async () => {
       const verify = getMethod('recoveryVerify');
       if (!verify) return;
       const ip = '198.51.100.46';
-      mockSystemMetaRepository.findOne.mockResolvedValue(null);
       mockRecoveryService.verify.mockRejectedValue(new UnauthorizedException({ code: 'INVALID_RECOVERY_CODE' }));
 
       await expect(verify('admin', 'recovery-test-input', ip)).rejects.toThrow(UnauthorizedException);
 
-      expect(mockRecoveryService.verify).toHaveBeenCalledWith('admin', 'recovery-test-input', ip);
-      const ipUpsert = mockQueryRunner.query.mock.calls.find(([sql, params]) =>
+      expect(mockRecoveryService.verify).toHaveBeenCalledWith('admin', 'recovery-test-input', ip, undefined);
+      const ipUpserts = mockQueryRunner.query.mock.calls.filter(([sql, params]) =>
         typeof sql === 'string' && sql.startsWith('INSERT INTO system_meta') && params?.[0] === `login_ip_${ip}`,
       );
-      expect(ipUpsert).toBeDefined();
+      expect(ipUpserts).toHaveLength(1);
     });
 
-    it('clears IP failures and returns new tokens only after a valid recovery result', async () => {
+    it('prepares the refresh hash and session material before recovery and returns its token only on success', async () => {
       const verify = getMethod('recoveryVerify');
       if (!verify) return;
       const ip = '198.51.100.47';
-      mockSystemMetaRepository.findOne.mockResolvedValue(null);
-      mockSystemMetaRepository.delete.mockResolvedValue({ affected: 1 });
-      mockAccountsService.findById.mockResolvedValue({ id: 'account-1', username: 'admin' });
-      mockSessionsRepository.create.mockImplementation((session) => session);
-      mockSessionsRepository.save.mockResolvedValue(undefined);
+      mockAccountsService.findByUsername.mockResolvedValue({ id: 'account-1', username: 'admin' });
       mockJwtService.sign.mockReturnValue('admin-access-token');
 
       const result = await verify('admin', 'valid-test-input', ip);
@@ -448,8 +448,15 @@ describe('AuthService', () => {
         expiresIn: 86400,
         username: 'admin',
       });
-      expect(mockSystemMetaRepository.delete).toHaveBeenCalledWith({ key: `login_ip_${ip}` });
-      expect(mockSessionsRepository.save).toHaveBeenCalledTimes(1);
+      const [, , , session] = mockRecoveryService.verify.mock.calls[0];
+      expect(session).toMatchObject({ accountId: 'account-1', id: expect.any(String) });
+      expect(session.refreshTokenHash).toBe(createHash('sha256').update(result.refreshToken).digest('hex'));
+      expect(session.expiresAt - session.createdAt).toBe(7 * 24 * 60 * 60 * 1000);
+      expect(mockSessionsRepository.save).not.toHaveBeenCalled();
+      const ipUpserts = mockQueryRunner.query.mock.calls.filter(([sql, params]) =>
+        typeof sql === 'string' && sql.startsWith('INSERT INTO system_meta') && params?.[0] === `login_ip_${ip}`,
+      );
+      expect(ipUpserts).toHaveLength(1);
     });
   });
 

@@ -33,6 +33,14 @@ type VerificationCommit =
   | { kind: 'invalid' }
   | { kind: 'locked'; retryAfterSec: number };
 
+export interface RecoverySessionMaterial {
+  id: string;
+  accountId: string;
+  refreshTokenHash: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
 @Injectable()
 export class RecoveryService {
   private readonly verificationTails = new Map<string, Promise<void>>();
@@ -91,11 +99,21 @@ export class RecoveryService {
     return codes;
   }
 
-  async verify(username: string, code: string, clientIp?: string): Promise<{ accountId: string }> {
-    return this.serializeVerification(username, () => this.verifySerially(username, code, clientIp));
+  async verify(
+    username: string,
+    code: string,
+    clientIp?: string,
+    session?: RecoverySessionMaterial,
+  ): Promise<{ accountId: string }> {
+    return this.serializeVerification(username, () => this.verifySerially(username, code, clientIp, session));
   }
 
-  private async verifySerially(username: string, code: string, clientIp?: string): Promise<{ accountId: string }> {
+  private async verifySerially(
+    username: string,
+    code: string,
+    clientIp?: string,
+    session?: RecoverySessionMaterial,
+  ): Promise<{ accountId: string }> {
     const verificationStartedAt = Date.now();
     await this.assertNotLocked(username, verificationStartedAt);
 
@@ -138,11 +156,21 @@ export class RecoveryService {
           [committedAt, matched.id, account.id, committedAt],
         );
         if (claimed.changes === 1) {
+          if (!session || session.accountId !== account.id) {
+            throw new Error('Recovery verification requires prepared session material for the matched account');
+          }
           await connection.run(
             'UPDATE sessions SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL',
             [committedAt, account.id],
           );
+          await connection.run(
+            'INSERT INTO sessions (id, account_id, refresh_token_hash, device_info, created_at, expires_at, revoked_at) VALUES (?, ?, ?, NULL, ?, ?, NULL)',
+            [session.id, session.accountId, session.refreshTokenHash, session.createdAt, session.expiresAt],
+          );
           await connection.run('DELETE FROM system_meta WHERE key = ?', [failureKey]);
+          if (clientIp) {
+            await connection.run('DELETE FROM system_meta WHERE key = ?', [`login_ip_${clientIp}`]);
+          }
           return { kind: 'accepted' };
         }
       }

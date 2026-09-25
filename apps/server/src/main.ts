@@ -9,6 +9,7 @@ import cookieParser from 'cookie-parser';
 import * as fs from 'fs/promises';
 import { dirname } from 'path';
 import { installNonMcpBodyParsers } from './common/http/body-parsers';
+import { setupSwagger } from './common/swagger/setup-swagger';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
@@ -52,6 +53,7 @@ async function bootstrap() {
   installNonMcpBodyParsers(app);
   app.use(cookieParser());
   app.setGlobalPrefix('api/v1'); // 唯一前缀来源
+  setupSwagger(app);
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,

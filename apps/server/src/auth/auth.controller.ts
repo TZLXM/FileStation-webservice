@@ -6,7 +6,22 @@ import { AdminOnlyGuard } from '../security/guards/admin-only.guard';
 import { InitDto } from './dto/init.dto';
 import { LoginDto } from './dto/login.dto';
 import { TotpCodeDto, TotpDisableDto, TotpLoginDto } from './dto/totp.dto';
-import { RecoveryGenerateDto, RecoveryVerifyDto } from './dto/recovery.dto';
+import {
+  RecoveryGenerateDto,
+  RecoveryGenerateResponseDto,
+  RecoveryVerifyDto,
+  RecoveryVerifyResponseDto,
+} from './dto/recovery.dto';
+import {
+  ApiBadRequestResponse,
+  ApiBearerAuth,
+  ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 import { Response, Request } from 'express';
 
 const REFRESH_COOKIE = 'refresh_token';
@@ -146,6 +161,13 @@ export class AuthController {
 
   @Post('recovery/generate')
   @UseGuards(JwtAuthGuard, AdminOnlyGuard)
+  @ApiTags('auth')
+  @ApiBearerAuth('bearerAuth')
+  @ApiOperation({ summary: 'Generate a new one-time recovery-code group' })
+  @ApiCreatedResponse({ type: RecoveryGenerateResponseDto })
+  @ApiBadRequestResponse({ description: 'Invalid request body' })
+  @ApiUnauthorizedResponse({ description: 'Invalid password or TOTP code' })
+  @ApiForbiddenResponse({ description: 'Administrator principal required' })
   async recoveryGenerate(
     @Req() req: Request & { user: { id: string } },
     @Body() body: RecoveryGenerateDto,
@@ -161,6 +183,11 @@ export class AuthController {
 
   @Post('recovery/verify')
   @HttpCode(HttpStatus.OK)
+  @ApiTags('auth')
+  @ApiOperation({ summary: 'Authenticate with a single-use recovery code' })
+  @ApiOkResponse({ type: RecoveryVerifyResponseDto })
+  @ApiBadRequestResponse({ description: 'Invalid request body' })
+  @ApiUnauthorizedResponse({ description: 'Invalid, expired, used, or locked recovery code' })
   async recoveryVerify(
     @Body() body: RecoveryVerifyDto,
     @Req() req: Request,
