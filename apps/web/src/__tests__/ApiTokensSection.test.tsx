@@ -2,7 +2,8 @@
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { API_TOKEN_SCOPES, ApiTokenInfo, CreatedApiToken } from '@filestation/shared';
+import type { ApiTokenInfo, CreatedApiToken } from '@filestation/shared';
+import { API_TOKEN_SCOPES as SHARED_API_TOKEN_SCOPES } from '../../../../packages/shared/src';
 import ApiTokensSection from '../pages/settings/ApiTokensSection';
 import { api } from '../lib/api';
 
@@ -107,10 +108,51 @@ describe('ApiTokensSection', () => {
     render(<ApiTokensSection />);
     await screen.findByText('desktop');
 
-    expect(screen.getAllByRole('checkbox')).toHaveLength(API_TOKEN_SCOPES.length);
-    for (const scope of API_TOKEN_SCOPES) {
+    expect(screen.getAllByRole('checkbox')).toHaveLength(SHARED_API_TOKEN_SCOPES.length);
+    for (const scope of SHARED_API_TOKEN_SCOPES) {
       expect(screen.getByLabelText(scope)).toBeInTheDocument();
     }
+  });
+
+  it('ignores an older list response that resolves after a post-create refresh', async () => {
+    let resolveInitial!: (response: unknown) => void;
+    const refreshed = { ...activeToken, id: 'token-new', name: 'new token', token_prefix: 'fs_api_new0' };
+    mockedApi.get
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveInitial = resolve; }) as never)
+      .mockResolvedValueOnce({ data: [refreshed] } as never);
+    mockedApi.post.mockResolvedValue({ data: { ...refreshed, token: issuedToken } } as never);
+
+    render(<ApiTokensSection />);
+    fireEvent.change(screen.getByLabelText('Token 名称'), { target: { value: 'new token' } });
+    fireEvent.click(screen.getByRole('button', { name: '签发 Token' }));
+
+    expect(await screen.findByText('new token')).toBeInTheDocument();
+    resolveInitial({ data: [activeToken] });
+    await waitFor(() => expect(screen.queryByText('desktop')).not.toBeInTheDocument());
+    expect(screen.getByText('new token')).toBeInTheDocument();
+  });
+
+  it('keeps a clipboard failure visible when a token list refresh completes', async () => {
+    let resolveRefresh!: (response: unknown) => void;
+    mockedApi.get
+      .mockResolvedValueOnce({ data: [activeToken] } as never)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveRefresh = resolve; }) as never);
+    mockedApi.post.mockResolvedValue({ data: { ...activeToken, id: 'token-2', token: issuedToken } } as never);
+    vi.stubGlobal('navigator', Object.create(window.navigator, {
+      clipboard: { configurable: true, value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } },
+    }));
+
+    render(<ApiTokensSection />);
+    await screen.findByText('desktop');
+    fireEvent.change(screen.getByLabelText('Token 名称'), { target: { value: 'temporary' } });
+    fireEvent.click(screen.getByRole('button', { name: '签发 Token' }));
+    await screen.findByDisplayValue(issuedToken);
+    fireEvent.click(screen.getByRole('button', { name: '复制 Token' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('复制失败');
+
+    resolveRefresh({ data: [activeToken] });
+    await waitFor(() => expect(mockedApi.get).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole('alert')).toHaveTextContent('复制失败');
   });
 
   it('does not treat an incomplete numeric lifetime as a permanent token', async () => {

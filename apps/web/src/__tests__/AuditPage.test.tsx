@@ -87,4 +87,22 @@ describe('AuditPage', () => {
     expect(details.closest('details')).toHaveAttribute('open');
     expect(screen.getByText(/a-very-long-filename-that-remains-readable\.zip/)).toBeInTheDocument();
   });
+
+  it('clamps to the last valid page when the result set shrinks', async () => {
+    mockedApi.get
+      .mockResolvedValueOnce({ data: result([log('1', 'page.one')], 41, 1) } as never)
+      .mockResolvedValueOnce({ data: result([log('2', 'page.two')], 41, 2) } as never)
+      .mockResolvedValueOnce({ data: result([], 1, 3) } as never)
+      .mockResolvedValueOnce({ data: result([log('latest', 'page.latest')], 1, 1) } as never);
+    render(<MemoryRouter><AuditPage /></MemoryRouter>);
+    await screen.findByText('page.one');
+
+    fireEvent.click(screen.getByRole('button', { name: '下一页' }));
+    await screen.findByText('page.two');
+    fireEvent.click(screen.getByRole('button', { name: '下一页' }));
+
+    expect(await screen.findByText('page.latest')).toBeInTheDocument();
+    expect(screen.getByText('第 1 / 1 页')).toBeInTheDocument();
+    expect(mockedApi.get).toHaveBeenLastCalledWith('/audit-logs?page=1&page_size=20');
+  });
 });

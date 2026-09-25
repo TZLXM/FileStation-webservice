@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ApiTokenInfo, ApiTokenScope, CreatedApiToken } from '@filestation/shared';
 import { api } from '../../lib/api';
 
@@ -20,27 +20,36 @@ export default function ApiTokensSection() {
   const [selectedScopes, setSelectedScopes] = useState<ApiTokenScope[]>(['files:read']);
   const [expiresDays, setExpiresDays] = useState('');
   const [created, setCreated] = useState<CreatedApiToken | null>(null);
-  const [error, setError] = useState('');
+  const [listError, setListError] = useState('');
+  const [actionError, setActionError] = useState('');
+  const [copyError, setCopyError] = useState('');
   const [copyMessage, setCopyMessage] = useState('');
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [revokingId, setRevokingId] = useState<string | null>(null);
+  const listRequestVersion = useRef(0);
 
   const loadTokens = useCallback(async () => {
+    const requestId = ++listRequestVersion.current;
     setLoading(true);
+    setListError('');
     try {
       const response = await api.get<ApiTokenInfo[]>('/api-tokens');
+      if (requestId !== listRequestVersion.current) return;
       setTokens(Array.isArray(response.data) ? response.data : []);
-      setError('');
     } catch (loadError) {
-      setError(getErrorMessage(loadError, '加载 API Token 失败'));
+      if (requestId !== listRequestVersion.current) return;
+      setListError(getErrorMessage(loadError, '加载 API Token 失败'));
     } finally {
-      setLoading(false);
+      if (requestId === listRequestVersion.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void loadTokens();
+    return () => {
+      listRequestVersion.current += 1;
+    };
   }, [loadTokens]);
 
   const toggleScope = (scope: ApiTokenScope) => {
@@ -63,7 +72,8 @@ export default function ApiTokensSection() {
 
   const handleCreate = async () => {
     if (!validName || !validScopes || !validExpiresDays) return;
-    setError('');
+    setActionError('');
+    setCopyError('');
     setCopyMessage('');
     setCreated(null);
     setCreating(true);
@@ -79,7 +89,7 @@ export default function ApiTokensSection() {
       setName('');
       await loadTokens();
     } catch (createError) {
-      setError(getErrorMessage(createError, '创建 Token 失败'));
+      setActionError(getErrorMessage(createError, '创建 Token 失败'));
     } finally {
       setCreating(false);
     }
@@ -91,22 +101,22 @@ export default function ApiTokensSection() {
       if (!navigator.clipboard?.writeText) throw new Error('剪贴板不可用');
       await navigator.clipboard.writeText(created.token);
       setCopyMessage('已复制到剪贴板');
-      setError('');
+      setCopyError('');
     } catch {
       setCopyMessage('');
-      setError('复制失败，请检查浏览器剪贴板权限后重试。');
+      setCopyError('复制失败，请检查浏览器剪贴板权限后重试。');
     }
   };
 
   const handleRevoke = async (token: ApiTokenInfo) => {
     if (!window.confirm(`吊销「${token.name}」？使用它的 Agent 将立即失效。`)) return;
-    setError('');
+    setActionError('');
     setRevokingId(token.id);
     try {
       await api.delete(`/api-tokens/${token.id}`);
       await loadTokens();
     } catch (revokeError) {
-      setError(getErrorMessage(revokeError, '吊销 Token 失败'));
+      setActionError(getErrorMessage(revokeError, '吊销 Token 失败'));
     } finally {
       setRevokingId(null);
     }
@@ -133,6 +143,7 @@ export default function ApiTokensSection() {
             </button>
           </div>
           {copyMessage && <p role="status" className="text-sm text-green-700 mt-2">{copyMessage}</p>}
+          {copyError && <p role="alert" className="text-sm text-red-600 mt-2 break-words">{copyError}</p>}
           <button type="button" onClick={() => { setCreated(null); setCopyMessage(''); }} className="text-xs text-gray-600 mt-2 underline">
             我已保存，关闭
           </button>
@@ -186,7 +197,8 @@ export default function ApiTokensSection() {
         </div>
       </div>
 
-      {error && <p role="alert" className="text-red-600 text-sm mb-3 break-words">{error}</p>}
+      {actionError && <p role="alert" className="text-red-600 text-sm mb-3 break-words">{actionError}</p>}
+      {listError && <p role="alert" className="text-red-600 text-sm mb-3 break-words">{listError}</p>}
 
       {loading ? (
         <p role="status" className="text-sm text-gray-500">正在加载 Token...</p>

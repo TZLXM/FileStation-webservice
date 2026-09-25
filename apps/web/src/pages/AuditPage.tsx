@@ -26,9 +26,16 @@ export default function AuditPage() {
       .then((response) => {
         if (requestId !== requestVersion.current) return;
         const data = response.data;
+        const nextTotal = data?.total ?? 0;
+        const nextTotalPages = data?.total_pages ?? Math.ceil(nextTotal / PAGE_SIZE);
+        const lastPage = Math.max(nextTotalPages, 1);
+        setTotal(nextTotal);
+        setTotalPages(nextTotalPages);
+        if (page > lastPage) {
+          setPage(lastPage);
+          return;
+        }
         setItems(Array.isArray(data?.items) ? data.items : []);
-        setTotal(data?.total ?? 0);
-        setTotalPages(data?.total_pages ?? Math.ceil((data?.total ?? 0) / PAGE_SIZE));
       })
       .catch((requestError: unknown) => {
         if (requestId !== requestVersion.current) return;

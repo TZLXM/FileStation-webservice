@@ -11,8 +11,8 @@ interface AgentSectionProps {
   onSaved: () => void | Promise<void>;
 }
 
-function getErrorMessage(error: unknown): string {
-  return error instanceof Error && error.message ? error.message : '保存失败，请重试。';
+function getErrorMessage(error: unknown, fallback = '保存失败，请重试。'): string {
+  return error instanceof Error && error.message ? error.message : fallback;
 }
 
 export default function AgentSection({ agent, onSaved }: AgentSectionProps) {
@@ -37,10 +37,17 @@ export default function AgentSection({ agent, onSaved }: AgentSectionProps) {
     setNotice('');
     try {
       await api.put('/settings', { agent: { mcp_enabled: enabled, mcp_max_upload_mb: parsedMaxMb } });
-      await onSaved();
-      setNotice('已保存');
     } catch (saveError) {
       setError(getErrorMessage(saveError));
+      setSaving(false);
+      return;
+    }
+
+    setNotice('已保存');
+    try {
+      await onSaved();
+    } catch (refreshError) {
+      setError(`已保存，但重新读取失败：${getErrorMessage(refreshError, '请稍后重试。')}`);
     } finally {
       setSaving(false);
     }

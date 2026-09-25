@@ -58,4 +58,16 @@ describe('AgentSection', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('settings rejected');
     expect(screen.getByLabelText('MCP 单文件大小上限（MB）')).toHaveValue(33);
   });
+
+  it('distinguishes a successful save from a failed settings refresh', async () => {
+    const onSaved = vi.fn().mockRejectedValue(new Error('refresh unavailable'));
+    render(<AgentSection agent={initialAgent} onSaved={onSaved} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '保存 MCP 设置' }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent('已保存');
+    expect(screen.getByRole('alert')).toHaveTextContent('重新读取失败');
+    expect(mockedApi.put).toHaveBeenCalledTimes(1);
+    expect(onSaved).toHaveBeenCalledTimes(1);
+  });
 });
