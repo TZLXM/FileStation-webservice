@@ -46,18 +46,23 @@ export default function SettingsPage() {
 
   const refreshTotpStatus = async () => {
     const generation = ++totpRefreshGeneration.current;
-    const response = await api.get<Settings>('/settings');
-    if (generation !== totpRefreshGeneration.current) return;
-    const latest = response.data!;
-    setSettings((current) => current
-      ? {
-        ...current,
-        security: {
-          ...current.security,
-          totp_active: latest.security.totp_active,
-        },
-      }
-      : latest);
+    try {
+      const response = await api.get<Settings>('/settings');
+      if (generation !== totpRefreshGeneration.current) return;
+      const latest = response.data!;
+      setSettings((current) => current
+        ? {
+          ...current,
+          security: {
+            ...current.security,
+            totp_active: latest.security.totp_active,
+          },
+        }
+        : latest);
+    } catch (error) {
+      // A stale failure is just as outdated as a stale success; only surface the newest refresh error.
+      if (generation === totpRefreshGeneration.current) throw error;
+    }
   };
 
   const handleSave = async () => {

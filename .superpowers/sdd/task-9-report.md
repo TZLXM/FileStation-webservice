@@ -32,5 +32,6 @@
 
 - 初始实现提交：`40bfb8a`（GPT-6 Luna）。
 - GPT-5.6 Sol 首轮审阅指出两项 Important：TOTP 状态刷新覆盖未保存的 `totp_required` 草稿，以及并发 refresh 缺少陈旧响应保护；均已先补充回归测试并验证 RED，再修复为 GREEN。
-- 修复轮改变：刷新只覆盖派生 `totp_active`，保留未保存设置草稿；以递增 generation 忽略迟到的 TOTP 状态刷新。回归测试前 9 项中 2 项按预期失败，修复后 SettingsPage 9/9 通过。
-- 修复轮完整 Web 11 files / 62 passed，typecheck、build、diff-check 通过；修复提交与 GPT-5.6 Sol 复审结论待补记。
+- 修复轮 1 提交：`bb51b70`。刷新只覆盖派生 `totp_active`，保留未保存设置草稿；以递增 generation 忽略迟到的 TOTP 状态刷新。SettingsPage 9/9 通过。
+- GPT-5.6 Sol 二轮复审确认前两项已解决，但发现旧 refresh 的 reject 仍会形成矛盾错误提示。补测在 10 项设置页测试中得到 1 个预期失败；增加代际错误过滤后 SettingsPage 10/10 通过。
+- 修复轮 2 提交与 GPT-5.6 Sol 最终复审结论待补记。
