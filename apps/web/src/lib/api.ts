@@ -2,6 +2,24 @@ import { ApiResponse } from '@filestation/shared';
 
 const API_BASE = '/api/v1';
 
+export type UploadApiStatus = 'initiated' | 'uploading' | 'verifying' | 'completed' | 'aborted' | 'expired' | 'failed';
+
+const UPLOAD_API_STATUSES = new Set<UploadApiStatus>([
+  'initiated', 'uploading', 'verifying', 'completed', 'aborted', 'expired', 'failed',
+]);
+
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly code?: string,
+    readonly currentStatus?: UploadApiStatus,
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
 class ApiClient {
   private accessToken: string | null = null;
 
@@ -42,14 +60,22 @@ class ApiClient {
     });
 
     if (!response.ok) {
-      const error = await response.json().catch(() => ({ code: 'UNKNOWN', message: 'Unknown error' }));
-      throw new Error(error.message || 'Request failed');
+      const payload: unknown = await response.json().catch(() => null);
+      const body = typeof payload === 'object' && payload !== null && !Array.isArray(payload)
+        ? payload as Record<string, unknown>
+        : {};
+      const code = typeof body.code === 'string' ? body.code : undefined;
+      const message = typeof body.message === 'string' && body.message.length > 0 ? body.message : 'Request failed';
+      const current = typeof body.current === 'string' && UPLOAD_API_STATUSES.has(body.current as UploadApiStatus)
+        ? body.current as UploadApiStatus
+        : undefined;
+      throw new ApiError(response.status, message, code, current);
     }
     return response.json();
   }
 
-  async get<T>(path: string): Promise<ApiResponse<T>> {
-    return this.request<T>('GET', path);
+  async get<T>(path: string, headers?: Record<string, string>): Promise<ApiResponse<T>> {
+    return this.request<T>('GET', path, undefined, headers);
   }
 
   async post<T>(path: string, body?: BodyInit | object, headers?: Record<string, string>): Promise<ApiResponse<T>> {
@@ -64,8 +90,8 @@ class ApiClient {
     return this.request<T>('PATCH', path, body);
   }
 
-  async delete<T>(path: string): Promise<ApiResponse<T>> {
-    return this.request<T>('DELETE', path);
+  async delete<T>(path: string, headers?: Record<string, string>): Promise<ApiResponse<T>> {
+    return this.request<T>('DELETE', path, undefined, headers);
   }
 
   /** v1.6 新增：管理员直接下载（GET /files/:id/content，fetch blob + a[download]） */
