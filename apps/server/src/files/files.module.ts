@@ -13,6 +13,7 @@ import { Folder } from '../folders/entities/folder.entity';
 import { SecurityModule } from '../security/security.module';
 import { SettingsModule } from '../settings/settings.module';
 import { AuditModule } from '../audit/audit.module';
+import { SqliteImmediateTransactionModule } from '../common/database/sqlite-immediate-transaction.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { AuditModule } from '../audit/audit.module';
     SecurityModule,
     SettingsModule,
     AuditModule,
+    SqliteImmediateTransactionModule,
   ],
   controllers: [FilesController, UploadsController],
   providers: [FilesService, UploadsService, StorageService, FileLifecycleService],

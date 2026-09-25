@@ -1,12 +1,10 @@
 import { Injectable, GoneException, NotFoundException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
 import { DownloadSession } from './entities/download-session.entity';
-import { Share } from './entities/share.entity';
 import { StorageService } from '../files/storage.service';
 import { File } from '../files/entities/file.entity';
 import { parseRangeHeader } from '../common/http/range-parser';
 import { RangeNotSatisfiableException } from '../common/http/range-not-satisfiable.exception';
+import { SqliteImmediateTransactionService } from '../common/database/sqlite-immediate-transaction.service';
 
 export interface DownloadResult {
   stream: NodeJS.ReadableStream;
@@ -21,12 +19,8 @@ export interface DownloadResult {
 @Injectable()
 export class DownloadService {
   constructor(
-    @InjectRepository(DownloadSession)
-    private downloadSessionsRepository: Repository<DownloadSession>,
-    @InjectRepository(Share)
-    private sharesRepository: Repository<Share>,
     private storageService: StorageService,
-    private dataSource: DataSource,
+    private sqliteTransactions: SqliteImmediateTransactionService,
   ) {}
 
   /**
@@ -78,66 +72,50 @@ export class DownloadService {
    * 事务内无任何文件 I/O。
    */
   private async countDownload(session: DownloadSession): Promise<void> {
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    await queryRunner.startTransaction();
-    try {
+    await this.sqliteTransactions.run(async (connection) => {
       const now = Date.now();
+      const sessionResult = await connection.run(
+        `UPDATE download_sessions SET counted = 1, counted_at = ?
+         WHERE id = ? AND counted = 0 AND expires_at > ?`,
+        [now, session.id, now],
+      );
 
-      const sessionResult = await queryRunner.manager
-        .createQueryBuilder()
-        .update(DownloadSession)
-        .set({ counted: 1, countedAt: now })
-        .where('id = :id', { id: session.id })
-        .andWhere('counted = 0')
-        .andWhere('expires_at > :now', { now })
-        .execute();
-
-      if (sessionResult.affected === 1) {
+      if (sessionResult.changes === 1) {
         // 获得计数权：扣减分享额度（v1.7 补 expires_at 条件）
-        const shareResult = await queryRunner.manager
-          .createQueryBuilder()
-          .update(Share)
-          .set({ usedDownloads: () => 'used_downloads + 1', lastUsedAt: now })
-          .where('id = :shareId', { shareId: session.shareId })
-          .andWhere("status = 'active'")
-          .andWhere('(max_downloads IS NULL OR used_downloads < max_downloads)')
-          .andWhere('(expires_at IS NULL OR expires_at > :now)', { now })
-          .execute();
+        const shareResult = await connection.run(
+          `UPDATE shares SET used_downloads = used_downloads + 1, last_used_at = ?
+           WHERE id = ? AND status = 'active'
+             AND (max_downloads IS NULL OR used_downloads < max_downloads)
+             AND (expires_at IS NULL OR expires_at > ?)`,
+          [now, session.shareId, now],
+        );
 
-        if (shareResult.affected === 0) {
+        if (shareResult.changes === 0) {
           throw new GoneException({ code: 'SHARE_EXHAUSTED', message: 'Share download limit reached, expired, or revoked' });
         }
-        await queryRunner.commitTransaction();
         return;
       }
 
       // affected === 0：重查分支（v1.7 语义区分）
-      const current = await queryRunner.manager.findOne(DownloadSession, { where: { id: session.id } });
+      const current = await connection.get<{ expires_at: number }>(
+        `SELECT expires_at FROM download_sessions WHERE id = ?`,
+        [session.id],
+      );
       if (!current) {
         throw new NotFoundException({ code: 'SESSION_NOT_FOUND', message: 'Download session not found' });
       }
-      if (current.expiresAt <= now) {
+      if (current.expires_at <= now) {
         throw new GoneException({ code: 'TOKEN_EXPIRED', message: 'Download token has expired' });
       }
       // counted=1（已计数）：同一事务内复验 share 仍 active 未过期（防"复验后吊销仍放流"）
-      const shareCheck = await queryRunner.manager
-        .createQueryBuilder()
-        .select('share.id', 'id')
-        .from(Share, 'share')
-        .where('share.id = :shareId', { shareId: session.shareId })
-        .andWhere("share.status = 'active'")
-        .andWhere('(share.expires_at IS NULL OR share.expires_at > :now)', { now })
-        .getRawOne();
+      const shareCheck = await connection.get<{ id: string }>(
+        `SELECT id FROM shares WHERE id = ? AND status = 'active'
+           AND (expires_at IS NULL OR expires_at > ?)`,
+        [session.shareId, now],
+      );
       if (!shareCheck) {
         throw new GoneException({ code: 'SHARE_REVOKED', message: 'Share has been revoked or expired' });
       }
-      await queryRunner.commitTransaction();
-    } catch (error) {
-      await queryRunner.rollbackTransaction();
-      throw error;
-    } finally {
-      await queryRunner.release();
-    }
+    });
   }
 }

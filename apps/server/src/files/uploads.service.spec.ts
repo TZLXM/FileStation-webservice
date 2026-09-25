@@ -8,6 +8,7 @@ import { UploadPart } from './entities/upload-part.entity';
 import { File } from './entities/file.entity';
 import { Folder } from '../folders/entities/folder.entity';
 import { DataSource } from 'typeorm';
+import { SqliteImmediateTransactionService } from '../common/database/sqlite-immediate-transaction.service';
 
 describe('UploadsService', () => {
   let service: UploadsService;
@@ -47,6 +48,7 @@ describe('UploadsService', () => {
     query: jest.fn(),
     transaction: jest.fn(),
   };
+  const mockSqliteTransactions = { run: jest.fn() };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -59,6 +61,7 @@ describe('UploadsService', () => {
         { provide: StorageService, useValue: mockStorageService },
         { provide: SettingsService, useValue: mockSettingsService },
         { provide: DataSource, useValue: mockDataSource },
+        { provide: SqliteImmediateTransactionService, useValue: mockSqliteTransactions },
       ],
     }).compile();
 

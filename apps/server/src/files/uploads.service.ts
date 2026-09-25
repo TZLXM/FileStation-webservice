@@ -12,6 +12,12 @@ import { createHash } from 'crypto';
 import { InitUploadDto } from './dto/init-upload.dto';
 import { UploadInitResponse, UploadStatus as UploadStatusType } from '@filestation/shared';
 import { beginImmediate, safeRollback } from '../common/database/tx.helper';
+import { SqliteImmediateTransactionService } from '../common/database/sqlite-immediate-transaction.service';
+
+const COMPLETION_POLL_INTERVAL_MS = 25;
+const VERIFY_RECOVERY_CYCLE_MS = 60 * 1000;
+const VERIFY_RECOVERY_GRACE_MS = 2 * VERIFY_RECOVERY_CYCLE_MS;
+const LEGACY_VERIFY_LEASE_MS = 5 * 60 * 1000;
 
 @Injectable()
 export class UploadsService {
@@ -27,6 +33,7 @@ export class UploadsService {
     private storageService: StorageService,
     private settingsService: SettingsService,
     private dataSource: DataSource,
+    private sqliteTransactions: SqliteImmediateTransactionService,
   ) {}
 
   async initializeUpload(
@@ -276,17 +283,16 @@ export class UploadsService {
       return { file_id: session.finalFileId!, filename: session.filename, size: session.expectedSize };
     }
 
+    let waitForFinalizer = false;
+
     // ---------- 阶段一：抢占 + 持久化 final_stored_name + 租约 ----------
     const preStoredName = this.storageService.generateStoredName();
     const ownerToken = uuidv4(); // finalizer 租约 owner
     const leaseMs = 10 * 60 * 1000; // 租约 10 分钟（远大于最长合并+哈希）
 
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    try {
-      await beginImmediate(queryRunner);
+    const claim = await this.sqliteTransactions.run(async (connection) => {
       const now = Date.now();
-      await queryRunner.query(
+      const update = await connection.run(
         `UPDATE upload_sessions
            SET status = 'verifying',
                verify_started_at = ?,
@@ -297,32 +303,30 @@ export class UploadsService {
          WHERE id = ? AND status IN ('initiated', 'uploading')`,
         [now, preStoredName, ownerToken, now + leaseMs, now, uploadId],
       );
-      // node-sqlite3 不返回 UPDATE changes；事务内 SELECT 验证是否由本请求抢占（owner 匹配）
-      const claimVerify = await queryRunner.query(
-        `SELECT status, verify_owner_token FROM upload_sessions WHERE id = ?`,
+      if (update.changes === 1) return { outcome: 'claimed' as const };
+
+      const current = await connection.get<{ status: string; final_file_id: string | null }>(
+        `SELECT status, final_file_id FROM upload_sessions WHERE id = ?`,
         [uploadId],
       );
-      const claimed = claimVerify.length > 0 && claimVerify[0].status === 'verifying' && claimVerify[0].verify_owner_token === ownerToken;
-
-      if (!claimed) {
-        const current = await queryRunner.query(`SELECT status, final_file_id FROM upload_sessions WHERE id = ?`, [uploadId]);
-        if (current.length === 0) throw new NotFoundException('Upload session not found');
-        if (current[0].status === 'completed') {
-          await queryRunner.query('COMMIT');
-          return { file_id: current[0].final_file_id, filename: session.filename, size: session.expectedSize };
-        }
-        if (current[0].status === 'verifying') {
-          throw new ConflictException({ code: 'UPLOAD_FINALIZING', message: 'Another request is completing this upload' });
-        }
-        throw new BadRequestException({ code: 'INVALID_UPLOAD_STATE', message: `Cannot complete upload in state: ${current[0].status}` });
+      if (!current) throw new NotFoundException('Upload session not found');
+      if (current.status === UploadStatus.COMPLETED) {
+        if (!current.final_file_id) throw new Error('Completed upload is missing final_file_id');
+        return { outcome: 'completed' as const, fileId: current.final_file_id };
       }
+      if (current.status === UploadStatus.VERIFYING) {
+        return { outcome: 'wait' as const };
+      }
+      throw new BadRequestException({ code: 'INVALID_UPLOAD_STATE', message: `Cannot complete upload in state: ${current.status}` });
+    });
 
-      await queryRunner.query('COMMIT');
-    } catch (error) {
-      await safeRollback(queryRunner);
-      throw error;
-    } finally {
-      await queryRunner.release();
+    if (claim.outcome === 'completed') {
+      return { file_id: claim.fileId, filename: session.filename, size: session.expectedSize };
+    }
+    if (claim.outcome === 'wait') waitForFinalizer = true;
+
+    if (waitForFinalizer) {
+      return this.waitForFinalizedUpload(uploadId, session);
     }
 
     // v1.7 阻断 2：用 TypeORM 重新加载实体（原生 SQL 返回 snake_case，Repository.create 不映射驼峰）
@@ -361,14 +365,11 @@ export class UploadsService {
 
       // ---------- 阶段三：INSERT files + 条件 UPDATE（带 owner 守卫 + affected 检查）----------
       const newFileId = uuidv4();
-      const queryRunner3 = this.dataSource.createQueryRunner();
-      await queryRunner3.connect();
-      try {
-        await beginImmediate(queryRunner3);
+      const finalized = await this.sqliteTransactions.run(async (connection) => {
         const now3 = Date.now();
 
         // 先 INSERT files（folder_id 来自 target_folder_id，v1.7 建议 c）
-        await queryRunner3.query(
+        await connection.run(
           `INSERT INTO files (id, folder_id, filename, stored_name, size, mime_type, hash_sha256,
              status, expires_at, uploaded_by_type, uploaded_by_id, download_count, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, NULL, ?, 'active', ?, ?, ?, 0, ?, ?)`,
@@ -377,7 +378,7 @@ export class UploadsService {
         );
 
         // 条件 UPDATE：仅当仍 verifying 且 owner 匹配（租约未被接管）才完成；同时写回 final_file_id
-        await queryRunner3.query(
+        const updateResult = await connection.run(
           `UPDATE upload_sessions
              SET status = 'completed', completed_at = ?, failure_reason = NULL, final_file_id = ?,
                  verify_owner_token = NULL, verify_lease_until = NULL, verify_heartbeat_at = NULL
@@ -385,27 +386,26 @@ export class UploadsService {
           [now3, newFileId, uploadId, ownerToken],
         );
 
-        // node-sqlite3 不返回 UPDATE changes；事务内重查（completed 同文件→成功/幂等，否则回滚）
-        const current = await queryRunner3.query(
+        if (updateResult.changes === 1) {
+          return { fileId: newFileId };
+        }
+
+        // owner 失效时在同一事务内重查；该 INSERT 随后回滚，避免留下孤儿 files 行。
+        const current = await connection.get<{ status: string; final_file_id: string | null }>(
           `SELECT status, final_file_id FROM upload_sessions WHERE id = ?`,
           [uploadId],
         );
-        if (current.length > 0 && current[0].status === 'completed' && current[0].final_file_id === newFileId) {
-          await queryRunner3.query('COMMIT');
-          this.storageService.deleteUploadTempDir(uploadId).catch(() => {});
-          return { file_id: newFileId, filename: claimedSession.filename, size: claimedSession.expectedSize };
+        if (current?.status === UploadStatus.COMPLETED && current.final_file_id === newFileId) {
+          return { fileId: newFileId };
         }
         // 失去完成权（租约被接管/状态被改）——回滚，新插入的 files 随之撤销
         throw new ConflictException({
           code: 'UPLOAD_FINALIZE_LOST',
           message: 'Lost finalize ownership (lease taken over or state changed)',
         });
-      } catch (error) {
-        await safeRollback(queryRunner3);
-        throw error;
-      } finally {
-        await queryRunner3.release();
-      }
+      });
+      this.storageService.deleteUploadTempDir(uploadId).catch(() => {});
+      return { file_id: finalized.fileId, filename: claimedSession.filename, size: claimedSession.expectedSize };
     } catch (error: unknown) {
       let errorCode: string | undefined;
       if (error instanceof BadRequestException) {
@@ -434,6 +434,47 @@ export class UploadsService {
         );
       }
       throw error;
+    }
+  }
+
+  /**
+   * Same-session complete calls that lose the database claim wait outside the write transaction.
+   * The owner lease and minute recovery job bound the wait; a successful owner publishes one file_id.
+   */
+  private async waitForFinalizedUpload(
+    uploadId: string,
+    originalSession: UploadSession,
+  ): Promise<{ file_id: string; filename: string; size: number }> {
+    let observedLeaseUntil: number | null = null;
+    let deadline = Date.now();
+
+    while (true) {
+      const current = await this.uploadsRepository.findOneBy({ id: uploadId });
+      if (!current) throw new NotFoundException('Upload session not found');
+      if (current.status === UploadStatus.COMPLETED && current.finalFileId) {
+        return { file_id: current.finalFileId, filename: originalSession.filename, size: originalSession.expectedSize };
+      }
+      if (current.status !== UploadStatus.VERIFYING) {
+        throw new BadRequestException({
+          code: 'INVALID_UPLOAD_STATE',
+          message: `Cannot complete upload in state: ${current.status}`,
+          current: current.status,
+        });
+      }
+
+      const now = Date.now();
+      const leaseUntil = current.verifyLeaseUntil
+        ?? ((current.verifyStartedAt ?? now) + LEGACY_VERIFY_LEASE_MS);
+      if (leaseUntil !== observedLeaseUntil) {
+        observedLeaseUntil = leaseUntil;
+        // The lifecycle recovery job runs once per minute after the durable finalizer lease expires.
+        deadline = Math.max(now, leaseUntil) + VERIFY_RECOVERY_GRACE_MS;
+      }
+      if (now >= deadline) {
+        throw new ConflictException({ code: 'UPLOAD_FINALIZING', message: 'Another request is still completing this upload' });
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, COMPLETION_POLL_INTERVAL_MS));
     }
   }
 
