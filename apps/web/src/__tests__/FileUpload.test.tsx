@@ -111,6 +111,7 @@ describe('FileUpload resume UI', () => {
     await waitFor(() => expect(mockedApi.get).toHaveBeenCalledWith(
       `/uploads/${pendingUpload.upload_id}`,
       { 'X-Upload-Token': pendingUpload.upload_token },
+      expect.any(AbortSignal),
     ));
     expect(await screen.findByText('payload.bin')).toBeInTheDocument();
     expect(screen.getByText('50%')).toBeInTheDocument();
@@ -210,9 +211,9 @@ describe('FileUpload resume UI', () => {
     fireEvent.change(fileInput(container), { target: { files: [makeFile('new.bin', 8)] } });
 
     await waitFor(() => expect(onUploadComplete).toHaveBeenCalledTimes(1));
-    expect(mockedApi.post).toHaveBeenNthCalledWith(1, '/uploads', { filename: 'new.bin', size: 8, folder_id: 'folder-1' });
+    expect(mockedApi.post).toHaveBeenNthCalledWith(1, '/uploads', { filename: 'new.bin', size: 8, folder_id: 'folder-1' }, undefined, expect.any(AbortSignal));
     expect(mockedApi.put).toHaveBeenCalledTimes(2);
-    expect(mockedApi.post).toHaveBeenNthCalledWith(2, '/uploads/new-upload/complete', {}, { 'X-Upload-Token': 'new-resume-token' });
+    expect(mockedApi.post).toHaveBeenNthCalledWith(2, '/uploads/new-upload/complete', {}, { 'X-Upload-Token': 'new-resume-token' }, expect.any(AbortSignal));
     expect(localStorage.getItem('fs_upload_new-upload')).toBeNull();
   });
 
@@ -227,7 +228,7 @@ describe('FileUpload resume UI', () => {
     const emptyFile = makeFile('empty.bin', 0);
 
     fireEvent.change(input, { target: { files: [emptyFile] } });
-    await waitFor(() => expect(mockedApi.post).toHaveBeenCalledWith('/uploads', expect.anything()));
+    await waitFor(() => expect(mockedApi.post).toHaveBeenCalledWith('/uploads', expect.anything(), undefined, expect.any(AbortSignal)));
     fireEvent.change(input, { target: { files: [emptyFile] } });
     expect(mockedApi.post.mock.calls.filter(([path]) => path === '/uploads')).toHaveLength(1);
 
@@ -235,6 +236,45 @@ describe('FileUpload resume UI', () => {
       upload_id: 'empty-upload', upload_token: 'empty-token', chunk_size: 4, expires_at: '2030-01-01T00:00:00.000Z',
     } } as never));
     await waitFor(() => expect(onUploadComplete).toHaveBeenCalledTimes(1));
+  });
+
+  it('aborts an unmounted uploader, stops its old chunk loop, and reloads state from the server probe', async () => {
+    mockCryptoDigest();
+    mockedApi.post.mockResolvedValueOnce({ data: {
+      upload_id: 'new-upload', upload_token: 'new-resume-token', chunk_size: 4, expires_at: '2030-01-01T00:00:00.000Z',
+    } } as never);
+    const firstPart = deferred<never>();
+    mockedApi.put.mockReturnValueOnce(firstPart.promise as never);
+    const firstMount = render(<FileUpload onUploadComplete={vi.fn()} folderId={null} />);
+
+    fireEvent.change(fileInput(firstMount.container), { target: { files: [makeFile('large.bin', 12)] } });
+    await waitFor(() => expect(mockedApi.put).toHaveBeenCalledTimes(1));
+    const partSignal = mockedApi.put.mock.calls[0]?.[3] as AbortSignal | undefined;
+
+    firstMount.unmount();
+    await act(async () => {
+      firstPart.resolve({} as never);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(partSignal).toBeInstanceOf(AbortSignal);
+    expect(partSignal?.aborted).toBe(true);
+    expect(mockedApi.put).toHaveBeenCalledTimes(1);
+    expect(mockedApi.post.mock.calls.filter(([path]) => path === '/uploads/new-upload/complete')).toHaveLength(0);
+    expect(localStorage.getItem('fs_upload_new-upload')).not.toBeNull();
+
+    mockedApi.get.mockResolvedValueOnce({ data: activeStatus({
+      id: 'new-upload',
+      expected_size: 12,
+      received_parts: [0],
+      received_size: 4,
+      total_parts: 3,
+    }) } as never);
+    render(<FileUpload onUploadComplete={vi.fn()} folderId={null} />);
+
+    expect(await screen.findByRole('button', { name: '继续上传 large.bin' })).toBeEnabled();
+    expect(screen.getByText('33%')).toBeInTheDocument();
+    expect(mockedApi.post.mock.calls.filter(([path]) => path === '/uploads/new-upload/resume')).toHaveLength(0);
   });
 
   it('keeps resume state when every part uploads but complete fails', async () => {
@@ -299,7 +339,12 @@ describe('FileUpload resume UI', () => {
     fireEvent.change(screen.getByLabelText('选择待恢复文件'), { target: { files: [makeFile('different.bin', 8)] } });
 
     expect(await screen.findByRole('alert')).toHaveTextContent('所选文件与待恢复上传不匹配');
-    expect(mockedApi.post).not.toHaveBeenCalledWith(`/uploads/${pendingUpload.upload_id}/resume`, expect.anything(), expect.anything());
+    expect(mockedApi.post).not.toHaveBeenCalledWith(
+      `/uploads/${pendingUpload.upload_id}/resume`,
+      expect.anything(),
+      expect.anything(),
+      expect.any(AbortSignal),
+    );
     expect(localStorage.getItem(`fs_upload_${pendingUpload.upload_id}`)).not.toBeNull();
     expect(container.textContent).not.toContain(pendingUpload.upload_token);
   });
@@ -337,11 +382,13 @@ describe('FileUpload resume UI', () => {
       `/uploads/${pendingUpload.upload_id}/resume`,
       undefined,
       { 'X-Upload-Token': pendingUpload.upload_token },
+      expect.any(AbortSignal),
     );
     expect(mockedApi.put).toHaveBeenCalledWith(
       `/uploads/${pendingUpload.upload_id}/parts/1`,
       expect.anything(),
       { 'X-Upload-Token': pendingUpload.upload_token, 'X-Part-Checksum': '0'.repeat(64) },
+      expect.any(AbortSignal),
     );
     expect(screen.getAllByRole('progressbar', { name: 'payload.bin 上传进度' })).toHaveLength(2);
     expect(screen.getAllByRole('progressbar', { name: 'payload.bin 上传进度' }).every((progressbar) => (
@@ -360,6 +407,7 @@ describe('FileUpload resume UI', () => {
       `/uploads/${pendingUpload.upload_id}/complete`,
       {},
       { 'X-Upload-Token': pendingUpload.upload_token },
+      expect.any(AbortSignal),
     ));
     expect(localStorage.getItem(`fs_upload_${pendingUpload.upload_id}`)).toBeNull();
   });
@@ -376,7 +424,12 @@ describe('FileUpload resume UI', () => {
 
     fireEvent.change(fileInput(container), { target: { files: [makeFile('empty.bin', 0)] } });
 
-    await waitFor(() => expect(mockedApi.post).toHaveBeenCalledWith('/uploads/empty-upload/complete', {}, { 'X-Upload-Token': 'empty-token' }));
+    await waitFor(() => expect(mockedApi.post).toHaveBeenCalledWith(
+      '/uploads/empty-upload/complete',
+      {},
+      { 'X-Upload-Token': 'empty-token' },
+      expect.any(AbortSignal),
+    ));
     expect(mockedApi.put).not.toHaveBeenCalled();
     expect(screen.getAllByRole('progressbar', { name: 'empty.bin 上传进度' })).toHaveLength(2);
     expect(screen.getAllByRole('progressbar', { name: 'empty.bin 上传进度' }).every((progressbar) => (
@@ -412,8 +465,55 @@ describe('FileUpload resume UI', () => {
       `/uploads/${emptyPending.upload_id}/resume`,
       undefined,
       { 'X-Upload-Token': emptyPending.upload_token },
+      expect.any(AbortSignal),
     );
     expect(localStorage.getItem(`fs_upload_${emptyPending.upload_id}`)).toBeNull();
+  });
+
+  it('retains an aborted in-flight complete response until remount confirms the terminal state', async () => {
+    const emptyPending = { ...pendingUpload, upload_id: 'complete-pending', upload_token: 'complete-token', filename: 'complete.bin', size: 0 };
+    localStorage.setItem(`fs_upload_${emptyPending.upload_id}`, JSON.stringify(emptyPending));
+    mockedApi.get.mockResolvedValueOnce({ data: activeStatus({
+      id: emptyPending.upload_id,
+      expected_size: 0,
+      received_parts: [],
+      received_size: 0,
+      total_parts: 0,
+    }) } as never);
+    const completeRequest = deferred<never>();
+    mockedApi.post.mockImplementation((path) => {
+      if (path === `/uploads/${emptyPending.upload_id}/resume`) {
+        return Promise.resolve({ data: { received_parts: [], chunk_size: 4 } }) as never;
+      }
+      if (path === `/uploads/${emptyPending.upload_id}/complete`) return completeRequest.promise as never;
+      return Promise.resolve({ data: {} }) as never;
+    });
+    const firstMount = render(<FileUpload onUploadComplete={vi.fn()} folderId={null} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '继续上传 complete.bin' }));
+    fireEvent.change(screen.getByLabelText('选择待恢复文件'), { target: { files: [makeFile('complete.bin', 0)] } });
+    await waitFor(() => expect(mockedApi.post.mock.calls.some(([path]) => path === `/uploads/${emptyPending.upload_id}/complete`)).toBe(true));
+    const completeSignal = mockedApi.post.mock.calls.find(([path]) => path === `/uploads/${emptyPending.upload_id}/complete`)?.[3] as AbortSignal | undefined;
+
+    firstMount.unmount();
+    await act(async () => { completeRequest.resolve({ data: { file_id: 'committed-file' } } as never); });
+
+    expect(completeSignal).toBeInstanceOf(AbortSignal);
+    expect(completeSignal?.aborted).toBe(true);
+    expect(localStorage.getItem(`fs_upload_${emptyPending.upload_id}`)).not.toBeNull();
+
+    mockedApi.get.mockResolvedValueOnce({ data: activeStatus({
+      id: emptyPending.upload_id,
+      status: 'completed',
+      expected_size: 0,
+      received_parts: [],
+      received_size: 0,
+      total_parts: 0,
+    }) } as never);
+    render(<FileUpload onUploadComplete={vi.fn()} folderId={null} />);
+
+    await waitFor(() => expect(localStorage.getItem(`fs_upload_${emptyPending.upload_id}`)).toBeNull());
+    expect(mockedApi.post.mock.calls.filter(([path]) => path === `/uploads/${emptyPending.upload_id}/resume`)).toHaveLength(1);
   });
 
   it('does not remove local state when discard is canceled or its remote outcome is ambiguous', async () => {
@@ -434,6 +534,7 @@ describe('FileUpload resume UI', () => {
     expect(mockedApi.delete).toHaveBeenCalledWith(
       `/uploads/${pendingUpload.upload_id}`,
       { 'X-Upload-Token': pendingUpload.upload_token },
+      expect.any(AbortSignal),
     );
     expect(localStorage.getItem(`fs_upload_${pendingUpload.upload_id}`)).not.toBeNull();
     expect(container.textContent).not.toContain(pendingUpload.upload_token);
@@ -463,5 +564,21 @@ describe('FileUpload resume UI', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('续传记录仍已保留');
     expect(localStorage.getItem(`fs_upload_${pendingUpload.upload_id}`)).not.toBeNull();
     expect(document.body.textContent).not.toContain(pendingUpload.upload_token);
+  });
+
+  it('hides the resume picker from keyboard and screen-reader navigation while the Continue button opens it', async () => {
+    seedPending();
+    mockedApi.get.mockResolvedValueOnce({ data: activeStatus() } as never);
+    const { container } = render(<FileUpload onUploadComplete={vi.fn()} folderId={null} />);
+    const continueButton = await screen.findByRole('button', { name: '继续上传 payload.bin' });
+    const resumeInput = container.querySelector('input[aria-label="选择待恢复文件"]');
+    if (!(resumeInput instanceof HTMLInputElement)) throw new Error('Expected resume file input');
+    const openPicker = vi.spyOn(resumeInput, 'click');
+
+    expect(resumeInput).toHaveAttribute('hidden');
+    expect(resumeInput).toHaveAttribute('aria-hidden', 'true');
+    expect(resumeInput).toHaveAttribute('tabindex', '-1');
+    fireEvent.click(continueButton);
+    expect(openPicker).toHaveBeenCalledTimes(1);
   });
 });

@@ -54,6 +54,19 @@ function safeUploadPath(uploadId: string): string {
   return encodeURIComponent(uploadId);
 }
 
+function isAbortError(error: unknown, signal: AbortSignal): boolean {
+  return signal.aborted || (typeof error === 'object' && error !== null && 'name' in error
+    && (error as { name?: unknown }).name === 'AbortError');
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) {
+    const error = new Error('The operation was aborted');
+    error.name = 'AbortError';
+    throw error;
+  }
+}
+
 export default function FileUpload({ onUploadComplete, folderId }: {
   onUploadComplete: () => void;
   folderId: string | null;
@@ -66,11 +79,22 @@ export default function FileUpload({ onUploadComplete, folderId }: {
   const [storageWarning, setStorageWarning] = useState<string | null>(null);
   const [checkingUploadId, setCheckingUploadId] = useState<string | null>(null);
   const operationRef = useRef(false);
+  const requestControllersRef = useRef(new Set<AbortController>());
   const pendingSavedRef = useRef(new Map<string, boolean>());
   const probeVersionsRef = useRef(new Map<string, number>());
   const probeLifecycleRef = useRef(0);
   const resumeTargetRef = useRef<ResumableUpload | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const createRequestController = useCallback(() => {
+    const controller = new AbortController();
+    requestControllersRef.current.add(controller);
+    return controller;
+  }, []);
+
+  const releaseRequestController = useCallback((controller: AbortController) => {
+    requestControllersRef.current.delete(controller);
+  }, []);
 
   const beginOperation = useCallback((operation: Operation): boolean => {
     if (operationRef.current) return false;
@@ -112,6 +136,7 @@ export default function FileUpload({ onUploadComplete, folderId }: {
   }, []);
 
   const probeUpload = useCallback(async (entry: PendingUpload, stillCurrent: () => boolean) => {
+    const controller = createRequestController();
     const version = (probeVersionsRef.current.get(entry.upload_id) ?? 0) + 1;
     probeVersionsRef.current.set(entry.upload_id, version);
     const isCurrent = () => stillCurrent() && probeVersionsRef.current.get(entry.upload_id) === version;
@@ -123,7 +148,7 @@ export default function FileUpload({ onUploadComplete, folderId }: {
     try {
       const response = await api.get<UploadStatus>(`/uploads/${safeUploadPath(entry.upload_id)}`, {
         'X-Upload-Token': entry.upload_token,
-      });
+      }, controller.signal);
       if (!isCurrent()) return;
 
       const status = response.data?.status;
@@ -159,16 +184,17 @@ export default function FileUpload({ onUploadComplete, folderId }: {
         : item));
       pendingSavedRef.current.set(entry.upload_id, true);
     } catch (error) {
-      if (!isCurrent()) return;
+      if (!isCurrent() || isAbortError(error, controller.signal)) return;
       if (isConfirmedTerminalError(error)) {
         forgetPending(entry.upload_id);
         return;
       }
       markProbeFailed(entry.upload_id, '暂时无法确认上传状态，续传记录已保留；可重试状态检查。');
     } finally {
+      releaseRequestController(controller);
       if (isCurrent()) setCheckingUploadId((current) => current === entry.upload_id ? null : current);
     }
-  }, [forgetPending, markProbeFailed]);
+  }, [createRequestController, forgetPending, markProbeFailed, releaseRequestController]);
 
   useEffect(() => {
     const lifecycle = ++probeLifecycleRef.current;
@@ -187,28 +213,39 @@ export default function FileUpload({ onUploadComplete, folderId }: {
     return () => {
       active = false;
       probeLifecycleRef.current += 1;
+      requestControllersRef.current.forEach((controller) => controller.abort());
+      requestControllersRef.current.clear();
     };
   }, [probeUpload]);
 
-  const uploadChunks = useCallback(async (file: File, entry: PendingUpload, alreadyReceived: number[]) => {
+  const uploadChunks = useCallback(async (
+    file: File,
+    entry: PendingUpload,
+    alreadyReceived: number[],
+    signal: AbortSignal,
+  ) => {
     const totalParts = Math.ceil(file.size / entry.chunk_size);
     const skip = new Set(alreadyReceived);
     let completedParts = skip.size;
     setProgress(percentComplete(totalParts, completedParts));
 
     for (let partNumber = 0; partNumber < totalParts; partNumber += 1) {
+      throwIfAborted(signal);
       if (skip.has(partNumber)) continue;
       const start = partNumber * entry.chunk_size;
       const end = Math.min(start + entry.chunk_size, file.size);
       const chunk = file.slice(start, end);
       const buffer = await chunk.arrayBuffer();
+      throwIfAborted(signal);
       const digest = await crypto.subtle.digest('SHA-256', buffer);
+      throwIfAborted(signal);
       const checksum = Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('');
 
       await api.put(`/uploads/${safeUploadPath(entry.upload_id)}/parts/${partNumber}`, chunk, {
         'X-Upload-Token': entry.upload_token,
         'X-Part-Checksum': checksum,
-      });
+      }, signal);
+      throwIfAborted(signal);
       completedParts += 1;
       setProgress(percentComplete(totalParts, completedParts));
       setResumables((current) => current.map((item) => item.upload_id === entry.upload_id
@@ -220,10 +257,12 @@ export default function FileUpload({ onUploadComplete, folderId }: {
         : item));
     }
 
+    throwIfAborted(signal);
     setProgress(percentComplete(totalParts, totalParts));
     await api.post(`/uploads/${safeUploadPath(entry.upload_id)}/complete`, {}, {
       'X-Upload-Token': entry.upload_token,
-    });
+    }, signal);
+    throwIfAborted(signal);
     forgetPending(entry.upload_id);
     setFeedback({ role: 'status', text: `${file.name} 上传完成。` });
     onUploadComplete();
@@ -232,6 +271,7 @@ export default function FileUpload({ onUploadComplete, folderId }: {
   const handleDrop = useCallback(async (acceptedFiles: File[]) => {
     const file = acceptedFiles[0];
     if (!file || !beginOperation('upload')) return;
+    const controller = createRequestController();
     setCurrentFilename(file.name);
     setProgress(0);
     let pending: PendingUpload | null = null;
@@ -241,7 +281,7 @@ export default function FileUpload({ onUploadComplete, folderId }: {
         filename: file.name,
         size: file.size,
         folder_id: folderId ?? undefined,
-      });
+      }, undefined, controller.signal);
       const data = initResponse.data;
       if (!data || typeof data.upload_id !== 'string' || data.upload_id.trim().length === 0
         || typeof data.upload_token !== 'string' || data.upload_token.trim().length === 0
@@ -267,8 +307,9 @@ export default function FileUpload({ onUploadComplete, folderId }: {
         total_parts: file.size === 0 ? 0 : Math.ceil(file.size / pending.chunk_size),
         probe_state: 'ready',
       });
-      await uploadChunks(file, pending, []);
-    } catch {
+      await uploadChunks(file, pending, [], controller.signal);
+    } catch (error) {
+      if (isAbortError(error, controller.signal)) return;
       const saved = pending !== null && pendingSavedRef.current.get(pending.upload_id) === true;
       setFeedback({
         role: 'alert',
@@ -277,9 +318,10 @@ export default function FileUpload({ onUploadComplete, folderId }: {
           : '无法启动上传，请重试。',
       });
     } finally {
+      releaseRequestController(controller);
       finishOperation();
     }
-  }, [beginOperation, finishOperation, folderId, upsertResumable, uploadChunks]);
+  }, [beginOperation, createRequestController, finishOperation, folderId, releaseRequestController, upsertResumable, uploadChunks]);
 
   const retryProbe = useCallback((entry: ResumableUpload) => {
     if (operationRef.current) return;
@@ -293,6 +335,7 @@ export default function FileUpload({ onUploadComplete, folderId }: {
     event.currentTarget.value = '';
     resumeTargetRef.current = null;
     if (!file || !target || !beginOperation('upload')) return;
+    const controller = createRequestController();
     setCurrentFilename(file.name);
 
     try {
@@ -305,6 +348,7 @@ export default function FileUpload({ onUploadComplete, folderId }: {
         `/uploads/${safeUploadPath(target.upload_id)}/resume`,
         undefined,
         { 'X-Upload-Token': target.upload_token },
+        controller.signal,
       );
       const data = response.data;
       if (!data || !Number.isSafeInteger(data.chunk_size) || data.chunk_size <= 0) {
@@ -329,8 +373,9 @@ export default function FileUpload({ onUploadComplete, folderId }: {
       setResumables((current) => current.map((item) => item.upload_id === target.upload_id
         ? { ...item, ...resumedEntry, received_parts: receivedParts, total_parts: totalParts, probe_state: 'ready', probe_error: undefined }
         : item));
-      await uploadChunks(file, resumedEntry, receivedParts);
+      await uploadChunks(file, resumedEntry, receivedParts, controller.signal);
     } catch (error) {
+      if (isAbortError(error, controller.signal)) return;
       if (isConfirmedTerminalError(error)) {
         forgetPending(target.upload_id);
         setFeedback({ role: 'status', text: '服务器确认该上传已结束，续传记录已清理。' });
@@ -346,21 +391,24 @@ export default function FileUpload({ onUploadComplete, folderId }: {
         });
       }
     } finally {
+      releaseRequestController(controller);
       finishOperation();
     }
-  }, [beginOperation, finishOperation, forgetPending, uploadChunks]);
+  }, [beginOperation, createRequestController, finishOperation, forgetPending, releaseRequestController, uploadChunks]);
 
   const handleDiscard = useCallback(async (entry: ResumableUpload) => {
     if (!beginOperation('discard')) return;
+    const controller = createRequestController();
     try {
       const confirmed = window.confirm(`放弃「${entry.filename}」的上传？已传分块将被清理。`);
       if (!confirmed) return;
       await api.delete(`/uploads/${safeUploadPath(entry.upload_id)}`, {
         'X-Upload-Token': entry.upload_token,
-      });
+      }, controller.signal);
       forgetPending(entry.upload_id);
       setFeedback({ role: 'status', text: `已放弃「${entry.filename}」的上传。` });
     } catch (error) {
+      if (isAbortError(error, controller.signal)) return;
       if (isConfirmedTerminalError(error)) {
         forgetPending(entry.upload_id);
         setFeedback({ role: 'status', text: '服务器确认该上传已结束，续传记录已清理。' });
@@ -368,9 +416,10 @@ export default function FileUpload({ onUploadComplete, folderId }: {
         setFeedback({ role: 'alert', text: `无法确认「${entry.filename}」已放弃，续传记录仍已保留；可重试。` });
       }
     } finally {
+      releaseRequestController(controller);
       finishOperation();
     }
-  }, [beginOperation, finishOperation, forgetPending]);
+  }, [beginOperation, createRequestController, finishOperation, forgetPending, releaseRequestController]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop: handleDrop,
@@ -470,7 +519,9 @@ export default function FileUpload({ onUploadComplete, folderId }: {
         ref={fileInputRef}
         type="file"
         aria-label="选择待恢复文件"
-        className="sr-only"
+        hidden
+        aria-hidden="true"
+        tabIndex={-1}
         onChange={(event) => { void handleResumeFilePicked(event); }}
         disabled={operationInProgress}
       />

@@ -49,4 +49,20 @@ describe('upload API request headers and failures', () => {
       currentStatus: 'completed',
     });
   });
+
+  it.each([
+    ['GET', (signal: AbortSignal) => api.get('/uploads/upload-1', { 'X-Upload-Token': 'resume-token' }, signal)],
+    ['POST', (signal: AbortSignal) => api.post('/uploads/upload-1/resume', undefined, { 'X-Upload-Token': 'resume-token' }, signal)],
+    ['PUT', (signal: AbortSignal) => api.put('/uploads/upload-1/parts/0', new Blob(['part']), { 'X-Upload-Token': 'resume-token' }, signal)],
+    ['DELETE', (signal: AbortSignal) => api.delete('/uploads/upload-1', { 'X-Upload-Token': 'resume-token' }, signal)],
+  ])('%s forwards its optional AbortSignal without dropping caller headers', async (_method, invoke) => {
+    const controller = new AbortController();
+
+    await invoke(controller.signal);
+
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/api/v1/uploads/upload-1'), expect.objectContaining({
+      signal: controller.signal,
+      headers: expect.objectContaining({ 'X-Upload-Token': 'resume-token', Authorization: 'Bearer admin-jwt' }),
+    }));
+  });
 });

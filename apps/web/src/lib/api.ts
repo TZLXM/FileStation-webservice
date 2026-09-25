@@ -36,6 +36,7 @@ class ApiClient {
     path: string,
     body?: BodyInit | object,
     headers: Record<string, string> = {},
+    signal?: AbortSignal,
   ): Promise<ApiResponse<T>> {
     const url = `${API_BASE}${path}`;
     const requestHeaders: Record<string, string> = { ...headers };
@@ -57,6 +58,7 @@ class ApiClient {
       headers: requestHeaders,
       body: isRaw ? (body as BodyInit) : body === undefined ? undefined : JSON.stringify(body),
       credentials: 'include',
+      ...(signal ? { signal } : {}),
     });
 
     if (!response.ok) {
@@ -74,24 +76,24 @@ class ApiClient {
     return response.json();
   }
 
-  async get<T>(path: string, headers?: Record<string, string>): Promise<ApiResponse<T>> {
-    return this.request<T>('GET', path, undefined, headers);
+  async get<T>(path: string, headers?: Record<string, string>, signal?: AbortSignal): Promise<ApiResponse<T>> {
+    return this.request<T>('GET', path, undefined, headers, signal);
   }
 
-  async post<T>(path: string, body?: BodyInit | object, headers?: Record<string, string>): Promise<ApiResponse<T>> {
-    return this.request<T>('POST', path, body, headers);
+  async post<T>(path: string, body?: BodyInit | object, headers?: Record<string, string>, signal?: AbortSignal): Promise<ApiResponse<T>> {
+    return this.request<T>('POST', path, body, headers, signal);
   }
 
-  async put<T>(path: string, body?: BodyInit | object, headers?: Record<string, string>): Promise<ApiResponse<T>> {
-    return this.request<T>('PUT', path, body, headers);
+  async put<T>(path: string, body?: BodyInit | object, headers?: Record<string, string>, signal?: AbortSignal): Promise<ApiResponse<T>> {
+    return this.request<T>('PUT', path, body, headers, signal);
   }
 
   async patch<T>(path: string, body?: BodyInit | object): Promise<ApiResponse<T>> {
     return this.request<T>('PATCH', path, body);
   }
 
-  async delete<T>(path: string, headers?: Record<string, string>): Promise<ApiResponse<T>> {
-    return this.request<T>('DELETE', path, undefined, headers);
+  async delete<T>(path: string, headers?: Record<string, string>, signal?: AbortSignal): Promise<ApiResponse<T>> {
+    return this.request<T>('DELETE', path, undefined, headers, signal);
   }
 
   /** v1.6 新增：管理员直接下载（GET /files/:id/content，fetch blob + a[download]） */
