@@ -86,9 +86,19 @@ export default function FolderTree({ selectedFolderId, onSelect, refreshKey }: F
           }`}
           style={{ paddingLeft: `${depth * 16 + 8}px` }}
         >
-          <span className="w-4 text-gray-400 select-none" onClick={() => hasChildren && toggleExpand(node.id)}>
-            {hasChildren ? (isExpanded ? '▾' : '▸') : ''}
-          </span>
+          {hasChildren ? (
+            <button
+              type="button"
+              aria-label={`${isExpanded ? '折叠' : '展开'} ${node.name}`}
+              aria-expanded={isExpanded}
+              className="-ml-3 -mr-4 min-h-11 min-w-11 w-11 shrink-0 pl-3 text-left text-gray-400 rounded hover:bg-gray-100"
+              onClick={() => toggleExpand(node.id)}
+            >
+              {isExpanded ? '▾' : '▸'}
+            </button>
+          ) : (
+            <span aria-hidden="true" className="w-4 shrink-0" />
+          )}
 
           {renaming === node.id ? (
             <input
@@ -103,21 +113,27 @@ export default function FolderTree({ selectedFolderId, onSelect, refreshKey }: F
               }}
             />
           ) : (
-            <span className="flex-1 truncate" onClick={() => onSelect(node.id)}>
+            <button
+              type="button"
+              aria-label={`选择文件夹 ${node.name}`}
+              aria-pressed={isSelected}
+              className="flex-1 min-w-0 min-h-11 truncate text-left"
+              onClick={() => onSelect(node.id)}
+            >
               {node.name}
-            </span>
+            </button>
           )}
 
           <span
             role="group"
             aria-label={`${node.name}操作`}
-            className="flex md:hidden md:group-hover:flex shrink-0 space-x-1 text-xs text-gray-500"
+            className="flex md:hidden md:group-hover:flex md:group-focus-within:flex shrink-0 space-x-1 text-xs text-gray-500"
           >
             <button
               type="button"
               aria-label={`为 ${node.name} 新建子文件夹`}
               title="新建子文件夹"
-              className="min-h-10 min-w-10 rounded hover:bg-gray-100"
+              className="min-h-11 min-w-11 rounded hover:bg-gray-100"
               onClick={() => { setCreating(node.id); setInputValue(''); setExpanded((p) => new Set(p).add(node.id)); }}
             >
               +
@@ -126,7 +142,7 @@ export default function FolderTree({ selectedFolderId, onSelect, refreshKey }: F
               type="button"
               aria-label={`重命名 ${node.name}`}
               title="重命名"
-              className="min-h-10 min-w-10 rounded hover:bg-gray-100"
+              className="min-h-11 min-w-11 rounded hover:bg-gray-100"
               onClick={() => { setRenaming(node.id); setInputValue(node.name); }}
             >
               ✎
@@ -135,7 +151,7 @@ export default function FolderTree({ selectedFolderId, onSelect, refreshKey }: F
               type="button"
               aria-label={`删除 ${node.name}`}
               title="删除"
-              className="min-h-10 min-w-10 rounded hover:bg-gray-100"
+              className="min-h-11 min-w-11 rounded hover:bg-gray-100"
               onClick={() => handleDelete(node)}
             >
               ×
@@ -172,7 +188,7 @@ export default function FolderTree({ selectedFolderId, onSelect, refreshKey }: F
         <button
           type="button"
           aria-label="新建根文件夹"
-          className="min-h-10 px-2 text-sm text-blue-600 hover:text-blue-800"
+          className="min-h-11 px-2 text-sm text-blue-600 hover:text-blue-800"
           title="新建根文件夹"
           onClick={() => { setCreating('root'); setInputValue(''); }}
         >
@@ -181,22 +197,26 @@ export default function FolderTree({ selectedFolderId, onSelect, refreshKey }: F
       </div>
 
       {/* v1.7 建议 b：两个独立视图——全部文件（null）与根目录（'root'，仅 folder_id IS NULL） */}
-      <div
-        className={`px-2 py-1 rounded cursor-pointer text-sm ${
+      <button
+        type="button"
+        aria-pressed={selectedFolderId === null}
+        className={`w-full min-h-11 px-2 py-1 rounded text-left text-sm ${
           selectedFolderId === null ? 'bg-blue-100 text-blue-800' : 'hover:bg-gray-100'
         }`}
         onClick={() => onSelect(null)}
       >
         全部文件
-      </div>
-      <div
-        className={`px-2 py-1 rounded cursor-pointer text-sm ${
+      </button>
+      <button
+        type="button"
+        aria-pressed={selectedFolderId === 'root'}
+        className={`w-full min-h-11 px-2 py-1 rounded text-left text-sm ${
           selectedFolderId === 'root' ? 'bg-blue-100 text-blue-800' : 'hover:bg-gray-100'
         }`}
         onClick={() => onSelect('root')}
       >
         根目录（未归档）
-      </div>
+      </button>
 
       {creating === 'root' && (
         <div className="px-2 py-1">

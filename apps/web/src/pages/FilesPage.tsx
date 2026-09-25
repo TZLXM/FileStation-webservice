@@ -15,6 +15,7 @@ export default function FilesPage() {
   const [treeRefreshKey, setTreeRefreshKey] = useState(0);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const drawerRef = useRef<HTMLDivElement>(null);
+  const skipDrawerFocusRestoreRef = useRef(false);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const accessToken = useAuthStore((s) => s.accessToken);
 
@@ -42,7 +43,39 @@ export default function FilesPage() {
     const previousOverflow = document.body.style.overflow;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setDrawerOpen(false);
+      if (event.key === 'Escape') {
+        setDrawerOpen(false);
+        return;
+      }
+
+      if (event.key !== 'Tab') return;
+
+      const drawer = drawerRef.current;
+      if (!drawer) return;
+
+      const focusableElements = Array.from(drawer.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )).filter((element) => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
+
+      if (focusableElements.length === 0) {
+        event.preventDefault();
+        drawer.focus();
+        return;
+      }
+
+      const first = focusableElements[0];
+      const last = focusableElements[focusableElements.length - 1];
+      const activeElement = document.activeElement;
+
+      if (event.shiftKey) {
+        if (activeElement === first || activeElement === drawer || !drawer.contains(activeElement)) {
+          event.preventDefault();
+          last.focus();
+        }
+      } else if (activeElement === last || activeElement === drawer || !drawer.contains(activeElement)) {
+        event.preventDefault();
+        first.focus();
+      }
     };
 
     document.body.style.overflow = 'hidden';
@@ -52,9 +85,27 @@ export default function FilesPage() {
     return () => {
       document.body.style.overflow = previousOverflow;
       document.removeEventListener('keydown', handleKeyDown);
-      previousFocus?.focus();
+      if (skipDrawerFocusRestoreRef.current) {
+        skipDrawerFocusRestoreRef.current = false;
+      } else {
+        previousFocus?.focus();
+      }
     };
   }, [drawerOpen]);
+
+  useEffect(() => {
+    const desktopQuery = window.matchMedia('(min-width: 768px)');
+    const handleBreakpointChange = (event: MediaQueryListEvent) => {
+      if (event.matches && drawerRef.current) {
+        // The hamburger is hidden at desktop width, so don't restore focus to it.
+        skipDrawerFocusRestoreRef.current = true;
+        setDrawerOpen(false);
+      }
+    };
+
+    desktopQuery.addEventListener('change', handleBreakpointChange);
+    return () => desktopQuery.removeEventListener('change', handleBreakpointChange);
+  }, []);
 
   const handleSelectFolder = (id: string | null) => {
     setSelectedFolderId(id);

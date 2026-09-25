@@ -39,6 +39,13 @@ describe('global navigation', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     window.history.replaceState({}, '', '/');
+    vi.stubGlobal('matchMedia', vi.fn(() => ({
+      matches: false,
+      media: '(min-width: 768px)',
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as MediaQueryList)));
     useAuthStore.setState({
       isAuthenticated: true,
       accessToken: 'test-token',
@@ -49,6 +56,7 @@ describe('global navigation', () => {
 
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 

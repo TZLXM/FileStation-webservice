@@ -25,15 +25,47 @@ vi.mock('../components/FileList', () => ({ default: () => <div>文件列表</div
 
 const mockedApi = vi.mocked(api);
 
+function createMediaQueryHarness() {
+  let listener: ((event: MediaQueryListEvent) => void) | null = null;
+  const addEventListener = vi.fn((_type: string, handler: (event: MediaQueryListEvent) => void) => {
+    listener = handler;
+  });
+  const removeEventListener = vi.fn((_type: string, handler: (event: MediaQueryListEvent) => void) => {
+    if (listener === handler) listener = null;
+  });
+  const mediaQueryList = {
+    matches: false,
+    media: '(min-width: 768px)',
+    onchange: null,
+    addEventListener,
+    removeEventListener,
+  } as unknown as MediaQueryList;
+
+  return {
+    mediaQueryList,
+    addEventListener,
+    removeEventListener,
+    matchMedia: vi.fn((_query: string) => mediaQueryList),
+    emitChange(matches: boolean) {
+      listener?.({ matches, media: mediaQueryList.media } as MediaQueryListEvent);
+    },
+  };
+}
+
+let mediaQueryHarness: ReturnType<typeof createMediaQueryHarness>;
+
 describe('FilesPage folder drawer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     document.body.style.overflow = 'auto';
+    mediaQueryHarness = createMediaQueryHarness();
+    vi.stubGlobal('matchMedia', mediaQueryHarness.matchMedia);
     useAuthStore.setState({ isAuthenticated: true, accessToken: 'test-token', username: 'alice' });
   });
 
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
     document.body.style.overflow = '';
   });
 
@@ -82,9 +114,73 @@ describe('FilesPage folder drawer', () => {
   it('closes the drawer with Escape', async () => {
     render(<MemoryRouter><FilesPage /></MemoryRouter>);
     await screen.findAllByText('文档');
-    fireEvent.click(screen.getByRole('button', { name: '打开文件夹' }));
+    const openButton = screen.getByRole('button', { name: '打开文件夹' });
+    openButton.focus();
+    fireEvent.click(openButton);
     fireEvent.keyDown(document, { key: 'Escape' });
 
     await waitFor(() => expect(screen.queryByRole('dialog', { name: '文件夹' })).not.toBeInTheDocument());
+    expect(document.activeElement).toBe(openButton);
+  });
+
+  it('cycles forward and backward Tab focus within the drawer', async () => {
+    render(<MemoryRouter><FilesPage /></MemoryRouter>);
+    await screen.findAllByText('文档');
+    fireEvent.click(screen.getByRole('button', { name: '打开文件夹' }));
+
+    const drawer = screen.getByRole('dialog', { name: '文件夹' });
+    const buttons = within(drawer).getAllByRole('button');
+    const firstButton = buttons[0];
+    const lastButton = buttons[buttons.length - 1];
+
+    firstButton.focus();
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(lastButton);
+
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(document.activeElement).toBe(firstButton);
+  });
+
+  it('returns Tab focus to the drawer when focus is outside the modal', async () => {
+    render(<MemoryRouter><FilesPage /></MemoryRouter>);
+    await screen.findAllByText('文档');
+    const openButton = screen.getByRole('button', { name: '打开文件夹' });
+    fireEvent.click(openButton);
+
+    const drawer = screen.getByRole('dialog', { name: '文件夹' });
+    const firstButton = within(drawer).getAllByRole('button')[0];
+    openButton.focus();
+    fireEvent.keyDown(document, { key: 'Tab' });
+
+    expect(document.activeElement).toBe(firstButton);
+  });
+
+  it('closes and unlocks body scrolling when the viewport enters desktop width', async () => {
+    render(<MemoryRouter><FilesPage /></MemoryRouter>);
+    await screen.findAllByText('文档');
+    fireEvent.click(screen.getByRole('button', { name: '打开文件夹' }));
+    const drawer = screen.getByRole('dialog', { name: '文件夹' });
+    const closeButton = within(drawer).getByRole('button', { name: '关闭文件夹' });
+    closeButton.focus();
+    expect(document.body.style.overflow).toBe('hidden');
+
+    mediaQueryHarness.emitChange(true);
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '文件夹' })).not.toBeInTheDocument());
+    expect(document.body.style.overflow).toBe('auto');
+    expect(document.activeElement).not.toBe(closeButton);
+    expect(document.activeElement).not.toBe(screen.getByRole('button', { name: '打开文件夹' }));
+  });
+
+  it('removes the desktop breakpoint listener on unmount', async () => {
+    const { unmount } = render(<MemoryRouter><FilesPage /></MemoryRouter>);
+    await screen.findAllByText('文档');
+    expect(mediaQueryHarness.matchMedia).toHaveBeenCalledWith('(min-width: 768px)');
+    expect(mediaQueryHarness.addEventListener).toHaveBeenCalledWith('change', expect.any(Function));
+    const listener = mediaQueryHarness.addEventListener.mock.calls[0][1];
+
+    unmount();
+
+    expect(mediaQueryHarness.removeEventListener).toHaveBeenCalledWith('change', listener);
   });
 });
