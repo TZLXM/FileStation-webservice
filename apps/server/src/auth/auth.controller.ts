@@ -6,6 +6,7 @@ import { AdminOnlyGuard } from '../security/guards/admin-only.guard';
 import { InitDto } from './dto/init.dto';
 import { LoginDto } from './dto/login.dto';
 import { TotpCodeDto, TotpDisableDto, TotpLoginDto } from './dto/totp.dto';
+import { RecoveryGenerateDto, RecoveryVerifyDto } from './dto/recovery.dto';
 import { Response, Request } from 'express';
 
 const REFRESH_COOKIE = 'refresh_token';
@@ -141,6 +142,38 @@ export class AuthController {
   ): Promise<ApiResponse<null>> {
     await this.authService.totpDisable(req.user.id, body.password, body.code);
     return { code: 'OK', message: 'TOTP disabled', data: null, request_id: crypto.randomUUID() };
+  }
+
+  @Post('recovery/generate')
+  @UseGuards(JwtAuthGuard, AdminOnlyGuard)
+  async recoveryGenerate(
+    @Req() req: Request & { user: { id: string } },
+    @Body() body: RecoveryGenerateDto,
+  ): Promise<ApiResponse<{ codes: string[] }>> {
+    const codes = await this.authService.recoveryGenerate(req.user.id, body.password, body.totp_code);
+    return {
+      code: 'OK',
+      message: 'Recovery codes generated; save them now',
+      data: { codes },
+      request_id: crypto.randomUUID(),
+    };
+  }
+
+  @Post('recovery/verify')
+  @HttpCode(HttpStatus.OK)
+  async recoveryVerify(
+    @Body() body: RecoveryVerifyDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<ApiResponse<{ access_token: string; expires_in: number; username: string }>> {
+    const result = await this.authService.recoveryVerify(body.username, body.code, req.ip);
+    res.cookie(REFRESH_COOKIE, result.refreshToken, REFRESH_COOKIE_OPTIONS);
+    return {
+      code: 'OK',
+      message: 'Recovery successful',
+      data: { access_token: result.accessToken, expires_in: result.expiresIn, username: result.username },
+      request_id: crypto.randomUUID(),
+    };
   }
 
   @Post('api-token/exchange')

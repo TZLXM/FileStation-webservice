@@ -11,6 +11,8 @@ import { Session } from './entities/session.entity';
 import { LoginChallenge } from './entities/login-challenge.entity';
 import { SystemMeta } from './entities/system-meta.entity';
 import { Authenticator } from './entities/authenticator.entity';
+import { RecoveryCode } from './entities/recovery-code.entity';
+import { RecoveryService } from './recovery.service';
 import { ApiTokensModule } from '../api-tokens/api-tokens.module';
 import { AuditModule } from '../audit/audit.module';
 import { SqliteImmediateTransactionModule } from '../common/database/sqlite-immediate-transaction.module';
@@ -24,10 +26,10 @@ import { SqliteImmediateTransactionModule } from '../common/database/sqlite-imme
     ApiTokensModule,
     AuditModule,
     SqliteImmediateTransactionModule,
-    TypeOrmModule.forFeature([Session, LoginChallenge, SystemMeta, Authenticator]),
+    TypeOrmModule.forFeature([Session, LoginChallenge, SystemMeta, Authenticator, RecoveryCode]),
   ],
   controllers: [AuthController],
-  providers: [AuthService, TotpService],
+  providers: [AuthService, TotpService, RecoveryService],
   exports: [AuthService],
 })
 export class AuthModule {}

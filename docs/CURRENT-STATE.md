@@ -10,8 +10,8 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 |------|------|
 | 设计文档 | v2.2 已完成；Phase 1 实施计划迭代至 v1.7（经两轮外部评审） |
 | 项目管理 | AGENTS.md 已建立 |
-| 代码实现 | Phase 1 MVP 完成；Phase 2 TOTP 两步登录与设置页管理、API Token、审计日志、MCP 服务及对应 Web 页面已实现 |
-| 测试 | server 24 suites / 143 passed / 20 todo；web 65 passed；Task 8 TOTP E2E 12 passed；server E2E 5 suites / 52 passed；Phase 1 浏览器端到端手动验证通过 |
+| 代码实现 | Phase 1 MVP 完成；Phase 2 TOTP 两步登录与设置页管理、恢复码后端、API Token、审计日志、MCP 服务及对应 Web 页面已实现；Task 10 独立代码复审待安排 |
+| 测试 | server 25 suites / 157 passed / 20 todo；web 65 passed；完整 server E2E 6 suites / 58 passed；Phase 1 浏览器端到端手动验证通过 |
 | 部署 | 单进程模式（默认）与 Nginx 反代模式均可用；已推送至 GitHub |
 
 ## 设计决策摘要
@@ -62,7 +62,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 
 - [x] TOTP 认证（AES-256-GCM 密文、管理员 setup/confirm/disable、单次 login_challenge 两步登录、两步登录 UI、设置页启停与强制 TOTP 开关）
 - [x] API Token 管理、exchange 短期 JWT 与 scopes（默认拒绝，scope 以数据库为准）
-- [ ] 恢复码机制
+- [x] 恢复码后端（Argon2id、24 小时、一次性消费、账户/IP 防线、全会话吊销；Task 10 代码复审待安排）
 - [ ] 断点续传 UI（前端崩溃恢复交互）
 - [x] 审计日志（管理员查询、90 天保留、关键操作埋点）
 - [x] 内嵌 MCP 服务（默认关闭、Streamable HTTP、11 个工具、API Token scope 校验与工具审计）
@@ -123,9 +123,8 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 
 ### Phase 2 后续（仍未实现）
 
-1. 恢复码机制
-2. 断点续传 UI
-3. 并发/压力测试
+1. 断点续传 UI
+2. 并发/压力测试
 
 ### 待设计（Phase 3+）
 
@@ -156,6 +155,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 - **2026-09-25**: Phase 2 TOTP 后端落地；AES-256-GCM 密文存储、管理员启停、单次挑战两步登录、强制 TOTP 防自锁与派生状态
 - **2026-09-25**: Task 8 并发复修；即时事务连接独立于 TypeORM，并在进程内排队，避免 SQLite busy wait 导致的线程池饥饿
 - **2026-09-25**: Task 9 TOTP 前端落地；登录两步验证、设置页启停、`totp_required` 开关与异步响应竞态保护
+- **2026-09-25**: Phase 2 Task 10 恢复码后端落地；Argon2id 单次码、原子替换/消费、账户锁定、IP 限速与全会话吊销；复审待安排
 
 ---
 

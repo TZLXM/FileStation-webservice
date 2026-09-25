@@ -14,6 +14,7 @@ import { createHash } from 'crypto';
 import { ApiTokensService } from '../api-tokens/api-tokens.service';
 import { AuditService } from '../audit/audit.service';
 import { TotpService } from './totp.service';
+import { RecoveryService } from './recovery.service';
 import { SqliteImmediateTransactionService } from '../common/database/sqlite-immediate-transaction.service';
 
 describe('AuthService', () => {
@@ -43,6 +44,10 @@ describe('AuthService', () => {
     setup: jest.fn(),
     confirm: jest.fn(),
     disable: jest.fn(),
+  };
+  const mockRecoveryService = {
+    generate: jest.fn(),
+    verify: jest.fn(),
   };
 
   const mockSessionsRepository = {
@@ -127,6 +132,8 @@ describe('AuthService', () => {
     mockTotpService.hasActiveTotp.mockResolvedValue(false);
     mockTotpService.matchLoginCodeInTransaction.mockResolvedValue(null);
     mockTotpService.consumeLoginStep.mockResolvedValue(false);
+    mockRecoveryService.generate.mockReset().mockResolvedValue(['mock-recovery-code']);
+    mockRecoveryService.verify.mockReset().mockResolvedValue({ accountId: 'account-1' });
     mockQueryRunner.query.mockReset().mockResolvedValue([]);
     mockQueryRunner.manager.findOne.mockReset().mockResolvedValue(null);
     mockQueryRunner.manager.save.mockReset().mockResolvedValue(undefined);
@@ -145,6 +152,7 @@ describe('AuthService', () => {
         { provide: ApiTokensService, useValue: mockApiTokensService },
         { provide: AuditService, useValue: mockAuditService },
         { provide: TotpService, useValue: mockTotpService },
+        { provide: RecoveryService, useValue: mockRecoveryService },
       ],
     }).compile();
 
@@ -371,6 +379,77 @@ describe('AuthService', () => {
         details: { username: 'admin' },
       });
       expect(mockAccountsService.findByUsername).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('recovery-code authentication entry points', () => {
+    const getMethod = (name: string) => {
+      const method = (service as any)[name];
+      expect(typeof method).toBe('function');
+      return typeof method === 'function' ? method.bind(service) : null;
+    };
+
+    it('delegates generation with the authenticated account, password, and optional TOTP code', async () => {
+      const generate = getMethod('recoveryGenerate');
+      if (!generate) return;
+
+      await generate('account-1', 'current-password', '654321');
+
+      expect(mockRecoveryService.generate).toHaveBeenCalledWith('account-1', 'current-password', '654321');
+    });
+
+    it('checks the IP throttle before asking RecoveryService to inspect a submitted code', async () => {
+      const verify = getMethod('recoveryVerify');
+      if (!verify) return;
+      const ip = '198.51.100.45';
+      mockSystemMetaRepository.findOne.mockResolvedValue({
+        key: `login_ip_${ip}`,
+        value: JSON.stringify({ failed_count: 10, delay_until: Date.now() + 60_000 }),
+      });
+
+      await expect(verify('admin', 'recovery-test-input', ip)).rejects.toThrow(UnauthorizedException);
+
+      expect(mockRecoveryService.verify).not.toHaveBeenCalled();
+      expect(mockSystemMetaRepository.delete).not.toHaveBeenCalled();
+    });
+
+    it('records an IP failure when recovery verification rejects the code', async () => {
+      const verify = getMethod('recoveryVerify');
+      if (!verify) return;
+      const ip = '198.51.100.46';
+      mockSystemMetaRepository.findOne.mockResolvedValue(null);
+      mockRecoveryService.verify.mockRejectedValue(new UnauthorizedException({ code: 'INVALID_RECOVERY_CODE' }));
+
+      await expect(verify('admin', 'recovery-test-input', ip)).rejects.toThrow(UnauthorizedException);
+
+      expect(mockRecoveryService.verify).toHaveBeenCalledWith('admin', 'recovery-test-input', ip);
+      const ipUpsert = mockQueryRunner.query.mock.calls.find(([sql, params]) =>
+        typeof sql === 'string' && sql.startsWith('INSERT INTO system_meta') && params?.[0] === `login_ip_${ip}`,
+      );
+      expect(ipUpsert).toBeDefined();
+    });
+
+    it('clears IP failures and returns new tokens only after a valid recovery result', async () => {
+      const verify = getMethod('recoveryVerify');
+      if (!verify) return;
+      const ip = '198.51.100.47';
+      mockSystemMetaRepository.findOne.mockResolvedValue(null);
+      mockSystemMetaRepository.delete.mockResolvedValue({ affected: 1 });
+      mockAccountsService.findById.mockResolvedValue({ id: 'account-1', username: 'admin' });
+      mockSessionsRepository.create.mockImplementation((session) => session);
+      mockSessionsRepository.save.mockResolvedValue(undefined);
+      mockJwtService.sign.mockReturnValue('admin-access-token');
+
+      const result = await verify('admin', 'valid-test-input', ip);
+
+      expect(result).toEqual({
+        accessToken: 'admin-access-token',
+        refreshToken: expect.any(String),
+        expiresIn: 86400,
+        username: 'admin',
+      });
+      expect(mockSystemMetaRepository.delete).toHaveBeenCalledWith({ key: `login_ip_${ip}` });
+      expect(mockSessionsRepository.save).toHaveBeenCalledTimes(1);
     });
   });
 

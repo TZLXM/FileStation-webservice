@@ -20,6 +20,7 @@ import {
 import { ApiTokensService } from '../api-tokens/api-tokens.service';
 import { AuditAction, AuditService } from '../audit/audit.service';
 import { TotpService } from './totp.service';
+import { RecoveryService } from './recovery.service';
 
 export interface RefreshResult extends TokenPair {
   username: string;
@@ -49,6 +50,7 @@ export class AuthService {
     private apiTokensService: ApiTokensService,
     private totpService: TotpService,
     private auditService: AuditService,
+    private recoveryService: RecoveryService,
   ) {}
 
   /** API Token 换短期 JWT（1h）；scopes 直接取自数据库记录，不信任调用方 */
@@ -221,6 +223,35 @@ export class AuthService {
 
   async totpDisable(accountId: string, password: string, code: string): Promise<void> {
     await this.totpService.disable(accountId, password, code);
+  }
+
+  async recoveryGenerate(accountId: string, password: string, totpCode?: string): Promise<string[]> {
+    return this.recoveryService.generate(accountId, password, totpCode);
+  }
+
+  /** Recovery login uses the shared IP throttle here and account-specific locking in RecoveryService. */
+  async recoveryVerify(username: string, code: string, clientIp?: string): Promise<TokenPair & { username: string }> {
+    const now = Date.now();
+    if (clientIp) await this.checkIpThrottle(clientIp, now);
+
+    try {
+      const { accountId } = await this.recoveryService.verify(username, code, clientIp);
+      if (clientIp) await this.clearIpFailures(clientIp);
+      const account = await this.accountsService.findById(accountId);
+      if (!account) throw new UnauthorizedException('Account not found');
+
+      const tokens = await this.generateTokens(account.id, account.username);
+      await this.auditService.record({
+        accountId: account.id,
+        action: AuditAction.AUTH_LOGIN,
+        details: { second_factor: 'recovery' },
+        ip: clientIp,
+      });
+      return { ...tokens, username: account.username };
+    } catch (error) {
+      if (clientIp && error instanceof UnauthorizedException) await this.recordIpFailure(clientIp, now);
+      throw error;
+    }
   }
 
   async verifyTotpLogin(
