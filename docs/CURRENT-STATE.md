@@ -10,7 +10,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 |------|------|
 | 设计文档 | v2.2 已完成；Phase 1 实施计划迭代至 v1.7（经两轮外部评审） |
 | 项目管理 | AGENTS.md 已建立 |
-| 代码实现 | Phase 1 MVP 完成；Phase 2 TOTP 两步登录与设置页管理、恢复码前后端、API Token、审计日志、MCP 服务及对应 Web 页面已实现；Task 10 第三轮复审修复与 Task 11 最终复审均已获独立审阅批准；Task 12 断点续传 UI 已实现并修复首轮复审反馈，待最终复审 |
+| 代码实现 | Phase 1 MVP 完成；Phase 2 TOTP 两步登录与设置页管理、恢复码前后端、API Token、审计日志、MCP 服务及对应 Web 页面已实现；Task 10 第三轮复审修复、Task 11 最终复审与 Task 12 断点续传 UI 最终复审均已获独立审阅批准 |
 | 测试 | server 25 suites / 167 passed / 20 todo；web 15 files / 131 passed；Recovery E2E 12 passed；TOTP E2E 12 passed；uploads resume E2E 3 passed；完整 server E2E 6 suites / 64 passed；Phase 1 浏览器端到端手动验证通过 |
 | 部署 | 单进程模式（默认）与 Nginx 反代模式均可用；已推送至 GitHub |
 
@@ -165,6 +165,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 - **2026-09-26**: Phase 2 Task 11 第二轮复审修复最终获独立审阅 APPROVED（无 Critical/P1/P2；实现提交 `d0e0f4f`）；RecoveryGenerationProvider 放在 App/BrowserRouter 之间，生成锁、一次性结果与错误跨 React Router 页面卸载保留，至用户明确确认已保存后才从内存清除。Web 12 files / 92 passed、Recovery 与 TOTP E2E 各 12 passed、typecheck/build 通过，lint 不可用；整个 App/页面关闭、崩溃或网络中断时仍有接口协议级结果送达风险，为非阻断项；像素视觉 QA 待可用浏览器环境补做
 - **2026-09-26**: Phase 2 Task 12 断点续传 UI 完成首轮实现；FileUpload 在 StrictMode/卸载下隔离过期状态探测，按服务端 GET/resume 契约恢复并跳过已收分块，localStorage 不可信数据与 quota/禁用异常安全处理，明确终态才清理，放弃请求携带上传 token；Web 15 files / 124 passed、uploads resume E2E 3 passed、root typecheck/build 通过；lint 因仓库未安装 ESLint 不可用；已知 IAB `ERR_BLOCKED_BY_CLIENT` 不重试，视觉待有可用浏览器环境补做，独立复审待安排
 - **2026-09-26**: Task 12 首轮复审修复：API GET/POST/PUT/DELETE 支持向后兼容的可选 AbortSignal；组件卸载终止探测及上传/恢复/放弃请求，旧分块循环在中止后立即停止；服务端可能已提交但浏览器响应中止时保留续传记录并由重挂载 GET 对账；恢复文件选择器隐藏于键盘/读屏导航，仅由“继续上传”按钮触发。Web 15 files / 131 passed、uploads resume E2E 3 passed、root typecheck/build 通过；最终独立复审待安排
+- **2026-09-26**: Task 12 最终独立复审 APPROVED（提交 `e4478c6`；无 Critical/P1/P2）。复审修复后 Web 15 files / 131 passed、uploads resume E2E 3 passed、server 单测 25 suites / 167 passed，typecheck/build/diff-check 通过。接受的非阻断限制：请求中止不能撤销服务端已接收的分块/完成操作，已知 session 可由重挂载 GET 对账；初始化响应在返回 upload id/token 前丢失可能留下不可由浏览器恢复的孤儿 session；真实浏览器文件选择器视觉/交互验收受 IAB localhost `ERR_BLOCKED_BY_CLIENT` 限制，未重试。
 
 ---
 
