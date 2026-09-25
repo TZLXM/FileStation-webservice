@@ -7,16 +7,14 @@ describe('SettingsService TOTP security settings', () => {
   };
   const configService = { get: jest.fn() };
   const authenticatorsRepository = { count: jest.fn() };
-  const queryRunner = {
-    connect: jest.fn().mockResolvedValue(undefined),
-    release: jest.fn().mockResolvedValue(undefined),
-    query: jest.fn(async (sql: string, parameters: unknown[] = []) => {
-      if (sql.startsWith('SELECT COUNT(1)')) {
-        const count = await authenticatorsRepository.count({
-          where: { type: parameters[0], isActive: parameters[1] },
-        });
-        return [{ count }];
-      }
+  const connection = {
+    get: jest.fn(async (_sql: string, parameters: unknown[] = []) => {
+      const count = await authenticatorsRepository.count({
+        where: { type: parameters[0], isActive: parameters[1] },
+      });
+      return { count };
+    }),
+    run: jest.fn(async (sql: string, parameters: unknown[] = []) => {
       if (sql.startsWith('INSERT INTO settings')) {
         await settingsRepository.save({
           key: parameters[0],
@@ -25,10 +23,12 @@ describe('SettingsService TOTP security settings', () => {
           updatedBy: parameters[3],
         });
       }
-      return [];
+      return { changes: 1, lastID: 1 };
     }),
   };
-  const dataSource = { createQueryRunner: jest.fn(() => queryRunner) };
+  const sqliteTransactions = {
+    run: jest.fn(async (work: (db: typeof connection) => Promise<void>) => work(connection)),
+  };
   let service: any;
 
   beforeEach(() => {
@@ -40,7 +40,7 @@ describe('SettingsService TOTP security settings', () => {
       settingsRepository as any,
       configService as any,
       authenticatorsRepository as any,
-      dataSource as any,
+      sqliteTransactions as any,
     );
   });
 
@@ -85,5 +85,33 @@ describe('SettingsService TOTP security settings', () => {
 
   it('keeps derived activity false when no active authenticator exists', async () => {
     await expect(service.getSecuritySettings()).resolves.toMatchObject({ totp_active: false });
+  });
+
+  it('uses an independent transaction for the active-TOTP check and settings write', async () => {
+    const connection = {
+      get: jest.fn().mockResolvedValue({ count: 1 }),
+      run: jest.fn().mockResolvedValue({ changes: 1, lastID: 1 }),
+    };
+    const sqliteTransactions = {
+      run: jest.fn(async (work: (db: typeof connection) => Promise<void>) => work(connection)),
+    };
+    const isolatedService = new (SettingsService as any)(
+      settingsRepository as any,
+      configService as any,
+      authenticatorsRepository as any,
+      sqliteTransactions as any,
+    );
+
+    await isolatedService.setSecuritySettings({ totp_required: true } as any, 'admin-1');
+
+    expect(sqliteTransactions.run).toHaveBeenCalledTimes(1);
+    expect(connection.get).toHaveBeenCalledWith(
+      'SELECT COUNT(1) AS count FROM authenticators WHERE type = ? AND is_active = ?',
+      ['totp', 1],
+    );
+    expect(connection.run).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO settings'),
+      expect.arrayContaining(['security']),
+    );
   });
 });

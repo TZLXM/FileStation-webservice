@@ -2,10 +2,9 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
-import { DataSource } from 'typeorm';
 import { Setting } from './entities/setting.entity';
 import { Authenticator } from '../auth/entities/authenticator.entity';
-import { beginImmediate, safeRollback } from '../common/database/tx.helper';
+import { SqliteImmediateTransactionService } from '../common/database/sqlite-immediate-transaction.service';
 
 export interface SiteSettings {
   name: string;
@@ -47,7 +46,7 @@ export class SettingsService {
     private configService: ConfigService,
     @InjectRepository(Authenticator)
     private authenticatorsRepository: Repository<Authenticator>,
-    private dataSource: DataSource,
+    private sqliteTransactions: SqliteImmediateTransactionService,
   ) {}
 
   async get<T>(key: string, defaultValue: T): Promise<T> {
@@ -85,16 +84,13 @@ export class SettingsService {
 
   async setSecuritySettings(value: SecuritySettings, updatedBy?: string): Promise<void> {
     const { totp_active: _derived, ...toStore } = value;
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    try {
-      await beginImmediate(queryRunner);
+    await this.sqliteTransactions.run(async (connection) => {
       if (toStore.totp_required === true) {
-        const rows = await queryRunner.query(
+        const row = await connection.get<{ count: number }>(
           'SELECT COUNT(1) AS count FROM authenticators WHERE type = ? AND is_active = ?',
           ['totp', 1],
         );
-        const active = Number(rows[0]?.count ?? 0);
+        const active = Number(row?.count ?? 0);
         if (active === 0) {
           throw new BadRequestException({
             code: 'TOTP_NOT_ENABLED',
@@ -102,17 +98,11 @@ export class SettingsService {
           });
         }
       }
-      await queryRunner.query(
+      await connection.run(
         'INSERT INTO settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by',
         ['security', JSON.stringify(toStore), Date.now(), updatedBy || null],
       );
-      await queryRunner.query('COMMIT');
-    } catch (error) {
-      await safeRollback(queryRunner);
-      throw error;
-    } finally {
-      await queryRunner.release();
-    }
+    });
   }
 
   async getTransferSettings(): Promise<TransferSettings> {

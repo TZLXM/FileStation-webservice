@@ -11,7 +11,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 | 设计文档 | v2.2 已完成；Phase 1 实施计划迭代至 v1.7（经两轮外部评审） |
 | 项目管理 | AGENTS.md 已建立 |
 | 代码实现 | Phase 1 MVP 完成；Phase 2 API Token 管理、exchange、scope 授权、审计日志与 MCP 服务已实现；Web 已提供 Token/MCP 设置与审计查询页面 |
-| 测试 | server 135 unit tests passed、20 todo；web 50 tests passed；Task 8 TOTP E2E 12 项通过；Phase 1 浏览器端到端手动验证通过 |
+| 测试 | server 24 suites / 143 passed / 20 todo；web 50 passed；server E2E 5 suites / 52 passed；Phase 1 浏览器端到端手动验证通过 |
 | 部署 | 单进程模式（默认）与 Nginx 反代模式均可用；已推送至 GitHub |
 
 ## 设计决策摘要
@@ -101,7 +101,8 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 
 - 禁用 `SELECT ... FOR UPDATE`（SQLite 不支持）
 - 写事务中禁止文件 I/O 或网络请求
-- 使用 `BEGIN IMMEDIATE` + 条件 UPDATE 抢占
+- 使用独立 sqlite3 连接执行 `BEGIN IMMEDIATE`；进程内事务入口串行排队，避免竞争连接的 busy wait 占满 libuv 工作线程并阻塞持锁事务
+- 并发抢占使用条件 UPDATE
 
 ### 部署约束（2026-09-01 更新）
 
@@ -138,7 +139,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 
 | 风险 | 影响 | 缓解措施 |
 |------|------|---------|
-| SQLite 并发性能 | 多用户上传下载时锁定 | WAL 模式 + 短事务 + busy_timeout |
+| SQLite 并发性能 | 多用户上传下载时锁定 | WAL 模式 + 短事务 + busy_timeout；需要即时事务的进程内调用串行进入 |
 | 大文件上传内存 | 分块合并时内存溢出 | 流式合并 + 临时文件 + fsync |
 | FRP 配置复杂性 | 用户配置困难 | 提供 Nginx 配置生成器（Phase 3） |
 | 无 Nginx 公网暴露 | 初始化端点少一层本机限制 | 一次性 Token 哈希存储 + 短有效期；文档建议公网用 Nginx 模式 |
@@ -154,6 +155,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 - **2026-09-25**: Phase 2 内嵌 MCP 服务落地；默认关闭的无状态 Streamable HTTP 入口、11 个工具、逐工具 scope 与审计，上传总大小及分块上限
 - **2026-09-25**: Phase 2 Web 设置页增加 API Token 签发/吊销与 MCP 配置，新增受保护的审计日志分页、过滤页面
 - **2026-09-25**: Phase 2 TOTP 后端落地；AES-256-GCM 密文存储、管理员启停、单次挑战两步登录、强制 TOTP 防自锁与派生状态
+- **2026-09-25**: Task 8 并发复修；即时事务连接独立于 TypeORM，并在进程内排队，避免 SQLite busy wait 导致的线程池饥饿
 
 ---
 

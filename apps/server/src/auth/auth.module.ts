@@ -13,6 +13,7 @@ import { SystemMeta } from './entities/system-meta.entity';
 import { Authenticator } from './entities/authenticator.entity';
 import { ApiTokensModule } from '../api-tokens/api-tokens.module';
 import { AuditModule } from '../audit/audit.module';
+import { SqliteImmediateTransactionModule } from '../common/database/sqlite-immediate-transaction.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { AuditModule } from '../audit/audit.module';
     SettingsModule, // SettingsService（登录锁定）
     ApiTokensModule,
     AuditModule,
+    SqliteImmediateTransactionModule,
     TypeOrmModule.forFeature([Session, LoginChallenge, SystemMeta, Authenticator]),
   ],
   controllers: [AuthController],

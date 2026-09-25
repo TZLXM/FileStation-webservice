@@ -3,6 +3,7 @@ import { DatabaseModule } from './database.module';
 import { ConfigModule } from '@nestjs/config';
 import configuration from '../config/configuration';
 import { DataSource } from 'typeorm';
+import { OneTotpAuthenticatorPerAccount1700000000001 } from './migrations/1700000000001-one-totp-authenticator-per-account';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { v4 as uuidv4 } from 'uuid';
@@ -95,5 +96,43 @@ describe('DatabaseModule', () => {
     expect(names).toContain('verify_lease_until');
     expect(names).toContain('verify_heartbeat_at');
     expect(names).toContain('target_folder_id');
+  });
+
+  it('allows at most one TOTP authenticator per account without restricting WebAuthn rows', async () => {
+    const now = Date.now();
+    await dataSource.query(
+      'INSERT INTO admin_accounts (id, username, password_hash, password_changed_at, created_at, is_active) VALUES (?, ?, ?, ?, ?, ?)',
+      ['totp-index-account', 'totp-index-account', 'hash', now, now, 1],
+    );
+    await dataSource.query(
+      'INSERT INTO authenticators (id, account_id, type, name, created_at, is_active) VALUES (?, ?, ?, ?, ?, ?)',
+      ['totp-index-one', 'totp-index-account', 'totp', 'TOTP', now, 0],
+    );
+
+    await expect(dataSource.query(
+      'INSERT INTO authenticators (id, account_id, type, name, created_at, is_active) VALUES (?, ?, ?, ?, ?, ?)',
+      ['totp-index-two', 'totp-index-account', 'totp', 'TOTP', now + 1, 0],
+    )).rejects.toThrow();
+
+    await dataSource.query(
+      'INSERT INTO authenticators (id, account_id, type, name, created_at, is_active) VALUES (?, ?, ?, ?, ?, ?)',
+      ['webauthn-index-one', 'totp-index-account', 'webauthn', 'WebAuthn', now + 2, 1],
+    );
+    await dataSource.query(
+      'INSERT INTO authenticators (id, account_id, type, name, created_at, is_active) VALUES (?, ?, ?, ?, ?, ?)',
+      ['webauthn-index-two', 'totp-index-account', 'webauthn', 'WebAuthn', now + 3, 1],
+    );
+  });
+
+  it('makes the TOTP uniqueness migration down safe to run more than once', async () => {
+    const migration = new OneTotpAuthenticatorPerAccount1700000000001();
+    const queryRunner = dataSource.createQueryRunner();
+    await queryRunner.connect();
+    try {
+      await expect(migration.down(queryRunner)).resolves.toBeUndefined();
+      await expect(migration.down(queryRunner)).resolves.toBeUndefined();
+    } finally {
+      await queryRunner.release();
+    }
   });
 });

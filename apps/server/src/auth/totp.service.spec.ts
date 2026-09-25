@@ -42,13 +42,32 @@ function createFixture() {
   const configService = { get: jest.fn().mockReturnValue('unit-test-key') };
   const auditService = { record: jest.fn().mockResolvedValue(undefined) };
   let securitySetting: { key: string; value: string } | null = null;
-  const queryRunner = {
-    connect: jest.fn().mockResolvedValue(undefined),
-    release: jest.fn().mockResolvedValue(undefined),
-    query: jest.fn(async (sql: string, parameters: unknown[] = [], _structuredResult?: boolean) => {
-      if (sql.startsWith('SELECT value FROM settings')) return securitySetting ? [securitySetting] : [];
+  const sqliteConnection = {
+    get: jest.fn(async (sql: string, parameters: unknown[] = []) => {
+      if (sql.startsWith('SELECT value FROM settings')) return securitySetting ?? undefined;
+      if (sql.startsWith('SELECT id FROM authenticators')) {
+        const row = rows.find((candidate) => candidate.accountId === parameters[0]
+          && candidate.type === parameters[1]
+          && candidate.isActive === Number(parameters[2]));
+        return row ? { id: row.id } : undefined;
+      }
+      if (sql.startsWith('SELECT id, totp_secret_encrypted FROM authenticators')) {
+        const row = rows.find((candidate) => candidate.accountId === parameters[0]
+          && candidate.type === parameters[1]
+          && candidate.isActive === Number(parameters[2]));
+        return row ? { id: row.id, totp_secret_encrypted: row.totpSecretEncrypted } : undefined;
+      }
+      return undefined;
+    }),
+    run: jest.fn(async (sql: string, parameters: unknown[] = []) => {
       if (sql.startsWith('DELETE FROM authenticators')) {
-        return repository.delete({ accountId: parameters[0], type: parameters[1] });
+        const where: Record<string, unknown> = { accountId: parameters[0], type: parameters[1] };
+        if (parameters.length > 2) where.isActive = Number(parameters[2]);
+        const before = rows.length;
+        for (let index = rows.length - 1; index >= 0; index -= 1) {
+          if (matches(rows[index], where)) rows.splice(index, 1);
+        }
+        return { changes: before - rows.length, lastID: 0 };
       }
       if (sql.startsWith('UPDATE authenticators SET last_used_at')) {
         const timestamp = Number(parameters[0]);
@@ -60,27 +79,34 @@ function createFixture() {
           && candidate.type === type
           && candidate.isActive === expectedActive
           && (candidate.lastUsedAt === null || candidate.lastUsedAt < stepTimestamp));
-        if (!row) return { affected: 0 };
+        if (!row) return { changes: 0, lastID: 0 };
         Object.assign(row, { lastUsedAt: timestamp, isActive: 1 });
-        return { affected: 1 };
+        return { changes: 1, lastID: 0 };
       }
-      return [];
+      if (sql.startsWith('INSERT INTO authenticators')) {
+        const [id, accountId, type, name, totpSecretEncrypted, _credentialId, _publicKey, signCount, transports, createdAt, lastUsedAt, isActive] = parameters;
+        const row = { id, accountId, type, name, totpSecretEncrypted, signCount, transports, createdAt, lastUsedAt, isActive };
+        rows.push(row);
+        return { changes: 1, lastID: 0 };
+      }
+      return { changes: 0, lastID: 0 };
     }),
   };
-  const dataSource = { createQueryRunner: jest.fn(() => queryRunner) };
+  const sqliteTransactions = { run: jest.fn(async (work: (connection: any) => Promise<unknown>) => work(sqliteConnection)) };
   const module = loadTotpService();
 
   expect(module).not.toBeNull();
   if (!module) return null;
 
-  const service = new module.TotpService(repository, accountsService, configService, auditService, dataSource);
+  const service = new module.TotpService(repository, accountsService, configService, auditService, sqliteTransactions);
   return {
     service,
     rows,
     repository,
     accountsService,
     auditService,
-    queryRunner,
+    sqliteConnection,
+    sqliteTransactions,
     setSecurityRequired: (required: boolean) => {
       securitySetting = { key: 'security', value: JSON.stringify({ totp_required: required }) };
     },

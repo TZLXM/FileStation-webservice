@@ -3,12 +3,15 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { authenticator } from 'otplib';
 import * as qrcode from 'qrcode';
-import { DataSource, QueryRunner, Repository } from 'typeorm';
+import { Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 import { AccountsService } from '../accounts/accounts.service';
 import { AuditAction, AuditService } from '../audit/audit.service';
 import { decryptSecret, encryptSecret } from '../common/crypto/totp-secret-cipher';
-import { beginImmediate, safeRollback } from '../common/database/tx.helper';
+import {
+  SqliteImmediateTransactionService,
+  SqliteTransactionConnection,
+} from '../common/database/sqlite-immediate-transaction.service';
 import { Authenticator } from './entities/authenticator.entity';
 
 export interface TotpSetupResult {
@@ -32,7 +35,7 @@ export class TotpService {
     private readonly accountsService: AccountsService,
     private readonly configService: ConfigService,
     private readonly auditService: AuditService,
-    private readonly dataSource: DataSource,
+    private readonly sqliteTransactions: SqliteImmediateTransactionService,
   ) {}
 
   async hasActiveTotp(accountId: string): Promise<boolean> {
@@ -42,33 +45,56 @@ export class TotpService {
   }
 
   async setup(accountId: string): Promise<TotpSetupResult> {
-    if (await this.hasActiveTotp(accountId)) {
-      throw new ConflictException({ code: 'TOTP_ALREADY_ENABLED', message: 'TOTP is already enabled; disable it first' });
-    }
-
     const account = await this.accountsService.findById(accountId);
     if (!account) throw new NotFoundException('Account not found');
 
-    await this.authenticatorsRepository.delete({ accountId, type: 'totp', isActive: 0 });
-
-    const secret = this.totp.generateSecret();
-    await this.authenticatorsRepository.save({
-      id: uuidv4(),
-      accountId,
-      type: 'totp',
-      name: 'TOTP',
-      totpSecretEncrypted: encryptSecret(secret, this.jwtSecret()),
-      credentialId: null,
-      publicKey: null,
-      signCount: 0,
-      transports: null,
-      createdAt: Date.now(),
-      lastUsedAt: null,
-      isActive: 0,
+    // A pending row observed before taking the write lock may be replaced. If a
+    // different row appeared while this request waited for the lock, another
+    // setup won the race and this response must not invalidate its secret.
+    const observedPending = await this.authenticatorsRepository.findOne({
+      where: { accountId, type: 'totp', isActive: 0 },
     });
-
+    const secret = this.totp.generateSecret();
+    const encryptedSecret = encryptSecret(secret, this.jwtSecret());
+    const authenticatorId = uuidv4();
+    const createdAt = Date.now();
     const otpauthUrl = this.totp.keyuri(account.username, 'FileStation', secret);
     const qrCodeDataUrl = await qrcode.toDataURL(otpauthUrl);
+
+    try {
+      await this.sqliteTransactions.run(async (connection) => {
+        const active = await connection.get<{ id: string }>(
+          'SELECT id FROM authenticators WHERE account_id = ? AND type = ? AND is_active = ?',
+          [accountId, 'totp', 1],
+        );
+        if (active) {
+          throw new ConflictException({ code: 'TOTP_ALREADY_ENABLED', message: 'TOTP is already enabled; disable it first' });
+        }
+
+        const pending = await connection.get<{ id: string }>(
+          'SELECT id FROM authenticators WHERE account_id = ? AND type = ? AND is_active = ?',
+          [accountId, 'totp', 0],
+        );
+        if (pending && pending.id !== observedPending?.id) {
+          throw new ConflictException({ code: 'TOTP_SETUP_IN_PROGRESS', message: 'A TOTP setup is already in progress' });
+        }
+
+        await connection.run(
+          'DELETE FROM authenticators WHERE account_id = ? AND type = ? AND is_active = ?',
+          [accountId, 'totp', 0],
+        );
+        await connection.run(
+          'INSERT INTO authenticators (id, account_id, type, name, totp_secret_encrypted, credential_id, public_key, sign_count, transports, created_at, last_used_at, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [authenticatorId, accountId, 'totp', 'TOTP', encryptedSecret, null, null, 0, null, createdAt, null, 0],
+        );
+      });
+    } catch (error) {
+      if ((error as { code?: string })?.code === 'SQLITE_CONSTRAINT') {
+        throw new ConflictException({ code: 'TOTP_SETUP_IN_PROGRESS', message: 'A TOTP setup is already in progress' });
+      }
+      throw error;
+    }
+
     return { secret, otpauth_url: otpauthUrl, qr_code_data_url: qrCodeDataUrl };
   }
 
@@ -100,12 +126,10 @@ export class TotpService {
       throw new UnauthorizedException({ code: 'INVALID_TOTP', message: 'Invalid TOTP code' });
     }
 
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    try {
-      await beginImmediate(queryRunner);
-      const rows = await queryRunner.query('SELECT value FROM settings WHERE key = ?', ['security']);
-      const securitySetting = rows[0] as { value: string } | undefined;
+    await this.sqliteTransactions.run(async (connection) => {
+      const securitySetting = await connection.get<{ value: string }>(
+        'SELECT value FROM settings WHERE key = ?', ['security'],
+      );
       let totpRequired = false;
       if (securitySetting) {
         try {
@@ -123,17 +147,11 @@ export class TotpService {
           message: 'Disable the TOTP requirement before removing your authenticator',
         });
       }
-      await queryRunner.query(
+      await connection.run(
         'DELETE FROM authenticators WHERE account_id = ? AND type = ?',
         [accountId, 'totp'],
       );
-      await queryRunner.query('COMMIT');
-    } catch (error) {
-      await safeRollback(queryRunner);
-      throw error;
-    } finally {
-      await queryRunner.release();
-    }
+    });
     await this.auditService.record({ accountId, action: AuditAction.AUTH_TOTP_DISABLED });
   }
 
@@ -153,22 +171,36 @@ export class TotpService {
     return { authenticatorId: row.id, timestamp: matchedStep.timestamp };
   }
 
-  async consumeLoginStep(queryRunner: QueryRunner, matched: MatchedTotpStep): Promise<boolean> {
-    return this.updateConsumedStep(queryRunner, matched.authenticatorId, 1, matched.timestamp);
+  async matchLoginCodeInTransaction(
+    connection: SqliteTransactionConnection,
+    accountId: string,
+    code: string,
+  ): Promise<MatchedTotpStep | null> {
+    const row = await connection.get<{ id: string; totp_secret_encrypted: string | null }>(
+      'SELECT id, totp_secret_encrypted FROM authenticators WHERE account_id = ? AND type = ? AND is_active = ?',
+      [accountId, 'totp', 1],
+    );
+    if (!row?.totp_secret_encrypted) return null;
+    const matchedStep = this.matchingStep(code, row.totp_secret_encrypted);
+    if (!matchedStep) return null;
+    return { authenticatorId: row.id, timestamp: matchedStep.timestamp };
+  }
+
+  async consumeLoginStep(connection: SqliteTransactionConnection, matched: MatchedTotpStep): Promise<boolean> {
+    return this.updateConsumedStep(connection, matched.authenticatorId, 1, matched.timestamp);
   }
 
   private async updateConsumedStep(
-    queryRunner: QueryRunner,
+    connection: SqliteTransactionConnection,
     authenticatorId: string,
     expectedActive: 0 | 1,
     timestamp: number,
   ): Promise<boolean> {
-    const result = await queryRunner.query(
+    const result = await connection.run(
       'UPDATE authenticators SET last_used_at = ?, is_active = 1 WHERE id = ? AND type = ? AND is_active = ? AND (last_used_at IS NULL OR last_used_at < ?)',
       [timestamp, authenticatorId, 'totp', expectedActive, timestamp],
-      true,
-    ) as { affected?: number };
-    return result?.affected === 1;
+    );
+    return result.changes === 1;
   }
 
   private matchingStep(code: string, encryptedSecret: string): { counter: number; timestamp: number } | null {
@@ -187,19 +219,9 @@ export class TotpService {
   }
 
   private async consumeStep(authenticatorId: string, expectedActive: 0 | 1, timestamp: number): Promise<boolean> {
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    try {
-      await beginImmediate(queryRunner);
-      const consumed = await this.updateConsumedStep(queryRunner, authenticatorId, expectedActive, timestamp);
-      await queryRunner.query('COMMIT');
-      return consumed;
-    } catch (error) {
-      await safeRollback(queryRunner);
-      throw error;
-    } finally {
-      await queryRunner.release();
-    }
+    return this.sqliteTransactions.run((connection) =>
+      this.updateConsumedStep(connection, authenticatorId, expectedActive, timestamp),
+    );
   }
 
   private jwtSecret(): string {

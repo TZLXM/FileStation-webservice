@@ -13,10 +13,13 @@ import { createHash, timingSafeEqual } from 'crypto';
 import * as bcrypt from 'bcrypt';
 import { TokenPair, JwtPayload } from '@filestation/shared';
 import { LoginDto } from './dto/login.dto';
-import { beginImmediate, safeRollback } from '../common/database/tx.helper';
+import {
+  SqliteImmediateTransactionService,
+  SqliteTransactionConnection,
+} from '../common/database/sqlite-immediate-transaction.service';
 import { ApiTokensService } from '../api-tokens/api-tokens.service';
 import { AuditAction, AuditService } from '../audit/audit.service';
-import { MatchedTotpStep, TotpService } from './totp.service';
+import { TotpService } from './totp.service';
 
 export interface RefreshResult extends TokenPair {
   username: string;
@@ -42,6 +45,7 @@ export class AuthService {
     @InjectRepository(SystemMeta)
     private systemMetaRepository: Repository<SystemMeta>,
     private dataSource: DataSource,
+    private sqliteTransactions: SqliteImmediateTransactionService,
     private apiTokensService: ApiTokensService,
     private totpService: TotpService,
     private auditService: AuditService,
@@ -104,70 +108,44 @@ export class AuthService {
   async initialize(username: string, password: string, initToken: string): Promise<TokenPair> {
     // 密码哈希在事务外完成（避免长时间持有写锁）
     const passwordHash = await bcrypt.hash(password, 10);
-
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-
-    try {
-      await beginImmediate(queryRunner);
-
-      const metaResult = await queryRunner.query(
+    const accountId = await this.sqliteTransactions.run(async (connection) => {
+      const initMeta = await connection.get<{ value: string }>(
         `SELECT value FROM system_meta WHERE key = 'init_token'`,
       );
-      if (metaResult.length === 0) {
-        throw new UnauthorizedException('No initialization token generated');
-      }
+      if (!initMeta) throw new UnauthorizedException('No initialization token generated');
 
-      const { token_hash: expectedTokenHash, expires_at: expiresAt } = JSON.parse(metaResult[0].value);
-
-      if (Date.now() > expiresAt) {
-        throw new UnauthorizedException('Initialization token expired');
-      }
+      const { token_hash: expectedTokenHash, expires_at: expiresAt } = JSON.parse(initMeta.value);
+      if (Date.now() > expiresAt) throw new UnauthorizedException('Initialization token expired');
 
       const initTokenHash = createHash('sha256').update(initToken).digest('hex');
       const actualBuffer = Buffer.from(initTokenHash, 'hex');
       const expectedBuffer = Buffer.from(expectedTokenHash, 'hex');
-
       if (actualBuffer.length !== expectedBuffer.length || !timingSafeEqual(actualBuffer, expectedBuffer)) {
         throw new UnauthorizedException('Invalid initialization token');
       }
 
-      const initializedResult = await queryRunner.query(
-        `SELECT 1 FROM system_meta WHERE key = 'initialized_at'`,
+      const initialized = await connection.get<{ initialized: number }>(
+        `SELECT 1 AS initialized FROM system_meta WHERE key = 'initialized_at'`,
       );
-      if (initializedResult.length > 0) {
-        throw new BadRequestException('System already initialized');
-      }
+      if (initialized) throw new BadRequestException('System already initialized');
 
       const now = Date.now();
-      const accountId = uuidv4();
-      await queryRunner.query(
-        `INSERT INTO admin_accounts (id, username, password_hash, password_changed_at, created_at, is_active) VALUES (?, ?, ?, ?, ?, ?)`,
-        [accountId, username, passwordHash, now, now, 1],
+      const newAccountId = uuidv4();
+      await connection.run(
+        'INSERT INTO admin_accounts (id, username, password_hash, password_changed_at, created_at, is_active) VALUES (?, ?, ?, ?, ?, ?)',
+        [newAccountId, username, passwordHash, now, now, 1],
       );
-
-      await queryRunner.query(
-        `INSERT INTO system_meta (key, value) VALUES ('initialized_at', ?)`,
-        [now.toString()],
+      await connection.run(
+        `INSERT INTO system_meta (key, value) VALUES ('initialized_at', ?)`, [now.toString()],
       );
-      await queryRunner.query(
-        `INSERT INTO system_meta (key, value) VALUES ('first_account_id', ?)`,
-        [accountId],
+      await connection.run(
+        `INSERT INTO system_meta (key, value) VALUES ('first_account_id', ?)`, [newAccountId],
       );
+      await connection.run(`DELETE FROM system_meta WHERE key = 'init_token'`);
+      return newAccountId;
+    });
 
-      await queryRunner.query(
-        `DELETE FROM system_meta WHERE key = 'init_token'`,
-      );
-
-      await queryRunner.query('COMMIT');
-
-      return this.generateTokens(accountId, username);
-    } catch (error) {
-      await safeRollback(queryRunner);
-      throw error;
-    } finally {
-      await queryRunner.release();
-    }
+    return this.generateTokens(accountId, username);
   }
 
   async login(loginDto: LoginDto, clientIp?: string): Promise<LoginOutcome> {
@@ -278,7 +256,6 @@ export class AuthService {
         retry_after: retryAfterSec,
       });
     }
-    const matchedStep = await this.totpService.matchLoginCode(challenge.accountId, code);
     const security = await this.settingsService.getSecuritySettings();
     const admission = await this.reserveTotpAttempt(
       account.id,
@@ -287,7 +264,7 @@ export class AuthService {
       security.lockout_minutes,
       clientIp,
       now,
-      matchedStep,
+      code,
     );
     const rejection = admission.rejection;
     if (rejection) {
@@ -385,12 +362,8 @@ export class AuthService {
 
   private async recordLoginFailure(username: string, maxAttempts: number, lockoutMinutes: number, now: number): Promise<void> {
     const key = `login_lockout_${username}`;
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    try {
-      await beginImmediate(queryRunner);
-      const rows = await queryRunner.query('SELECT value FROM system_meta WHERE key = ?', [key]);
-      const meta = rows[0] as { value: string } | undefined;
+    await this.sqliteTransactions.run(async (connection) => {
+      const meta = await connection.get<{ value: string }>('SELECT value FROM system_meta WHERE key = ?', [key]);
       let current = { failed_count: 0, locked_until: null as number | null };
       if (meta) {
         try { current = JSON.parse(meta.value); } catch { /* reset malformed historical state */ }
@@ -398,23 +371,16 @@ export class AuthService {
       // A challenge that passed its initial lockout check before a concurrent request
       // locked the account must not clear that lock when its delayed failure is recorded.
       if (current.locked_until && current.locked_until > now) {
-        await queryRunner.query('COMMIT');
         return;
       }
       const base = current.locked_until && current.locked_until <= now ? 0 : current.failed_count;
       const failedCount = base + 1;
       const locked_until = failedCount >= maxAttempts ? now + lockoutMinutes * 60 * 1000 : null;
-      await queryRunner.query(
+      await connection.run(
         'INSERT INTO system_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
         [key, JSON.stringify({ failed_count: locked_until ? 0 : failedCount, locked_until })],
       );
-      await queryRunner.query('COMMIT');
-    } catch (error) {
-      await safeRollback(queryRunner);
-      throw error;
-    } finally {
-      await queryRunner.release();
-    }
+    });
   }
 
   private async clearLoginFailures(username: string): Promise<void> {
@@ -440,7 +406,7 @@ export class AuthService {
     lockoutMinutes: number,
     ip: string | undefined,
     now: number,
-    matchedStep: MatchedTotpStep | null,
+    code: string,
   ): Promise<{
     rejection: { code: 'ACCOUNT_LOCKED' | 'IP_THROTTLED'; retryAfterSec: number } | null;
     factorAccepted: boolean;
@@ -451,13 +417,9 @@ export class AuthService {
     let rejection: { code: 'ACCOUNT_LOCKED' | 'IP_THROTTLED'; retryAfterSec: number } | null = null;
     let factorAccepted = false;
     let tokens: TokenPair | null = null;
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    try {
-      await beginImmediate(queryRunner);
+    await this.sqliteTransactions.run(async (connection) => {
       const readState = async <T extends Record<string, unknown>>(key: string, fallback: T): Promise<T> => {
-        const rows = await queryRunner.query('SELECT value FROM system_meta WHERE key = ?', [key]);
-        const row = rows[0] as { value: string } | undefined;
+        const row = await connection.get<{ value: string }>('SELECT value FROM system_meta WHERE key = ?', [key]);
         if (!row) return fallback;
         try { return JSON.parse(row.value) as T; } catch { return fallback; }
       };
@@ -474,7 +436,7 @@ export class AuthService {
         const base = accountState.locked_until && accountState.locked_until <= now ? 0 : accountState.failed_count;
         const failedCount = base + 1;
         const lockedUntil = failedCount >= maxAttempts ? now + lockoutMinutes * 60 * 1000 : null;
-        await queryRunner.query(
+        await connection.run(
           'INSERT INTO system_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
           [accountKey, JSON.stringify({ failed_count: lockedUntil ? 0 : failedCount, locked_until: lockedUntil })],
         );
@@ -484,38 +446,31 @@ export class AuthService {
             const delaySec = Math.floor(ipState.failed_count / 10) * 30;
             ipState.delay_until = now + delaySec * 1000;
           }
-          await queryRunner.query(
+          await connection.run(
             'INSERT INTO system_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
             [ipKey, JSON.stringify(ipState)],
           );
         }
+        // Factor work happens only after the durable per-account/IP quota
+        // reservation. A request rejected above never inspects the secret/code.
+        const matchedStep = await this.totpService.matchLoginCodeInTransaction(connection, accountId, code);
         if (matchedStep) {
-          factorAccepted = await this.totpService.consumeLoginStep(queryRunner, matchedStep);
+          factorAccepted = await this.totpService.consumeLoginStep(connection, matchedStep);
         }
         if (factorAccepted) {
-          await queryRunner.query('DELETE FROM system_meta WHERE key = ?', [accountKey]);
-          if (ipKey) await queryRunner.query('DELETE FROM system_meta WHERE key = ?', [ipKey]);
-          tokens = await this.generateTokensInImmediateTransaction(queryRunner, accountId, username);
+          await connection.run('DELETE FROM system_meta WHERE key = ?', [accountKey]);
+          if (ipKey) await connection.run('DELETE FROM system_meta WHERE key = ?', [ipKey]);
+          tokens = await this.generateTokensInImmediateTransaction(connection, accountId, username);
         }
       }
-      await queryRunner.query('COMMIT');
-    } catch (error) {
-      await safeRollback(queryRunner);
-      throw error;
-    } finally {
-      await queryRunner.release();
-    }
+    });
     return { rejection, factorAccepted, tokens };
   }
 
   private async recordIpFailure(ip: string, now: number): Promise<void> {
     const key = `login_ip_${ip}`;
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    try {
-      await beginImmediate(queryRunner);
-      const rows = await queryRunner.query('SELECT value FROM system_meta WHERE key = ?', [key]);
-      const meta = rows[0] as { value: string } | undefined;
+    await this.sqliteTransactions.run(async (connection) => {
+      const meta = await connection.get<{ value: string }>('SELECT value FROM system_meta WHERE key = ?', [key]);
       let state = { failed_count: 0, delay_until: null as number | null };
       if (meta) { try { state = JSON.parse(meta.value); } catch { /* reset malformed historical state */ } }
       state.failed_count += 1;
@@ -523,17 +478,11 @@ export class AuthService {
         const delaySec = Math.floor(state.failed_count / 10) * 30;
         state.delay_until = now + delaySec * 1000;
       }
-      await queryRunner.query(
+      await connection.run(
         'INSERT INTO system_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
         [key, JSON.stringify(state)],
       );
-      await queryRunner.query('COMMIT');
-    } catch (error) {
-      await safeRollback(queryRunner);
-      throw error;
-    } finally {
-      await queryRunner.release();
-    }
+    });
   }
 
   private async clearIpFailures(ip: string): Promise<void> {
@@ -573,7 +522,7 @@ export class AuthService {
   }
 
   private async generateTokensInImmediateTransaction(
-    queryRunner: QueryRunner,
+    connection: SqliteTransactionConnection,
     accountId: string,
     username: string,
   ): Promise<TokenPair> {
@@ -586,7 +535,7 @@ export class AuthService {
     const refreshToken = uuidv4();
     const now = Date.now();
     const expiresIn = 24 * 60 * 60;
-    await queryRunner.query(
+    await connection.run(
       'INSERT INTO sessions (id, account_id, refresh_token_hash, device_info, created_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
       [uuidv4(), accountId, this.hashToken(refreshToken), null, now, now + 7 * 24 * 60 * 60 * 1000, null],
     );

@@ -87,16 +87,25 @@ describe('TOTP authentication (e2e)', () => {
     expect(result.body.code ?? result.body.error?.code).toBe('TOTP_NOT_ENABLED');
   });
 
-  it('creates an administrator setup and stores only the encrypted authenticator secret', async () => {
-    const response = await request(app.getHttpServer())
-      .post('/api/v1/auth/totp/setup')
-      .set('Authorization', `Bearer ${adminJwt}`)
-      .expect(201);
+  it('serializes concurrent setup so one response owns the only pending authenticator', async () => {
+    const responses = await Promise.all(Array.from({ length: 2 }, () =>
+      request(app.getHttpServer())
+        .post('/api/v1/auth/totp/setup')
+        .set('Authorization', `Bearer ${adminJwt}`),
+    ));
+    const created = responses.filter((response) => response.status === 201);
+    const conflicts = responses.filter((response) => response.status === 409);
+    expect(created.length).toBe(1);
+    expect(conflicts.length).toBe(1);
+
+    const response = created[0];
     totpSecret = response.body.data.secret;
     qrCodeDataUrl = response.body.data.qr_code_data_url;
     const repository = app.get(DataSource).getRepository(Authenticator);
-    const saved = await repository.findOne({ where: { type: 'totp' } });
+    const savedRows = await repository.find({ where: { type: 'totp' } });
+    const [saved] = savedRows;
 
+    expect(savedRows).toHaveLength(1);
     expect(typeof totpSecret).toBe('string');
     expect(totpSecret.length > 0).toBe(true);
     expect(response.body.data.otpauth_url.startsWith('otpauth://totp/')).toBe(true);
@@ -224,15 +233,20 @@ describe('TOTP authentication (e2e)', () => {
       .find((candidate) => !verifier.check(candidate, totpSecret)) ?? '';
     expect(concurrentWrongCode.length).toBe(6);
 
+    const matchingSpy = jest.spyOn(app.get(TotpService), 'matchLoginCodeInTransaction');
     const results = await Promise.all(concurrentChallenges.map((loginChallenge) =>
       request(app.getHttpServer())
         .post('/api/v1/auth/login/totp')
         .send({ login_challenge: loginChallenge, totp_code: concurrentWrongCode }),
     ));
+    const matchingCalls = matchingSpy.mock.calls.length;
+    matchingSpy.mockRestore();
+    expect(results.map((result) => result.status)).toEqual(Array(6).fill(401));
     expect(results.every((result) => result.status === 401)).toBe(true);
     const responseCodes = results.map((result) => result.body.code ?? result.body.error?.code);
     expect(responseCodes.filter((code) => code === 'INVALID_TOTP')).toHaveLength(5);
     expect(responseCodes.filter((code) => code === 'ACCOUNT_LOCKED')).toHaveLength(1);
+    expect(matchingCalls).toBe(5);
 
     const blocked = await request(app.getHttpServer())
       .post('/api/v1/auth/login')

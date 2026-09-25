@@ -8,6 +8,7 @@ import { Authenticator } from '../auth/entities/authenticator.entity';
 import { RecoveryCode } from '../auth/entities/recovery-code.entity';
 import { AuditLog } from '../audit/entities/audit-log.entity';
 import { InitialSchema1700000000000 } from '../database/migrations/1700000000000-initial-schema';
+import { OneTotpAuthenticatorPerAccount1700000000001 } from '../database/migrations/1700000000001-one-totp-authenticator-per-account';
 
 // 真实迁移建库（synchronize: false + migrationsRun）：
 // 迁移 DDL 是权威 schema，实体必须贴合它
@@ -22,7 +23,7 @@ describe('Phase 2 entities alignment (real migration)', () => {
       type: 'sqlite',
       database: join(dir, 'test.db'),
       entities: [ApiToken, Authenticator, RecoveryCode, AuditLog],
-      migrations: [InitialSchema1700000000000],
+      migrations: [InitialSchema1700000000000, OneTotpAuthenticatorPerAccount1700000000001],
       migrationsRun: true,
       synchronize: false,
     });
@@ -59,6 +60,14 @@ describe('Phase 2 entities alignment (real migration)', () => {
     });
     const row = await ds.getRepository(ApiToken).findOneBy({ id: 't1' });
     expect(row?.tokenPrefix).toBe('fs_api_ab12');
+  });
+
+  it('fresh migration chain installs the partial TOTP uniqueness index', async () => {
+    const indexes = await ds.query(
+      `SELECT sql FROM sqlite_master WHERE type='index' AND name='uq_authenticators_one_totp_per_account'`,
+    );
+    expect(indexes).toHaveLength(1);
+    expect(indexes[0].sql).toContain("WHERE type = 'totp'");
   });
 
   it('Authenticator/RecoveryCode/AuditLog 实体可读写迁移表', async () => {

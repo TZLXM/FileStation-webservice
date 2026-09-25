@@ -14,6 +14,7 @@ import { createHash } from 'crypto';
 import { ApiTokensService } from '../api-tokens/api-tokens.service';
 import { AuditService } from '../audit/audit.service';
 import { TotpService } from './totp.service';
+import { SqliteImmediateTransactionService } from '../common/database/sqlite-immediate-transaction.service';
 
 describe('AuthService', () => {
   let service: AuthService;
@@ -37,6 +38,7 @@ describe('AuthService', () => {
     hasActiveTotp: jest.fn().mockResolvedValue(false),
     verifyCode: jest.fn(),
     matchLoginCode: jest.fn().mockResolvedValue(null),
+    matchLoginCodeInTransaction: jest.fn().mockResolvedValue(null),
     consumeLoginStep: jest.fn().mockResolvedValue(false),
     setup: jest.fn(),
     confirm: jest.fn(),
@@ -84,6 +86,34 @@ describe('AuthService', () => {
     createQueryRunner: jest.fn().mockReturnValue(mockQueryRunner),
   };
 
+  const mockSqliteTransactions = {
+    run: jest.fn(async (work: (connection: any) => Promise<unknown>) => {
+      await mockQueryRunner.query('BEGIN IMMEDIATE');
+      const connection = {
+        get: async (sql: string, parameters: unknown[] = []) => {
+          const rows = await mockQueryRunner.query(sql, parameters);
+          return Array.isArray(rows) ? rows[0] : rows;
+        },
+        all: async (sql: string, parameters: unknown[] = []) => mockQueryRunner.query(sql, parameters),
+        run: async (sql: string, parameters: unknown[] = []) => {
+          const result = await mockQueryRunner.query(sql, parameters, true);
+          return {
+            changes: Number(result?.changes ?? result?.affected ?? 0),
+            lastID: Number(result?.lastID ?? 0),
+          };
+        },
+      };
+      try {
+        const result = await work(connection);
+        await mockQueryRunner.query('COMMIT');
+        return result;
+      } catch (error) {
+        await mockQueryRunner.query('ROLLBACK');
+        throw error;
+      }
+    }),
+  };
+
   // v1.7 高优 10：AuthService 新增 SettingsService 依赖（登录锁定），必须提供 mock
   const mockSettingsService = {
     getSecuritySettings: jest.fn().mockResolvedValue({
@@ -95,7 +125,7 @@ describe('AuthService', () => {
 
   beforeEach(async () => {
     mockTotpService.hasActiveTotp.mockResolvedValue(false);
-    mockTotpService.matchLoginCode.mockResolvedValue(null);
+    mockTotpService.matchLoginCodeInTransaction.mockResolvedValue(null);
     mockTotpService.consumeLoginStep.mockResolvedValue(false);
     mockQueryRunner.query.mockReset().mockResolvedValue([]);
     mockQueryRunner.manager.findOne.mockReset().mockResolvedValue(null);
@@ -110,6 +140,7 @@ describe('AuthService', () => {
         { provide: getRepositoryToken(LoginChallenge), useValue: mockChallengesRepository },
         { provide: getRepositoryToken(SystemMeta), useValue: mockSystemMetaRepository },
         { provide: DataSource, useValue: mockDataSource },
+        { provide: SqliteImmediateTransactionService, useValue: mockSqliteTransactions },
         { provide: SettingsService, useValue: mockSettingsService }, // v1.7 高优 10
         { provide: ApiTokensService, useValue: mockApiTokensService },
         { provide: AuditService, useValue: mockAuditService },
@@ -429,7 +460,7 @@ describe('AuthService', () => {
       mockAccountsService.findById.mockResolvedValue({ id: 'account-1', username: 'admin' });
       mockAccountsService.validatePassword.mockResolvedValue(true);
       mockTotpService.hasActiveTotp.mockResolvedValue(true);
-      mockTotpService.matchLoginCode.mockResolvedValue(null);
+      mockTotpService.matchLoginCodeInTransaction.mockResolvedValue(null);
 
       const first = await service.login({ username: 'admin', password: 'valid-password' }, firstIp);
       if (first.kind !== 'second_factor') throw new Error('Expected a second-factor challenge');
@@ -445,14 +476,14 @@ describe('AuthService', () => {
       expect(meta.get(`login_ip_${firstIp}`)?.failed_count).toBe(1);
 
       await expect(verifier(second.loginChallenge, '000000', firstIp)).rejects.toThrow(UnauthorizedException);
-      expect(mockTotpService.matchLoginCode).toHaveBeenCalledTimes(2);
+      expect(mockTotpService.matchLoginCodeInTransaction).toHaveBeenCalledTimes(2);
       expect(meta.get('login_lockout_admin')).toEqual({ failed_count: 0, locked_until: expect.any(Number) });
-      const checksBeforeLockedChallenge = mockTotpService.matchLoginCode.mock.calls.length;
+      const checksBeforeLockedChallenge = mockTotpService.matchLoginCodeInTransaction.mock.calls.length;
 
       await expect(verifier(third.loginChallenge, '000000', otherIp)).rejects.toMatchObject({
         response: expect.objectContaining({ code: 'ACCOUNT_LOCKED' }),
       });
-      expect(mockTotpService.matchLoginCode).toHaveBeenCalledTimes(checksBeforeLockedChallenge);
+      expect(mockTotpService.matchLoginCodeInTransaction).toHaveBeenCalledTimes(checksBeforeLockedChallenge);
       expect(mockSessionsRepository.save).not.toHaveBeenCalled();
     });
 
@@ -469,7 +500,7 @@ describe('AuthService', () => {
       mockChallengesRepository.update.mockResolvedValue({ affected: 1 });
       mockChallengesRepository.findOne.mockResolvedValue(challenge);
       mockAccountsService.findById.mockResolvedValue({ id: 'account-1', username: 'admin' });
-      mockTotpService.matchLoginCode.mockResolvedValue(null);
+      mockTotpService.matchLoginCodeInTransaction.mockResolvedValue(null);
 
       await expect(verifier('ch-failed', '123456', ip)).rejects.toThrow(UnauthorizedException);
 
@@ -510,7 +541,7 @@ describe('AuthService', () => {
       await expect(verifier('ch-used', '123456', '198.51.100.47')).rejects.toThrow(UnauthorizedException);
 
       expect(mockChallengesRepository.findOne).not.toHaveBeenCalled();
-      expect(mockTotpService.matchLoginCode).not.toHaveBeenCalled();
+      expect(mockTotpService.matchLoginCodeInTransaction).not.toHaveBeenCalled();
       expect(mockSessionsRepository.save).not.toHaveBeenCalled();
       expect(mockJwtService.sign).not.toHaveBeenCalled();
     });
@@ -527,7 +558,7 @@ describe('AuthService', () => {
 
       await expect(verifier(challenge.id, '123456', '198.51.100.48')).rejects.toThrow(UnauthorizedException);
 
-      expect(mockTotpService.matchLoginCode).not.toHaveBeenCalled();
+      expect(mockTotpService.matchLoginCodeInTransaction).not.toHaveBeenCalled();
       expect(mockSessionsRepository.save).not.toHaveBeenCalled();
       expect(mockJwtService.sign).not.toHaveBeenCalled();
     });
@@ -543,7 +574,7 @@ describe('AuthService', () => {
         id: 'ch-valid', accountId: 'account-1', challengeType: 'totp', expiresAt: Date.now() + 60_000, usedAt: null,
       });
       mockAccountsService.findById.mockResolvedValue({ id: 'account-1', username: 'admin' });
-      mockTotpService.matchLoginCode.mockResolvedValue({ authenticatorId: 'auth-1', timestamp: 1_800_000_000_000 });
+      mockTotpService.matchLoginCodeInTransaction.mockResolvedValue({ authenticatorId: 'auth-1', timestamp: 1_800_000_000_000 });
       mockTotpService.consumeLoginStep.mockResolvedValue(true);
       mockJwtService.sign.mockReturnValue('access');
 
@@ -573,8 +604,36 @@ describe('AuthService', () => {
       await expect(verifier('ch-throttled', '123456', '198.51.100.50')).rejects.toThrow(UnauthorizedException);
 
       expect(mockChallengesRepository.update).not.toHaveBeenCalled();
-      expect(mockTotpService.matchLoginCode).not.toHaveBeenCalled();
+      expect(mockTotpService.matchLoginCodeInTransaction).not.toHaveBeenCalled();
       expect(mockSessionsRepository.save).not.toHaveBeenCalled();
+    });
+
+    it('does not evaluate a TOTP code when atomic admission rejects the IP', async () => {
+      const verifier = getVerifier();
+      if (!verifier) return;
+      const ip = '198.51.100.60';
+      mockSystemMetaRepository.findOne.mockResolvedValue(null);
+      mockChallengesRepository.update.mockResolvedValue({ affected: 1 });
+      mockChallengesRepository.findOne.mockResolvedValue({
+        id: 'ch-admission-rejected', accountId: 'account-1', challengeType: 'totp',
+        expiresAt: Date.now() + 60_000, usedAt: null,
+      });
+      mockAccountsService.findById.mockResolvedValue({ id: 'account-1', username: 'admin' });
+      mockQueryRunner.query.mockImplementation(async (sql: string, parameters: unknown[] = []) => {
+        if (sql === 'BEGIN IMMEDIATE' || sql === 'COMMIT') return [];
+        if (sql.startsWith('SELECT value FROM system_meta')) {
+          if (parameters[0] === `login_ip_${ip}`) {
+            return [{ value: JSON.stringify({ failed_count: 10, delay_until: Date.now() + 60_000 }) }];
+          }
+        }
+        return [];
+      });
+
+      await expect(verifier('ch-admission-rejected', '000001', ip)).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'IP_THROTTLED' }),
+      });
+
+      expect(mockTotpService.matchLoginCodeInTransaction).not.toHaveBeenCalled();
     });
   });
 
