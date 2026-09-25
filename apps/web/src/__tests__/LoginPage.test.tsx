@@ -34,6 +34,10 @@ async function submitPassword() {
   fireEvent.click(screen.getByRole('button', { name: '登录' }));
 }
 
+async function openRecoveryMode() {
+  fireEvent.click(await screen.findByRole('button', { name: '无法使用验证器？使用恢复码登录' }));
+}
+
 describe('LoginPage TOTP flow', () => {
   let login: ReturnType<typeof vi.fn>;
 
@@ -145,5 +149,112 @@ describe('LoginPage TOTP flow', () => {
       resolveLogin({ data: { requires_second_factor: true, login_challenge: challengeOne, available_methods: ['totp'] } });
     });
     expect(await screen.findByLabelText('验证器验证码')).toBeInTheDocument();
+  });
+
+  it('uses the recovery DTO and completes login with the server-returned identity', async () => {
+    mockedApi.post.mockResolvedValue({
+      data: { access_token: 'recovery-access-placeholder', expires_in: 86400, username: 'alice' },
+    } as never);
+    renderLogin();
+    await openRecoveryMode();
+    expect(screen.getByLabelText('用户名')).toHaveValue('');
+    fireEvent.change(screen.getByLabelText('用户名'), { target: { value: 'alice' } });
+    fireEvent.change(screen.getByLabelText('恢复码'), { target: { value: 'ABCD-EFGH-JK' } });
+    fireEvent.click(screen.getByRole('button', { name: '使用恢复码登录' }));
+
+    expect(await screen.findByText('首页已加载')).toBeInTheDocument();
+    expect(mockedApi.post).toHaveBeenCalledWith('/auth/recovery/verify', {
+      username: 'alice', code: 'ABCD-EFGH-JK',
+    });
+    expect(login).toHaveBeenCalledWith('recovery-access-placeholder', 'alice');
+  });
+
+  it('uses the same generic error for every recovery verification failure', async () => {
+    mockedApi.post.mockRejectedValue(new Error('account and recovery code details must stay hidden'));
+    renderLogin();
+    await openRecoveryMode();
+    fireEvent.change(screen.getByLabelText('用户名'), { target: { value: 'alice' } });
+    fireEvent.change(screen.getByLabelText('恢复码'), { target: { value: 'ABCD-EFGH-JK' } });
+    fireEvent.click(screen.getByRole('button', { name: '使用恢复码登录' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('恢复登录失败，请核对用户名和恢复码，或稍后重试。');
+    expect(screen.queryByText('account and recovery code details must stay hidden')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('恢复码')).toHaveValue('');
+    expect(login).not.toHaveBeenCalled();
+  });
+
+  it('clears passwords, codes, challenges, and errors when switching login modes', async () => {
+    mockedApi.post
+      .mockRejectedValueOnce(new Error('password failure placeholder'))
+      .mockResolvedValueOnce({ data: { requires_second_factor: true, login_challenge: challengeOne, available_methods: ['totp'] } } as never);
+    renderLogin();
+    fireEvent.change(screen.getByLabelText('用户名'), { target: { value: 'alice' } });
+    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'first-password-placeholder' } });
+    fireEvent.click(screen.getByRole('button', { name: '登录' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('password failure placeholder');
+    await openRecoveryMode();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('密码')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('恢复码'), { target: { value: 'ABCD-EFGH-JK' } });
+    fireEvent.click(screen.getByRole('button', { name: '返回账号登录' }));
+    expect(screen.getByLabelText('密码')).toHaveValue('');
+    expect(screen.queryByLabelText('恢复码')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'second-password-placeholder' } });
+    fireEvent.click(screen.getByRole('button', { name: '登录' }));
+    await screen.findByLabelText('验证器验证码');
+    fireEvent.change(screen.getByLabelText('验证器验证码'), { target: { value: '123456' } });
+    await openRecoveryMode();
+    expect(screen.queryByLabelText('验证器验证码')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('恢复码')).toHaveValue('');
+    expect(screen.getByLabelText('用户名')).toHaveValue('alice');
+    expect(mockedApi.post).toHaveBeenCalledTimes(2);
+  });
+
+  it('prevents duplicate recovery requests and ignores a response after returning to password login', async () => {
+    let resolveRecovery!: (response: unknown) => void;
+    mockedApi.post.mockImplementationOnce(() => new Promise((resolve) => { resolveRecovery = resolve; }) as never);
+    renderLogin();
+    await openRecoveryMode();
+    fireEvent.change(screen.getByLabelText('用户名'), { target: { value: 'alice' } });
+    fireEvent.change(screen.getByLabelText('恢复码'), { target: { value: 'ABCD-EFGH-JK' } });
+    const form = screen.getByRole('button', { name: '使用恢复码登录' }).closest('form')!;
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+    expect(mockedApi.post).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: '返回账号登录' }));
+    await act(async () => resolveRecovery({ data: {
+      access_token: 'stale-recovery-access-placeholder', expires_in: 86400, username: 'alice',
+    } }));
+    expect(screen.getByLabelText('密码')).toBeInTheDocument();
+    expect(screen.queryByText('首页已加载')).not.toBeInTheDocument();
+    expect(login).not.toHaveBeenCalled();
+  });
+
+  it('does not establish a session if a recovery response arrives after unmount', async () => {
+    let resolveRecovery!: (response: unknown) => void;
+    mockedApi.post.mockImplementationOnce(() => new Promise((resolve) => { resolveRecovery = resolve; }) as never);
+    const view = renderLogin();
+    await openRecoveryMode();
+    fireEvent.change(screen.getByLabelText('用户名'), { target: { value: 'alice' } });
+    fireEvent.change(screen.getByLabelText('恢复码'), { target: { value: 'ABCD-EFGH-JK' } });
+    fireEvent.click(screen.getByRole('button', { name: '使用恢复码登录' }));
+    view.unmount();
+
+    await act(async () => resolveRecovery({ data: {
+      access_token: 'unmounted-recovery-access-placeholder', expires_in: 86400, username: 'alice',
+    } }));
+    expect(login).not.toHaveBeenCalled();
+  });
+
+  it('keeps recovery form labels and code content inside the narrow login card', async () => {
+    renderLogin();
+    await openRecoveryMode();
+    const form = screen.getByRole('form', { name: '恢复码登录' });
+    expect(form).toHaveClass('min-w-0');
+    expect(screen.getByLabelText('恢复码')).toHaveClass('min-w-0', 'w-full');
+    expect(screen.getByRole('button', { name: '使用恢复码登录' })).toHaveClass('w-full');
+    expect(screen.getByLabelText('恢复码')).toHaveAttribute('autocomplete', 'one-time-code');
   });
 });

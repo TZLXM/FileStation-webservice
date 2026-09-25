@@ -56,6 +56,35 @@ describe('SettingsPage Phase 2 sections', () => {
     expect(screen.getByDisplayValue('Draft site name')).toBeInTheDocument();
   });
 
+  it('mounts recovery generation after TOTP and requires a current code when TOTP is active', async () => {
+    mockedApi.get.mockImplementation(async (path: string) => {
+      if (path === '/settings') return { data: {
+        ...baseSettings,
+        security: { ...baseSettings.security, totp_active: true },
+        agent: { mcp_enabled: false, mcp_max_upload_mb: 32 },
+      } } as never;
+      if (path === '/api-tokens') return { data: [] } as never;
+      return { data: [] } as never;
+    });
+    const recoveryCodes = Array.from({ length: 10 }, (_, index) => `synthetic-recovery-code-placeholder-${index + 1}`);
+    mockedApi.post.mockResolvedValue({ data: { codes: recoveryCodes } } as never);
+
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+    const recoveryHeading = await screen.findByRole('heading', { name: '恢复码' });
+    expect(recoveryHeading.compareDocumentPosition(screen.getByRole('heading', { name: 'API Token' }))
+      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '生成新的一组' }));
+    expect(screen.getByLabelText('当前 6 位 TOTP 验证码')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('当前密码'), { target: { value: 'password-placeholder' } });
+    fireEvent.change(screen.getByLabelText('当前 6 位 TOTP 验证码'), { target: { value: '123456' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认生成' }));
+
+    expect(mockedApi.post).toHaveBeenCalledWith('/auth/recovery/generate', {
+      password: 'password-placeholder', totp_code: '123456',
+    });
+    expect(await screen.findByText(recoveryCodes[0])).toBeInTheDocument();
+  });
+
   it('sends the TOTP requirement without the derived active flag and keeps a rejected choice visible', async () => {
     mockedApi.get.mockImplementation(async (path: string) => {
       if (path === '/settings') return { data: { ...baseSettings, agent: { mcp_enabled: false, mcp_max_upload_mb: 32 } } } as never;
