@@ -217,6 +217,55 @@ describe('FileUpload resume UI', () => {
     expect(localStorage.getItem('fs_upload_new-upload')).toBeNull();
   });
 
+  it('sends the exact SHA-256 checksum over LAN HTTP when SubtleCrypto is unavailable', async () => {
+    vi.stubGlobal('crypto', { subtle: undefined });
+    mockedApi.post
+      .mockResolvedValueOnce({ data: {
+        upload_id: 'lan-upload', upload_token: 'lan-resume-token', chunk_size: 4, expires_at: '2030-01-01T00:00:00.000Z',
+      } } as never)
+      .mockResolvedValueOnce({ data: { file_id: 'file-1' } } as never);
+    const onUploadComplete = vi.fn();
+    const { container } = render(<FileUpload onUploadComplete={onUploadComplete} folderId={null} />);
+
+    fireEvent.change(fileInput(container), { target: { files: [makeFile('lan.bin', 4)] } });
+
+    await waitFor(() => expect(mockedApi.put).toHaveBeenCalledWith(
+      '/uploads/lan-upload/parts/0',
+      expect.anything(),
+      {
+        'X-Upload-Token': 'lan-resume-token',
+        'X-Part-Checksum': '63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f46e715114ee184f8de9201',
+      },
+      expect.any(AbortSignal),
+    ));
+    await waitFor(() => expect(onUploadComplete).toHaveBeenCalledTimes(1));
+  });
+
+  it('shows a checksum-specific error and retains a new pending upload when hashing fails', async () => {
+    vi.stubGlobal('crypto', { subtle: { digest: vi.fn().mockRejectedValue(new Error('digest unavailable')) } });
+    mockedApi.post.mockResolvedValueOnce({ data: {
+      upload_id: 'hash-failure-upload', upload_token: 'hash-failure-token', chunk_size: 4, expires_at: '2030-01-01T00:00:00.000Z',
+    } } as never);
+    const invalidBuffer = Object.defineProperty({}, 'length', {
+      get() { throw new Error('invalid buffer source'); },
+    }) as unknown as ArrayBuffer;
+    const bytes = new Uint8Array(4).fill(0x41);
+    const file = new File([bytes], 'hash-failure.bin', { type: 'application/octet-stream' });
+    Object.defineProperty(file, 'arrayBuffer', { value: async () => bytes.slice().buffer });
+    Object.defineProperty(file, 'slice', {
+      value: (start = 0, end = 4) => ({ arrayBuffer: async () => invalidBuffer, size: end - start }),
+    });
+    const { container } = render(<FileUpload onUploadComplete={vi.fn()} folderId={null} />);
+
+    fireEvent.change(fileInput(container), { target: { files: [file] } });
+
+    await waitFor(() => expect(mockedApi.post).toHaveBeenCalledWith('/uploads', expect.anything(), undefined, expect.any(AbortSignal)));
+    expect(await screen.findByRole('alert')).toHaveTextContent('无法计算分块 SHA-256 校验值');
+    expect(localStorage.getItem('fs_upload_hash-failure-upload')).not.toBeNull();
+    expect(mockedApi.put).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('hash-failure-token');
+  });
+
   it('keeps new-upload initialization single-flight across repeated file selections', async () => {
     const initRequest = deferred<never>();
     const onUploadComplete = vi.fn();
@@ -578,6 +627,7 @@ describe('FileUpload resume UI', () => {
     expect(resumeInput).toHaveAttribute('hidden');
     expect(resumeInput).toHaveAttribute('aria-hidden', 'true');
     expect(resumeInput).toHaveAttribute('tabindex', '-1');
+    expect(screen.getByText('点击“继续”后，请重新选择最初上传的同一个文件（文件名和大小需匹配）。')).toBeVisible();
     fireEvent.click(continueButton);
     expect(openPicker).toHaveBeenCalledTimes(1);
   });

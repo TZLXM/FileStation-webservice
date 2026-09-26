@@ -10,9 +10,9 @@ FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 
 |------|------|
 | 设计文档 | v2.3 as-built 更新；Phase 1 实施计划迭代至 v1.7（经两轮外部评审） |
 | 项目管理 | AGENTS.md 已建立 |
-| 代码实现 | Phase 1 MVP 完成；Phase 2 TOTP 两步登录与设置页管理、恢复码前后端、API Token、审计日志、MCP 服务及对应 Web 页面已实现；Task 10 第三轮复审修复、Task 11 最终复审、Task 12 断点续传 UI 与 Task 13 并发/压力测试修复均已获独立审阅批准 |
-| 自动化 | security-gate round 后：server unit 25 suites / 172 passed / 20 todo；full server E2E 10 suites / 85 passed；Web `npx vitest run --no-cache` 15 files / 131 passed；root typecheck/build/diff-check 通过；临时副本 `npm ci --ignore-scripts` 与 `npm ls --all` 通过。Lint 不可用；根 `npm test` 因 shared 缺少 `test` script 会非零退出 |
-| 用户手动验收 | **Pending**：真实 MCP 客户端、375px 小屏、TOTP/恢复码真实流程、页面刷新后的文件断点续传；Phase 1 的既有浏览器验证不代表 Phase 2 验收 |
+| 代码实现 | Phase 1 MVP 完成；Phase 2 TOTP 两步登录与设置页管理、恢复码前后端、API Token、审计日志、MCP 服务及对应 Web 页面已实现；Task 10 第三轮复审修复、Task 11 最终复审、Task 12 断点续传 UI 与 Task 13 并发/压力测试修复均已获独立审阅批准；Task 15 修复 LAN HTTP 下 Web 分块 SHA-256 |
+| 自动化 | security-gate round 后：server unit 25 suites / 172 passed / 20 todo；full server E2E 10 suites / 85 passed；Task 15 focused Web 2 files / 32 passed、Web full `npx vitest run --no-cache` 16 files / 137 passed；Task 15 root typecheck/build/diff-check 通过；临时副本 `npm ci --ignore-scripts` 与 `npm ls --all` 通过。Lint 不可用；根 `npm test` 因 shared 缺少 `test` script 会非零退出 |
+| 用户手动验收 | **Partial**：真实 MCP 客户端已通过 `server_info`、上传、列表、分享、浏览器下载/读回、审计查询及 Token 吊销；直接 MCP `download_file` 工具当前不存在。375px 小屏、TOTP/恢复码真实流程及页面刷新后的断点续传仍 Pending |
 | 发布安全门 | **Critical/High gate cleared；最终独立复审 APPROVED（`7a5ba50`）**：按最近一次成功快照，full/prod audit 均为 0 Critical、0 High；仍有 Moderate/Low，`npm audit` 因此仍 exit 1。整体发布仍因真实客户端/小屏/认证/续传手动验收 pending；续作时 registry audit 刷新被 EACCES/权限审查阻止，残余 advisories 与升级建议见下文和 security-gate report |
 | 部署 | 单进程模式（默认）与 Nginx 反代模式均可用；已推送至 GitHub |
 
@@ -67,6 +67,7 @@ FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 
 - [x] 恢复码后端（Argon2id、24 小时、一次性消费、账户/IP 防线、带租约的持久化逐请求 IP reservation、单事务消费+旧 session 撤销+新 session 插入；Swagger/OpenAPI 文档；第三轮修复由 GPT-5.6 Sol 最终批准，无 Critical/P1/P2）
 - [x] 恢复码前端（设置页以密码和启用时的 TOTP 生成、一次性展示、复制/下载；登录页用户名+恢复码应急登录）
 - [x] 断点续传 UI（本地续传记录校验、服务端状态探测与重试、重新选择原文件续传、确认放弃；存储不可用时不阻断当前上传）
+- [x] LAN HTTP Web 上传 SHA-256 兼容（优先 WebCrypto，SubtleCrypto 缺失或拒绝时回退至 `@noble/hashes@1.8.0`；保持 `X-Part-Checksum` SHA-256 契约，并提供专用计算失败提示）
 - [x] 审计日志（管理员查询、90 天保留、关键操作埋点）
 - [x] 内嵌 MCP 服务（默认关闭、Streamable HTTP、11 个工具、API Token scope 校验与按 handler callsite 的审计埋点；不是每次尝试的完整账本）
 - [x] Web API Token 管理、MCP 设置与审计日志分页/操作过滤页面
@@ -78,11 +79,12 @@ FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 
 - **TOTP 策略：** 单管理员只要已有 active TOTP，密码登录就总是要求 TOTP challenge；`totp_required` 开启前必须已启用 TOTP，开启后禁止移除 authenticator，需先关闭策略。此设置不决定当前登录是否弹出二次验证。
 - **API Token 双路径：** REST exchange 签发 1 小时 `api_token` JWT；JWT Guard 每次请求回查 Token 行、scope、撤销与到期，所以吊销后下一个请求失败。MCP 每次请求直接验证原始 API Token，不先 exchange。两者都不能追溯取消已鉴权的在途请求。
 - **MCP 审计边界：** `mcp.tool_called` 只在代码中的各 handler audit callsite 落记录，并非 attempt 计数。协议/schema/auth/scope 前置拒绝、16 MiB MCP body 超限、MCP 超文件上限、Base64 格式/解码字节上限都可能在对应审计前拒绝。`server_info`/列表类工具先审计再读取服务，mutation 多数在服务成功后审计；该 action 不能统一表示成功或失败。
+- **LAN HTTP 上传：** 非安全 LAN HTTP origin 可能没有可用的 `crypto.subtle.digest`。`FileUpload` 现在通过共享 `uploadChunks` helper 在 native digest 不可用或拒绝时使用 `@noble/hashes` 计算相同的 SHA-256 hex；服务器端分块 checksum 校验和请求 header 未改变。继续续传会提示用户再次选择最初的同一文件，现有文件名与大小检查、隐藏 picker 可访问性、单飞和中止语义保持不变。
 
 #### 发布验收状态
 
-- **实现 + 自动化验证：** Phase 2 功能已实现；Task 13 独立复审 APPROVED。Task14 文档变更后的 server unit 25 suites / 172 passed / 20 todo、完整 server E2E 9 suites / 83 passed、Web 15 files / 131 passed、typecheck/build/diff-check 均通过。
-- **用户验收：** 尚未完成。真实 MCP 客户端联调、375px 真实浏览器/设备、TOTP 启用/登录/禁用与恢复码流程、刷新页面后的续传须由用户在可用浏览器环境确认。当前 Codex 内置浏览器访问 localhost 为 `ERR_BLOCKED_BY_CLIENT`，未重试，像素 QA 仍待办。
+- **实现 + 自动化验证：** Phase 2 功能已实现；Task 13 独立复审 APPROVED。Task 15 focused FileUpload/SHA-256 测试 2 files / 32 passed，完整 Web Vitest 16 files / 137 passed，root typecheck/build 与 `git diff --check` 均退出 0。Lint 未改且仓库仍缺 ESLint，可用性沿用已知限制。
+- **用户验收：** 用户实际 MCP 客户端已通过 `server_info`、上传、列表、分享、浏览器下载/读回、审计查询及 Token 吊销；直接 MCP `download_file` 工具仍不存在。375px 真实浏览器/设备、TOTP 启用/登录/禁用与恢复码流程、刷新页面后的续传仍需用户验收。当前 Codex 内置浏览器访问 localhost 为 `ERR_BLOCKED_BY_CLIENT`，未重试，像素 QA 仍待办。
 - **依赖安全门：** 最近一次成功的 registry audit 快照中 Critical/High 已清零；Moderate/Low 仍在且 audit 命令 exit 1。整体 Phase 2 发布仍因真实客户端/小屏/认证/续传手动验收 pending，不得称为发布完成。
 
 ### Phase 3: 多入口传输
@@ -174,7 +176,7 @@ High-severity 发布门已清零，但剩余 Moderate/Low 仍是已知安全风�
 ### Phase 2 后续
 
 - 发布 security gate：Critical/High gate 已清零；后续需计划剩余 Moderate/Low advisories 的 major 迁移或风险接受。Phase 2 整体发布仍待下列用户手动验收。
-- 用户手动验收：真实 MCP 客户端、375px 小屏/设备；TOTP 与恢复码流程；刷新页面后的上传续传。
+- 用户手动验收：375px 小屏/设备；TOTP 与恢复码流程；刷新页面后的上传续传。真实 MCP 客户端上述用例已通过；直接 MCP `download_file` 工具尚未实现。
 
 ### 待设计（Phase 3+）
 
@@ -225,6 +227,7 @@ High-severity 发布门已清零，但剩余 Moderate/Low 仍是已知安全风�
 - **2026-09-26**: Task14 首轮独立文档审阅 REJECTED（5×P2）；对照 Controller/Service/migration/Nginx 配置修正 MCP 审计 callsite 语义、API Token hash 查询与 REST/MCP 双认证轨、TOTP 策略/登录响应、普通上传 scope 说明、反代 IP 与 Host 边界；移除不存在的 `FILESTATION_INIT_TOKEN` 环境变量并说明当前无 CHANGELOG 时记录于本文件。仅改文档，`npm run typecheck` 与 `git diff --check` 通过；依赖安全门仍 blocked/pending，等待复审。
 - **2026-09-26**: Task14 第二轮独立复审修正 ADR-0005 中 MCP 拒绝请求体的有界排空说明并获 APPROVED；随后 Phase2 security-gate 独立修复轮以 `df26fc5` 为基线升级 sqlite3/bcrypt/Vite/Vitest，修复 production tar Critical、Vitest Critical 与可兼容 High。最近一次成功的 registry audit 快照从全量 46（2C/19H/19M/6L）、生产 28（1C/13H/11M/3L）降至全量 25（0C/0H/23M/2L）、生产 17（0C/0H/16M/1L）；Moderate/Low 仍使 audit exit 1。续作期间再次 audit 因 registry 网络 EACCES 且权限提升请求被拒，未产生新快照；`npm ls --all`、临时副本 `npm ci --ignore-scripts`、server unit 25/172、E2E 10/85、Web 15/131、focused 并发/恢复/文件夹 3 轮各 18、root typecheck/build 和 diff-check 均通过。Lint 不可用；真实 MCP/375px/TOTP/恢复码/刷新续传手动验收仍 pending。
 - **2026-09-26**: Phase2 security fix commit `7a5ba50` 获最终独立 security review **APPROVED**（无 Critical/P1/P2）。Reviewer 实际重跑 server unit 25/172、full E2E 10/85、Web no-cache 15/131、root typecheck/build、ServeStatic focused E2E 2/2 与 diff-check；并核对 clean npm dependency tree、native SQLite binding、bcrypt6 hash 与 dependency placement。非阻断残余：registry audit refresh 因 EACCES 继续使用最后成功快照；隔离 `npm ci --ignore-scripts` 跳过 install scripts，不作为 clean-room 原生安装证据；scoped overrides 升级需重审；Moderate/Low 与用户手动验收仍 pending，不代表 Phase2 发布批准。
+- **2026-09-26**: Task 15 修复 LAN HTTP Web 上传在首次分块前失败的问题：`FileUpload` 通过共享 `uploadChunks` helper 优先使用 SubtleCrypto，缺失或拒绝时回退到显式依赖 `@noble/hashes@1.8.0`，仍发送准确的 SHA-256 `X-Part-Checksum`；总计算失败显示专用错误并保留待续传状态，继续操作提示重新选择原文件。TDD RED 观察到首个 PUT 为 0、通用上传中断文案及续传说明缺失；focused GREEN 2 files / 32 passed，完整 Web 16 files / 137 passed，root typecheck/build/diff-check 通过。用户实际 MCP 客户端验收记录为通过：`server_info`、上传、列表、分享、浏览器下载/读回、审计查询及 Token 吊销；直接 MCP `download_file` 不存在。375px、TOTP/恢复码和刷新续传手动验收仍 pending；Lint 未运行，仓库已知缺少 ESLint。
 
 ---
 

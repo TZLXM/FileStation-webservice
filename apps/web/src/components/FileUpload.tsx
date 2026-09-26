@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { ApiError, api, type UploadApiStatus } from '../lib/api';
 import { listPending, removePending, savePending, type PendingUpload } from '../lib/pending-uploads';
+import { Sha256ComputationError, sha256Hex } from '../lib/sha256';
 import type { UploadInitResponse, UploadStatus } from '@filestation/shared';
 
 type ProbeState = 'checking' | 'ready' | 'error';
@@ -24,6 +25,7 @@ class InvalidResumeResponseError extends Error {
 
 const ACTIVE_STATUSES = new Set<UploadApiStatus>(['initiated', 'uploading']);
 const TERMINAL_STATUSES = new Set<UploadApiStatus>(['completed', 'aborted', 'expired', 'failed']);
+const CHECKSUM_FAILURE_MESSAGE = '无法计算分块 SHA-256 校验值，请稍后重试。';
 
 function normalizeParts(value: unknown, totalParts: number): number[] | null {
   if (!Array.isArray(value)) return null;
@@ -237,9 +239,8 @@ export default function FileUpload({ onUploadComplete, folderId }: {
       const chunk = file.slice(start, end);
       const buffer = await chunk.arrayBuffer();
       throwIfAborted(signal);
-      const digest = await crypto.subtle.digest('SHA-256', buffer);
+      const checksum = await sha256Hex(buffer);
       throwIfAborted(signal);
-      const checksum = Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('');
 
       await api.put(`/uploads/${safeUploadPath(entry.upload_id)}/parts/${partNumber}`, chunk, {
         'X-Upload-Token': entry.upload_token,
@@ -313,7 +314,9 @@ export default function FileUpload({ onUploadComplete, folderId }: {
       const saved = pending !== null && pendingSavedRef.current.get(pending.upload_id) === true;
       setFeedback({
         role: 'alert',
-        text: pending
+        text: error instanceof Sha256ComputationError
+          ? CHECKSUM_FAILURE_MESSAGE
+          : pending
           ? saved ? '上传中断，续传状态已保留，可稍后继续。' : '上传中断且无法保存续传状态；请保持当前页面并稍后重试。'
           : '无法启动上传，请重试。',
       });
@@ -385,6 +388,8 @@ export default function FileUpload({ onUploadComplete, folderId }: {
           role: 'alert',
           text: error instanceof InvalidResumeResponseError
             ? error.message
+            : error instanceof Sha256ComputationError
+            ? CHECKSUM_FAILURE_MESSAGE
             : saved
             ? '无法继续上传，续传状态已保留，可重试。'
             : '无法继续上传，也无法保存续传状态；请保持当前页面并稍后重试。',
@@ -435,6 +440,7 @@ export default function FileUpload({ onUploadComplete, folderId }: {
       {resumables.length > 0 && (
         <section role="region" aria-label="待续传上传" className="rounded-lg border border-amber-200 bg-amber-50 p-3 sm:p-4">
           <h2 className="mb-3 text-sm font-medium text-amber-950">可继续的上传</h2>
+          <p className="mb-3 text-xs text-amber-900">点击“继续”后，请重新选择最初上传的同一个文件（文件名和大小需匹配）。</p>
           <ul className="space-y-3">
             {resumables.map((entry) => {
               const percentage = percentComplete(entry.total_parts, entry.received_parts.length);

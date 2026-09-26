@@ -79,14 +79,16 @@ Authorization: Bearer <API_TOKEN>
 
 `<API_TOKEN>` 是占位符，不是可用凭据。请使用 HTTPS，不要把 Token 放入 URL、源码、日志、截图或仓库。客户端配置文件格式因 MCP 客户端而异，本项目不声称提供某个桌面客户端专属 JSON 模板；请按所用客户端当前文档配置 endpoint 与安全凭据存储。MCP 默认关闭、每个工具按 API Token scope 授权；单文件默认上限 32 MiB（设置可调 1–512 MiB），单分块解码后最多 8 MiB，MCP JSON body 最多 16 MiB。
 
-### 手动验收（待完成，不代表发布已通过）
+### 手动验收（部分完成，发布仍待验收）
 
-- [ ] 用用户实际 MCP 客户端联调 list、上传、分享及撤销，并确认 Token 最小 scope/吊销行为
+- [x] 用户实际 MCP 客户端验收通过：`server_info`、上传、列表、分享、浏览器下载/读回、审计查询及 Token 吊销；直接 MCP `download_file` 工具当前不存在
 - [ ] 在真实浏览器或设备检查 375px 布局
 - [ ] 实际完成 TOTP 启用、登录、禁用及恢复码生成/单次恢复流程
 - [ ] 刷新页面后重新选择原文件并验证断点续传
 
-当前内置浏览器访问本地服务被 `ERR_BLOCKED_BY_CLIENT` 阻断，因此真实客户端/小屏像素验收仍待用户环境完成。2026-09-26 security round 已清零 npm audit Critical/High，但仍有 Moderate/Low advisories（`npm audit` 仍 exit 1）；详情与建议见 [当前状态](docs/CURRENT-STATE.md)。真实验收仍未完成，不要将自动化通过等同于发布批准。
+Web 上传现已在 LAN HTTP 缺少 SubtleCrypto 时使用 SHA-256 回退，并保留 `X-Part-Checksum` 校验；自动化回归验证了首个分块请求和准确校验值。继续续传时，点击“继续”后需要重新选择最初上传的同一个文件。
+
+当前内置浏览器访问本地服务被 `ERR_BLOCKED_BY_CLIENT` 阻断，因此 375px、TOTP/恢复码及刷新后续传的真实设备验收仍待用户环境完成。2026-09-26 security round 的最近成功快照已清零 npm audit Critical/High，但仍有 Moderate/Low advisories（`npm audit` 仍 exit 1）；详情与建议见 [当前状态](docs/CURRENT-STATE.md)。其余手动验收仍 pending，不要将自动化通过等同于发布批准。
 
 ## 文档
 
