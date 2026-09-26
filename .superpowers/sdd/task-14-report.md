@@ -63,9 +63,15 @@ Registry metadata read-only checks：`sqlite3@6.0.1` Node `>=20.17.0`, peer `nod
 
 修订验证：`npm run typecheck` exit 0；`git diff --check` exit 0（只有 LF→CRLF 提示）。复审修正提交后应安排新的独立审阅；发布安全门仍 blocked/pending。
 
+## Task14 review round 2 — 1×P2
+
+复审指出 ADR 中“Token 校验前不读取请求体”不准确。核对 `apps/server/src/mcp/mcp.controller.ts`：关闭功能、缺少/无效 Token/无效 Token scopes 以及 GET/DELETE 等拒绝路径会调用 `discardRequestBody`；它先监听结束/关闭/abort/error，设置 `REQUEST_DRAIN_GRACE_MS = 500` 计时器，然后调用 `req.resume()` 排空原始请求流。自然结束时正常完成；abort/error/未完成 close 会标记非 keep-alive；到 500 ms deadline 则 `finish(true)`、设 `res.shouldKeepAlive = false` 并释放等待，不等完整请求体。上述路径不调用 MCP JSON parser，也不把 body 在应用层 JSON 缓冲/反序列化；通过 Token/scopes 解析后才调用 16 MiB JSON parser。
+
+仅修正 ADR 与本 SDD review 记录；没有业务代码改动。修正后 `npm run typecheck` 与 `git diff --check` 均 exit 0；Phase 2 发布安全门继续 blocked/pending，等待下一轮独立复审。
+
 ## 最终状态
 
 - 首轮独立 Task14 文档审阅结果为 **REJECTED，5×P2**。已逐项对照 Controller/Service、migration/entity、Nginx 配置和现有测试修正相关文档，没有改业务代码；修改范围为 AGENTS、CURRENT-STATE、ADR-0005 与设计文档。
 - 复审修正后验证：`npm run typecheck` exit 0；`git diff --check` exit 0（仅 LF→CRLF 提示）。其余代码测试此前在 Task14 初次提交前已完整运行，当前修正仅涉及 Markdown。
-- 当前修正提交后等待父 Agent 安排第二轮独立 review；不得将首轮 REJECTED 记为最终批准。
+- 后续复审再指出 ADR 拒绝请求体 drain 用词的 1×P2，已在下一次 docs-only 修正中改为准确区分限时原始流 drain 与 JSON 缓冲；待父 Agent 安排下一轮独立 review，不得将此前任一轮视为最终批准。
 - **Phase 2 发布批准仍 blocked/pending**：production dependency closure 存在 Critical `tar` + 13 High findings，尚未修复或由授权人正式接受；真实客户端/设备手动验收也未完成。自动化通过只表示实现验证完成，不代表发布验收完成。

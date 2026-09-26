@@ -37,7 +37,7 @@ Phase 2 需要为自动化 Agent 暴露受控的文件、文件夹、上传和�
 
 - Agent 沿用已有凭据签发/吊销与每次请求数据库撤销/到期校验；权限撤销会阻止后续 MCP/API Token JWT 请求，但不会取消在途请求。
 - 无 MCP session 状态，上传续传继续由 FileStation 的 upload session/token 契约管理。
-- MCP 与普通 API 的 body 限制隔离，且在 Token 校验前不读取/反序列化大请求体。
+- MCP 与普通 API 的 body 限制隔离。禁用、缺少/无效 Token 或无效 Token scopes 等拒绝路径不会把请求体送入 JSON parser 或在应用层缓冲、反序列化；Controller 会通过 `req.resume()` 限时排空原始流，最多等待 500 ms。若超时则设 `res.shouldKeepAlive = false` 并继续拒绝，不等待完整请求体到达。只有 Token 和 scopes 通过后才调用独立的 16 MiB JSON parser。
 
 **负面与边界：**
 
