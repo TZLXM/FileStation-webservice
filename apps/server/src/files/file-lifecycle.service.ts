@@ -9,10 +9,26 @@ import { SettingsService } from '../settings/settings.service';
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import { beginImmediate, safeRollback } from '../common/database/tx.helper';
+import { SqliteImmediateTransactionService } from '../common/database/sqlite-immediate-transaction.service';
 
 const RECEIVING_TIMEOUT_MS = 10 * 60 * 1000; // receiving 分块超 10 分钟（大于最长 64MB 写入预期）
 const BATCH_SIZE = 100;
+const VERIFY_LEASE_MS = 10 * 60 * 1000;
+const LEGACY_VERIFY_LEASE_MS = 5 * 60 * 1000;
+
+interface StuckVerifyingUpload {
+  id: string;
+  filename: string;
+  expectedSize: number;
+  expectedHash: string | null;
+  chunkSize: number;
+  finalStoredName: string | null;
+  targetFolderId: string | null;
+  principalType: 'admin' | 'temp_code';
+  principalId: string;
+  verifyStartedAt: number | null;
+  verifyLeaseUntil: number | null;
+}
 
 @Injectable()
 export class FileLifecycleService implements OnApplicationBootstrap {
@@ -29,6 +45,7 @@ export class FileLifecycleService implements OnApplicationBootstrap {
     private storageService: StorageService,
     private settingsService: SettingsService,
     private dataSource: DataSource,
+    private sqliteTransactions: SqliteImmediateTransactionService,
   ) {}
 
   /**
@@ -151,8 +168,13 @@ export class FileLifecycleService implements OnApplicationBootstrap {
     try {
       const now = Date.now();
       // 只接管租约已过期的会话（v1.7：verify_lease_until < now；兼容无租约旧数据用 verify_started_at + 5min）
-      const stuck = await this.dataSource.query(
-        `SELECT * FROM upload_sessions
+      const stuck: StuckVerifyingUpload[] = await this.dataSource.query(
+        `SELECT id, filename, expected_size AS expectedSize, expected_hash AS expectedHash,
+                chunk_size AS chunkSize, final_stored_name AS finalStoredName,
+                target_folder_id AS targetFolderId, principal_type AS principalType,
+                principal_id AS principalId, verify_started_at AS verifyStartedAt,
+                verify_lease_until AS verifyLeaseUntil
+         FROM upload_sessions
          WHERE status = 'verifying'
            AND (
              (verify_lease_until IS NOT NULL AND verify_lease_until < ?)
@@ -161,9 +183,8 @@ export class FileLifecycleService implements OnApplicationBootstrap {
         [now, now - 5 * 60 * 1000],
       );
       for (const row of stuck) {
-        const session = row as UploadSession;
-        await this.recoverOneVerifying(session).catch((err) => {
-          this.logger.error(`Failed to recover verifying upload ${session.id}`, err instanceof Error ? err.stack : err);
+        await this.recoverOneVerifying(row).catch((err) => {
+          this.logger.error(`Failed to recover verifying upload ${row.id}`, err instanceof Error ? err.stack : err);
         });
       }
     } finally {
@@ -171,29 +192,35 @@ export class FileLifecycleService implements OnApplicationBootstrap {
     }
   }
 
-  private async recoverOneVerifying(session: UploadSession): Promise<void> {
-    const storedName = session.finalStoredName;
-    if (!storedName) {
-      // 无 final_stored_name（阶段一未持久化，异常）：防御性回退 uploading
-      await this.uploadSessionsRepository.update(
-        { id: session.id, status: UploadStatus.VERIFYING },
-        { status: UploadStatus.UPLOADING, verifyStartedAt: null, verifyOwnerToken: null, verifyLeaseUntil: null, verifyHeartbeatAt: null },
-      );
-      return;
-    }
-
+  private async recoverOneVerifying(session: StuckVerifyingUpload): Promise<void> {
     // ---- 1. BEGIN IMMEDIATE 抢占租约（接管 ownership）----
     const recoveryOwner = uuidv4();
     const now = Date.now();
-    const claimResult: any = await this.dataSource.query(
+    const claimResult = await this.sqliteTransactions.run((connection) => connection.run(
       `UPDATE upload_sessions
          SET verify_owner_token = ?, verify_lease_until = ?, verify_heartbeat_at = ?
        WHERE id = ? AND status = 'verifying'
-         AND (verify_lease_until IS NULL OR verify_lease_until < ?)`,
-      [recoveryOwner, now + 10 * 60 * 1000, now, session.id, now],
-    );
-    if ((claimResult?.changes ?? claimResult?.affected ?? 0) === 0) {
+         AND ((verify_lease_until IS NOT NULL AND verify_lease_until < ?)
+           OR (verify_lease_until IS NULL AND verify_started_at < ?))`,
+      [recoveryOwner, now + VERIFY_LEASE_MS, now, session.id, now, now - LEGACY_VERIFY_LEASE_MS],
+    ));
+    if (claimResult.changes !== 1) {
       return; // 已被并发接管或 owner 刚刷新租约
+    }
+
+    const storedName = session.finalStoredName;
+    if (!storedName) {
+      // 无 final_stored_name（阶段一未持久化，异常）：防御性回退 uploading。
+      await this.sqliteTransactions.run(async (connection) => {
+        await connection.run(
+          `UPDATE upload_sessions
+             SET status = 'uploading', verify_started_at = NULL,
+                 verify_owner_token = NULL, verify_lease_until = NULL, verify_heartbeat_at = NULL
+           WHERE id = ? AND status = 'verifying' AND verify_owner_token = ?`,
+          [session.id, recoveryOwner],
+        );
+      });
+      return;
     }
 
     try {
@@ -228,22 +255,23 @@ export class FileLifecycleService implements OnApplicationBootstrap {
       }
 
       // ---- 3. 标记 failed（带 owner 守卫）----
-      await this.dataSource.query(
+      const failed = await this.sqliteTransactions.run((connection) => connection.run(
         `UPDATE upload_sessions SET status = 'failed', failure_reason = 'verify recovery: final file unavailable',
            verify_owner_token = NULL, verify_lease_until = NULL, verify_heartbeat_at = NULL
          WHERE id = ? AND status = 'verifying' AND verify_owner_token = ?`,
         [session.id, recoveryOwner],
-      );
+      ));
+      if (failed.changes !== 1) return; // 期间已被其他 owner 接管；不可删它正在发布的文件
       await this.storageService.deleteFile(storedName).catch(() => {});
       await this.storageService.deleteUploadTempDir(session.id).catch(() => {});
       this.logger.warn(`Marked stuck verifying upload ${session.id} as failed`);
     } catch (err) {
       // 恢复中出错：释放租约，下轮重试
-      await this.dataSource.query(
+      await this.sqliteTransactions.run((connection) => connection.run(
         `UPDATE upload_sessions SET verify_owner_token = NULL, verify_lease_until = NULL, verify_heartbeat_at = NULL
          WHERE id = ? AND verify_owner_token = ?`,
         [session.id, recoveryOwner],
-      ).catch(() => {});
+      )).catch(() => {});
       throw err;
     }
   }
@@ -252,20 +280,17 @@ export class FileLifecycleService implements OnApplicationBootstrap {
    * 恢复任务执行的阶段三：与 completeUpload 阶段三完全同构（v1.7 阻断 3 affected 检查）。
    * BEGIN IMMEDIATE 内 INSERT files + 条件 UPDATE（带 owner 守卫）；affected=0 时重查幂等或回滚。
    */
-  private async finishVerifyingUpload(session: UploadSession, storedName: string, actualHash: string | null, recoveryOwner: string): Promise<void> {
+  private async finishVerifyingUpload(session: StuckVerifyingUpload, storedName: string, actualHash: string | null, recoveryOwner: string): Promise<void> {
     const storageSettings = await this.settingsService.getStorageSettings();
     const fileExpiresAt = storageSettings.default_expire_hours > 0
       ? Date.now() + storageSettings.default_expire_hours * 60 * 60 * 1000
       : null;
 
     const newFileId = uuidv4();
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    try {
-      await beginImmediate(queryRunner);
+    await this.sqliteTransactions.run(async (connection) => {
       const now = Date.now();
 
-      await queryRunner.query(
+      await connection.run(
         `INSERT INTO files (id, folder_id, filename, stored_name, size, mime_type, hash_sha256,
            status, expires_at, uploaded_by_type, uploaded_by_id, download_count, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, NULL, ?, 'active', ?, ?, ?, 0, ?, ?)`,
@@ -273,33 +298,26 @@ export class FileLifecycleService implements OnApplicationBootstrap {
          actualHash ?? session.expectedHash ?? null, fileExpiresAt, session.principalType, session.principalId, now, now],
       );
 
-      const updateResult: any = await queryRunner.query(
+      const updateResult = await connection.run(
         `UPDATE upload_sessions SET status = 'completed', completed_at = ?, failure_reason = NULL, final_file_id = ?,
            verify_owner_token = NULL, verify_lease_until = NULL, verify_heartbeat_at = NULL
          WHERE id = ? AND status = 'verifying' AND verify_owner_token = ?`,
         [now, newFileId, session.id, recoveryOwner],
       );
-      const updateAffected = updateResult?.changes ?? updateResult?.affected ?? 0;
 
-      if (updateAffected === 0) {
-        const current = await queryRunner.query(`SELECT status, final_file_id FROM upload_sessions WHERE id = ?`, [session.id]);
-        if (current.length > 0 && current[0].status === 'completed' && current[0].final_file_id === newFileId) {
-          await queryRunner.query('COMMIT');
-          this.storageService.deleteUploadTempDir(session.id).catch(() => {});
-          return;
-        }
-        throw new Error('UPLOAD_FINALIZE_LOST');
+      if (updateResult.changes === 1) return;
+
+      const current = await connection.get<{ status: string; final_file_id: string | null }>(
+        `SELECT status, final_file_id FROM upload_sessions WHERE id = ?`,
+        [session.id],
+      );
+      if (current?.status === UploadStatus.COMPLETED && current.final_file_id === newFileId) {
+        return;
       }
+      throw new Error('UPLOAD_FINALIZE_LOST');
+    });
 
-      await queryRunner.query('COMMIT');
-      this.logger.log(`Recovered verifying upload ${session.id} -> completed (file ${newFileId})`);
-    } catch (error) {
-      await safeRollback(queryRunner);
-      throw error;
-    } finally {
-      await queryRunner.release();
-    }
-
+    this.logger.log(`Recovered verifying upload ${session.id} -> completed (file ${newFileId})`);
     this.storageService.deleteUploadTempDir(session.id).catch(() => {});
   }
 

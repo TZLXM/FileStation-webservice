@@ -1,10 +1,10 @@
-import { Controller, Post, Put, Get, Delete, Body, Param, Headers, UseGuards, Req, BadRequestException, HttpCode, HttpStatus } from '@nestjs/common';
+import { Controller, Post, Put, Get, Delete, Body, Param, Headers, UseGuards, Req, Res, BadRequestException, HttpCode, HttpStatus } from '@nestjs/common';
 import { UploadsService } from './uploads.service';
 import { JwtAuthGuard } from '../security/guards/jwt-auth.guard';
 import { InitUploadDto } from './dto/init-upload.dto';
 import { CompleteUploadDto } from './dto/complete-upload.dto';
 import { ApiResponse } from '@filestation/shared';
-import { Request } from 'express';
+import { Request, Response as ExpressResponse } from 'express';
 import { RequireScopes } from '../security/decorators/require-scopes.decorator';
 import { AuditAction, AuditService } from '../audit/audit.service';
 
@@ -63,19 +63,35 @@ export class UploadsController {
     @Headers('x-upload-token') uploadToken: string,
     @Body() body: CompleteUploadDto,
     @Req() req: Request,
+    @Res({ passthrough: true }) res: ExpressResponse,
   ) {
     if (!uploadToken) throw new BadRequestException('Missing X-Upload-Token header');
-    const result = await this.uploadsService.completeUpload(uploadId, uploadToken, body?.final_hash);
-    await this.auditService.record({
-      accountId: null,
-      action: AuditAction.UPLOAD_COMPLETED,
-      resourceType: 'upload',
-      resourceId: uploadId,
-      details: { filename: result.filename, size: result.size },
-      ip: req.ip,
-      userAgent: req.headers['user-agent'],
-    });
-    return { code: 'OK', message: 'Upload completed', data: { file_id: result.file_id }, request_id: crypto.randomUUID() };
+    const requestAbort = new AbortController();
+    const abortOnRequestAbort = () => requestAbort.abort();
+    const abortOnResponseClose = () => {
+      if (!res.writableEnded) requestAbort.abort();
+    };
+    req.once('aborted', abortOnRequestAbort);
+    res.once('close', abortOnResponseClose);
+    try {
+      const result = await this.uploadsService.completeUpload(uploadId, uploadToken, body?.final_hash, requestAbort.signal);
+      await this.auditService.record({
+        accountId: null,
+        action: AuditAction.UPLOAD_COMPLETED,
+        resourceType: 'upload',
+        resourceId: uploadId,
+        details: { filename: result.filename, size: result.size },
+        ip: req.ip,
+        userAgent: req.headers['user-agent'],
+      });
+      return { code: 'OK', message: 'Upload completed', data: { file_id: result.file_id }, request_id: crypto.randomUUID() };
+    } catch (error) {
+      if (requestAbort.signal.aborted && error instanceof Error && error.name === 'AbortError') return;
+      throw error;
+    } finally {
+      req.removeListener('aborted', abortOnRequestAbort);
+      res.removeListener('close', abortOnResponseClose);
+    }
   }
 
   @Post(':id/resume')

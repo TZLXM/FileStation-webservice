@@ -18,6 +18,7 @@ describe('UploadsService', () => {
     save: jest.fn(),
     findOne: jest.fn(),
     findOneByOrFail: jest.fn(),
+    findOneBy: jest.fn(),
     update: jest.fn(),
     increment: jest.fn(),
   };
@@ -123,6 +124,101 @@ describe('UploadsService', () => {
       const result = await service.completeUpload('upload-1', 'upload-token');
 
       expect(result).toEqual({ file_id: 'file-1', filename: 'report.pdf', size: 4096 });
+    });
+  });
+
+  describe('completeUpload finalization observer', () => {
+    const verifyingSession = {
+      id: 'upload-observed',
+      status: 'verifying',
+      verifyStartedAt: Date.now(),
+      verifyLeaseUntil: Date.now() + 10_000,
+    };
+
+    it('shares one poller and cancels an individual waiter and on module destroy', async () => {
+      mockUploadsRepository.findOneBy.mockResolvedValue(verifyingSession);
+      const requestAbort = new AbortController();
+      const first = (service as any).waitForFinalizedUpload('upload-observed', verifyingSession, requestAbort.signal);
+      const second = (service as any).waitForFinalizedUpload('upload-observed', verifyingSession);
+
+      expect(service['finalizationObservers'].get('upload-observed')!.waiters).toBe(2);
+      expect(mockUploadsRepository.findOneBy).toHaveBeenCalledTimes(1);
+
+      requestAbort.abort();
+      await expect(first).rejects.toMatchObject({ name: 'AbortError' });
+      expect(service['finalizationObservers'].get('upload-observed')!.waiters).toBe(1);
+
+      service.onModuleDestroy();
+      await expect(second).rejects.toMatchObject({ name: 'AbortError' });
+      expect(service['finalizationObservers'].size).toBe(0);
+    });
+
+    it('keeps a fixed 15-minute timeout even when the observed lease keeps moving', async () => {
+      jest.useFakeTimers({ now: 1_000 });
+      mockUploadsRepository.findOneBy.mockImplementation(async () => ({
+        ...verifyingSession,
+        verifyLeaseUntil: Date.now() + 60 * 60 * 1000,
+      }));
+      const pending = (service as any).waitForFinalizedUpload('upload-observed', verifyingSession);
+      const timeoutExpectation = expect(pending).rejects.toMatchObject({ response: { code: 'UPLOAD_FINALIZING' } });
+
+      try {
+        await jest.advanceTimersByTimeAsync(15 * 60 * 1000);
+        await timeoutExpectation;
+        expect(service['finalizationObservers'].size).toBe(0);
+      } finally {
+        service.onModuleDestroy();
+        jest.useRealTimers();
+      }
+    });
+  });
+
+  describe('part owner transactions', () => {
+    it('claims a part through an independent immediate transaction', async () => {
+      const connection = {
+        get: jest.fn()
+          .mockResolvedValueOnce({ status: 'uploading' })
+          .mockResolvedValueOnce(undefined),
+        run: jest.fn().mockResolvedValue({ changes: 1, lastID: 0 }),
+      };
+      mockSqliteTransactions.run.mockImplementation(async (work: (db: typeof connection) => Promise<unknown>) => work(connection));
+
+      const outcome = await (service as any).claimPart('upload-1', 0, {
+        offset: 0,
+        size: 16,
+        checksum: 'checksum',
+        ownerToken: 'owner-token',
+        tempName: 'part.tmp',
+        now: Date.now(),
+      });
+
+      expect(outcome).toEqual({ outcome: 'claimed' });
+      expect(mockSqliteTransactions.run).toHaveBeenCalledTimes(1);
+      expect(connection.run).toHaveBeenCalledTimes(2);
+      expect(mockDataSource.createQueryRunner).not.toHaveBeenCalled();
+    });
+
+    it('increments received_size only when the owner-guarded ready transition changed one row', async () => {
+      const connection = {
+        get: jest.fn(),
+        run: jest.fn()
+          .mockResolvedValueOnce({ changes: 1, lastID: 0 })
+          .mockResolvedValueOnce({ changes: 1, lastID: 0 }),
+      };
+      mockSqliteTransactions.run.mockImplementation(async (work: (db: typeof connection) => Promise<unknown>) => work(connection));
+
+      await (service as any).confirmPartReady('upload-1', 0, 'owner-token', 16);
+
+      expect(mockSqliteTransactions.run).toHaveBeenCalledTimes(1);
+      expect(connection.run).toHaveBeenCalledTimes(2);
+      expect(connection.run.mock.calls[0][0]).toContain("status = 'ready'");
+      expect(connection.run.mock.calls[1][0]).toContain('received_size = received_size + ?');
+      expect(mockDataSource.createQueryRunner).not.toHaveBeenCalled();
+
+      connection.run.mockReset().mockResolvedValue({ changes: 0, lastID: 0 });
+      await expect((service as any).confirmPartReady('upload-1', 0, 'stale-owner', 16))
+        .rejects.toMatchObject({ response: { code: 'PART_CLAIM_LOST' } });
+      expect(connection.run).toHaveBeenCalledTimes(1);
     });
   });
 

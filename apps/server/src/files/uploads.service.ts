@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, NotFoundException, ConflictException, GoneException } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, ConflictException, GoneException, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { UploadSession, UploadStatus } from './entities/upload-session.entity';
@@ -11,16 +11,23 @@ import { v4 as uuidv4 } from 'uuid';
 import { createHash } from 'crypto';
 import { InitUploadDto } from './dto/init-upload.dto';
 import { UploadInitResponse, UploadStatus as UploadStatusType } from '@filestation/shared';
-import { beginImmediate, safeRollback } from '../common/database/tx.helper';
 import { SqliteImmediateTransactionService } from '../common/database/sqlite-immediate-transaction.service';
 
-const COMPLETION_POLL_INTERVAL_MS = 25;
-const VERIFY_RECOVERY_CYCLE_MS = 60 * 1000;
-const VERIFY_RECOVERY_GRACE_MS = 2 * VERIFY_RECOVERY_CYCLE_MS;
+const COMPLETION_MAX_WAIT_MS = 15 * 60 * 1000;
+const COMPLETION_INITIAL_POLL_INTERVAL_MS = 250;
+const COMPLETION_MAX_POLL_INTERVAL_MS = 5 * 1000;
 const LEGACY_VERIFY_LEASE_MS = 5 * 60 * 1000;
 
+interface FinalizationObserver {
+  controller: AbortController;
+  promise: Promise<string>;
+  waiters: number;
+}
+
 @Injectable()
-export class UploadsService {
+export class UploadsService implements OnModuleDestroy {
+  private readonly finalizationObservers = new Map<string, FinalizationObserver>();
+
   constructor(
     @InjectRepository(UploadSession)
     private uploadsRepository: Repository<UploadSession>,
@@ -35,6 +42,11 @@ export class UploadsService {
     private dataSource: DataSource,
     private sqliteTransactions: SqliteImmediateTransactionService,
   ) {}
+
+  onModuleDestroy(): void {
+    for (const observer of this.finalizationObservers.values()) observer.controller.abort();
+    this.finalizationObservers.clear();
+  }
 
   async initializeUpload(
     dto: InitUploadDto,
@@ -159,90 +171,60 @@ export class UploadsService {
     partNumber: number,
     info: { offset: number; size: number; checksum: string; ownerToken: string; tempName: string; now: number },
   ): Promise<{ outcome: 'already_ready' | 'claimed' }> {
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    try {
-      await beginImmediate(queryRunner);
-
+    return this.sqliteTransactions.run(async (connection) => {
       // 会话状态原子守卫（防 complete 抢占后仍有分块写入）
-      const sessionRows = await queryRunner.query(`SELECT status FROM upload_sessions WHERE id = ?`, [uploadId]);
-      if (sessionRows.length === 0) throw new NotFoundException('Upload session not found');
-      if (sessionRows[0].status !== UploadStatus.INITIATED && sessionRows[0].status !== UploadStatus.UPLOADING) {
-        throw new BadRequestException({ code: 'INVALID_UPLOAD_STATE', message: `Operation not allowed in state: ${sessionRows[0].status}` });
+      const current = await connection.get<{ status: string }>(`SELECT status FROM upload_sessions WHERE id = ?`, [uploadId]);
+      if (!current) throw new NotFoundException('Upload session not found');
+      if (current.status !== UploadStatus.INITIATED && current.status !== UploadStatus.UPLOADING) {
+        throw new BadRequestException({ code: 'INVALID_UPLOAD_STATE', message: `Operation not allowed in state: ${current.status}` });
       }
 
-      const existing = await queryRunner.query(
+      const existing = await connection.get<{ status: string; checksum: string | null; owner_token: string | null }>(
         `SELECT status, checksum, owner_token FROM upload_parts WHERE upload_id = ? AND part_number = ?`,
         [uploadId, partNumber],
       );
 
-      if (existing.length > 0 && existing[0].status === 'ready') {
-        if (existing[0].checksum === info.checksum) {
-          await queryRunner.query('COMMIT');
+      if (existing?.status === 'ready') {
+        if (existing.checksum === info.checksum) {
           return { outcome: 'already_ready' };
         }
         throw new ConflictException({
           code: 'PART_CHECKSUM_MISMATCH',
           message: 'Part already uploaded with different checksum',
-          expected_checksum: existing[0].checksum,
+          expected_checksum: existing.checksum,
           received_checksum: info.checksum,
         });
       }
 
-      if (existing.length > 0 && existing[0].status === 'receiving') {
-        if (existing[0].owner_token === info.ownerToken) {
-          await queryRunner.query('COMMIT');
+      if (existing?.status === 'receiving') {
+        if (existing.owner_token === info.ownerToken) {
           return { outcome: 'claimed' }; // 同 owner 重试
         }
         throw new ConflictException({ code: 'PART_BEING_RECEIVED', message: 'Part is being received by another request; retry later' });
       }
 
-      await queryRunner.query(
+      await connection.run(
         `INSERT INTO upload_parts (upload_id, part_number, offset, size, checksum, status, owner_token, temp_name, received_at)
          VALUES (?, ?, ?, ?, ?, 'receiving', ?, ?, ?)`,
         [uploadId, partNumber, info.offset, info.size, info.checksum, info.ownerToken, info.tempName, info.now],
       );
-      await queryRunner.query(`UPDATE upload_sessions SET status = 'uploading' WHERE id = ? AND status = 'initiated'`, [uploadId]);
-
-      await queryRunner.query('COMMIT');
+      await connection.run(`UPDATE upload_sessions SET status = 'uploading' WHERE id = ? AND status = 'initiated'`, [uploadId]);
       return { outcome: 'claimed' };
-    } catch (error) {
-      await safeRollback(queryRunner);
-      throw error;
-    } finally {
-      await queryRunner.release();
-    }
+    });
   }
 
   private async confirmPartReady(uploadId: string, partNumber: number, ownerToken: string, partSize: number): Promise<void> {
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    try {
-      await beginImmediate(queryRunner);
-      const result: any = await queryRunner.query(
+    await this.sqliteTransactions.run(async (connection) => {
+      const result = await connection.run(
         `UPDATE upload_parts SET status = 'ready', owner_token = NULL, temp_name = NULL, received_at = ?
          WHERE upload_id = ? AND part_number = ? AND owner_token = ? AND status = 'receiving'`,
         [Date.now(), uploadId, partNumber, ownerToken],
       );
-      // node-sqlite3 的 queryRunner.query 对 UPDATE 不返回 changes（恒 undefined）；
-      // 用事务内 SELECT 验证状态转换是否由本请求完成（receiving → ready 且 owner 已清空）
-      const verify = await queryRunner.query(
-        `SELECT status, owner_token FROM upload_parts WHERE upload_id = ? AND part_number = ?`,
-        [uploadId, partNumber],
-      );
-      if (verify.length > 0 && verify[0].status === 'ready' && verify[0].owner_token === null) {
-        await queryRunner.query(`UPDATE upload_sessions SET received_size = received_size + ? WHERE id = ?`, [partSize, uploadId]);
-        await queryRunner.query('COMMIT');
-        return;
+      if (result.changes !== 1) {
+        throw new ConflictException({ code: 'PART_CLAIM_LOST', message: 'Part claim expired while writing; re-upload this part' });
       }
-      await queryRunner.query('ROLLBACK');
-      throw new ConflictException({ code: 'PART_CLAIM_LOST', message: 'Part claim expired while writing; re-upload this part' });
-    } catch (error) {
-      await safeRollback(queryRunner);
-      throw error;
-    } finally {
-      await queryRunner.release();
-    }
+      await connection.run(`UPDATE upload_sessions SET received_size = received_size + ? WHERE id = ?`, [partSize, uploadId]);
+    });
   }
 
   private async releasePartClaim(uploadId: string, partNumber: number, ownerToken: string): Promise<void> {
@@ -276,7 +258,12 @@ export class UploadsService {
    * 阶段三 BEGIN IMMEDIATE：INSERT files + UPDATE ... WHERE status='verifying' AND owner 匹配。
    *   v1.7 阻断 3：检查条件 UPDATE affected；0 时事务内重查（completed 同文件→幂等，否则回滚）。
    */
-  async completeUpload(uploadId: string, uploadToken: string, finalHash?: string): Promise<{ file_id: string; filename: string; size: number }> {
+  async completeUpload(
+    uploadId: string,
+    uploadToken: string,
+    finalHash?: string,
+    requestSignal?: AbortSignal,
+  ): Promise<{ file_id: string; filename: string; size: number }> {
     const session = await this.validateUploadToken(uploadId, uploadToken);
 
     if (session.status === UploadStatus.COMPLETED) {
@@ -326,7 +313,7 @@ export class UploadsService {
     if (claim.outcome === 'wait') waitForFinalizer = true;
 
     if (waitForFinalizer) {
-      return this.waitForFinalizedUpload(uploadId, session);
+      return this.waitForFinalizedUpload(uploadId, session, requestSignal);
     }
 
     // v1.7 阻断 2：用 TypeORM 重新加载实体（原生 SQL 返回 snake_case，Repository.create 不映射驼峰）
@@ -438,22 +425,66 @@ export class UploadsService {
   }
 
   /**
-   * Same-session complete calls that lose the database claim wait outside the write transaction.
-   * The owner lease and minute recovery job bound the wait; a successful owner publishes one file_id.
+   * Same-session losers share one low-frequency observer per process. Their wait has a fixed
+   * upper bound and is not extended by the owner's lease heartbeats.
    */
   private async waitForFinalizedUpload(
     uploadId: string,
     originalSession: UploadSession,
+    requestSignal?: AbortSignal,
   ): Promise<{ file_id: string; filename: string; size: number }> {
-    let observedLeaseUntil: number | null = null;
-    let deadline = Date.now();
+    if (requestSignal?.aborted) throw this.createAbortError();
 
+    let observer = this.finalizationObservers.get(uploadId);
+    if (!observer) {
+      const controller = new AbortController();
+      const deadline = Date.now() + COMPLETION_MAX_WAIT_MS;
+      const promise = this.observeFinalization(uploadId, controller.signal, deadline);
+      observer = { controller, promise, waiters: 0 };
+      // An individual request may disconnect before the shared observer reaches a terminal state.
+      void promise.catch(() => {});
+      this.finalizationObservers.set(uploadId, observer);
+    }
+
+    observer.waiters += 1;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const leave = () => {
+        observer!.waiters -= 1;
+        if (observer!.waiters === 0 && this.finalizationObservers.get(uploadId) === observer) {
+          this.finalizationObservers.delete(uploadId);
+          observer!.controller.abort();
+        }
+      };
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        requestSignal?.removeEventListener('abort', onAbort);
+        leave();
+        callback();
+      };
+      const onAbort = () => finish(() => reject(this.createAbortError()));
+
+      requestSignal?.addEventListener('abort', onAbort, { once: true });
+      observer!.promise.then(
+        (fileId) => finish(() => resolve({ file_id: fileId, filename: originalSession.filename, size: originalSession.expectedSize })),
+        (error: unknown) => finish(() => reject(error)),
+      );
+      if (requestSignal?.aborted) onAbort();
+    });
+  }
+
+  private async observeFinalization(uploadId: string, signal: AbortSignal, deadline: number): Promise<string> {
+    let intervalMs = COMPLETION_INITIAL_POLL_INTERVAL_MS;
     while (true) {
+      if (signal.aborted) throw this.createAbortError();
+      if (Date.now() >= deadline) {
+        throw new ConflictException({ code: 'UPLOAD_FINALIZING', message: 'Another request is still completing this upload' });
+      }
+
       const current = await this.uploadsRepository.findOneBy({ id: uploadId });
       if (!current) throw new NotFoundException('Upload session not found');
-      if (current.status === UploadStatus.COMPLETED && current.finalFileId) {
-        return { file_id: current.finalFileId, filename: originalSession.filename, size: originalSession.expectedSize };
-      }
+      if (current.status === UploadStatus.COMPLETED && current.finalFileId) return current.finalFileId;
       if (current.status !== UploadStatus.VERIFYING) {
         throw new BadRequestException({
           code: 'INVALID_UPLOAD_STATE',
@@ -461,21 +492,39 @@ export class UploadsService {
           current: current.status,
         });
       }
-
-      const now = Date.now();
-      const leaseUntil = current.verifyLeaseUntil
-        ?? ((current.verifyStartedAt ?? now) + LEGACY_VERIFY_LEASE_MS);
-      if (leaseUntil !== observedLeaseUntil) {
-        observedLeaseUntil = leaseUntil;
-        // The lifecycle recovery job runs once per minute after the durable finalizer lease expires.
-        deadline = Math.max(now, leaseUntil) + VERIFY_RECOVERY_GRACE_MS;
-      }
-      if (now >= deadline) {
+      if (Date.now() >= deadline) {
         throw new ConflictException({ code: 'UPLOAD_FINALIZING', message: 'Another request is still completing this upload' });
       }
 
-      await new Promise((resolve) => setTimeout(resolve, COMPLETION_POLL_INTERVAL_MS));
+      await this.waitForObserverPoll(Math.min(intervalMs, deadline - Date.now()), signal);
+      intervalMs = Math.min(intervalMs * 2, COMPLETION_MAX_POLL_INTERVAL_MS);
     }
+  }
+
+  private waitForObserverPoll(delayMs: number, signal: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        reject(this.createAbortError());
+        return;
+      }
+      const cleanup = () => signal.removeEventListener('abort', onAbort);
+      const timer = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, delayMs);
+      const onAbort = () => {
+        clearTimeout(timer);
+        cleanup();
+        reject(this.createAbortError());
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  private createAbortError(): Error {
+    const error = new Error('Upload finalization wait was cancelled');
+    error.name = 'AbortError';
+    return error;
   }
 
   /**

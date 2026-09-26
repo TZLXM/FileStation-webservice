@@ -2,15 +2,69 @@ import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { createHash } from 'crypto';
 import { createApp, initAndLogin, setupEnv, teardownEnv, type TestEnv, uploadSmallFile } from './helpers';
+import { UploadsService } from '../src/files/uploads.service';
+import { StorageService } from '../src/files/storage.service';
+
+function createBarrier(expected: number) {
+  let resolveArrivals!: () => void;
+  let releaseArrivals!: () => void;
+  let arrivalCount = 0;
+  const arrivals = new Promise<void>((resolve) => { resolveArrivals = resolve; });
+  const released = new Promise<void>((resolve) => { releaseArrivals = resolve; });
+
+  return {
+    get count() { return arrivalCount; },
+    async arrive(): Promise<void> {
+      arrivalCount += 1;
+      if (arrivalCount > expected) throw new Error(`Barrier received more than ${expected} participants`);
+      if (arrivalCount === expected) resolveArrivals();
+      await released;
+    },
+    async waitForAll(timeoutMs = 10_000): Promise<void> {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          arrivals,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`Barrier reached ${arrivalCount}/${expected} participants`)), timeoutMs);
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    },
+    release(): void { releaseArrivals(); },
+  };
+}
+
+type HttpBarrier = ReturnType<typeof createBarrier> & { matches(method: string, path: string): boolean };
+
+async function waitForCondition(condition: () => boolean, description: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${description}`);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
 
 describe('Concurrency (Phase 2, HTTP E2E)', () => {
   let env: TestEnv;
   let app: INestApplication;
   let accessToken: string;
+  let activeHttpBarrier: HttpBarrier | null = null;
 
   beforeAll(async () => {
     env = await setupEnv();
-    app = await createApp();
+    app = await createApp((testApp) => {
+      testApp.use((req: any, _res: any, next: (error?: unknown) => void) => {
+        const barrier = activeHttpBarrier;
+        if (!barrier || !barrier.matches(req.method, req.path)) {
+          next();
+          return;
+        }
+        void barrier.arrive().then(() => next(), next);
+      });
+    });
     accessToken = await initAndLogin(app);
   }, 60_000);
 
@@ -18,6 +72,43 @@ describe('Concurrency (Phase 2, HTTP E2E)', () => {
     await app.close();
     await teardownEnv(env);
   });
+
+  function httpBarrier(expected: number, matches: (method: string, path: string) => boolean): HttpBarrier {
+    return Object.assign(createBarrier(expected), { matches });
+  }
+
+  function startBehindHttpBarrier<T>(barrier: HttpBarrier, operation: () => Promise<T>) {
+    activeHttpBarrier = barrier;
+    const result = Promise.resolve().then(operation);
+    void result.catch(() => {});
+    const arrivals = barrier.waitForAll().finally(() => {
+      barrier.release();
+      if (activeHttpBarrier === barrier) activeHttpBarrier = null;
+    });
+    return { arrivals, result };
+  }
+
+  function installStorageGate(expected: number) {
+    const storage = app.get(StorageService);
+    const gate = createBarrier(expected);
+    const original = storage.writePartToTemp.bind(storage);
+    const spy = jest.spyOn(storage, 'writePartToTemp').mockImplementation(async (...args) => {
+      await gate.arrive();
+      return original(...args);
+    });
+    return { gate, restore: () => spy.mockRestore() };
+  }
+
+  function installCombineGate(expected: number) {
+    const storage = app.get(StorageService);
+    const gate = createBarrier(expected);
+    const original = storage.combineParts.bind(storage);
+    const spy = jest.spyOn(storage, 'combineParts').mockImplementation(async (...args) => {
+      await gate.arrive();
+      return original(...args);
+    });
+    return { gate, restore: () => spy.mockRestore() };
+  }
 
   it('concurrent downloads claim exactly the configured share quota', async () => {
     const server = app.getHttpServer();
@@ -41,10 +132,13 @@ describe('Concurrency (Phase 2, HTTP E2E)', () => {
       ticketUrls.push(ticket.body.data.ticket_url);
     }
 
-    const statuses = await Promise.all(ticketUrls.map(async (ticketUrl) => {
-      const download = await request(server).get(ticketUrl);
-      return download.status;
-    }));
+    const gate = httpBarrier(10, (method, path) => method === 'GET' && path.startsWith('/api/v1/downloads/'));
+    const { arrivals, result: statusesPromise } = startBehindHttpBarrier(gate, () => Promise.all(
+      ticketUrls.map((ticketUrl) => request(server).get(ticketUrl).then((download) => download.status)),
+    ));
+    await arrivals;
+    expect(gate.count).toBe(10);
+    const statuses = await statusesPromise;
 
     expect(statuses.every((status) => status < 500)).toBe(true);
     expect(statuses).toHaveLength(10);
@@ -78,14 +172,35 @@ describe('Concurrency (Phase 2, HTTP E2E)', () => {
       .send(content)
       .expect(200);
 
-    const results = await Promise.all(
+    const httpGate = httpBarrier(5, (method, path) => method === 'POST' && path === `/api/v1/uploads/${uploadId}/complete`);
+    const combineGate = installCombineGate(1);
+    const { arrivals, result: resultsPromise } = startBehindHttpBarrier(httpGate, () => Promise.all(
       Array.from({ length: 5 }, () =>
         request(server)
           .post(`/api/v1/uploads/${uploadId}/complete`)
           .set('X-Upload-Token', uploadToken)
           .send({}),
       ),
-    );
+    ));
+    let waitError: unknown;
+    try {
+      await arrivals;
+      expect(httpGate.count).toBe(5);
+      await combineGate.gate.waitForAll();
+      expect(combineGate.gate.count).toBe(1);
+      const service = app.get(UploadsService) as any;
+      await waitForCondition(
+        () => service.finalizationObservers?.get(uploadId)?.waiters === 4,
+        'four same-upload callers to join one finalization observer',
+      );
+    } catch (error) {
+      waitError = error;
+    } finally {
+      combineGate.gate.release();
+      combineGate.restore();
+    }
+    const results = await resultsPromise;
+    if (waitError) throw waitError;
     expect(results.map((result) => result.status)).toEqual([201, 201, 201, 201, 201]);
 
     const fileIds = results.map((result) => result.body?.data?.file_id);
@@ -101,6 +216,75 @@ describe('Concurrency (Phase 2, HTTP E2E)', () => {
     );
     expect(matchingFiles).toHaveLength(1);
     expect(matchingFiles[0].id).toBe(fileIds[0]);
+  });
+
+  it('disconnecting a complete loser cancels only its shared-observer wait', async () => {
+    const server = app.getHttpServer();
+    const content = Buffer.from('abort one finalization observer waiter');
+    const init = await request(server)
+      .post('/api/v1/uploads')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ filename: 'abort-finalize-waiter.bin', size: content.length })
+      .expect(201);
+    const { upload_id: uploadId, upload_token: uploadToken } = init.body.data;
+    const checksum = createHash('sha256').update(content).digest('hex');
+    await request(server)
+      .put(`/api/v1/uploads/${uploadId}/parts/0`)
+      .set('X-Upload-Token', uploadToken)
+      .set('X-Part-Checksum', checksum)
+      .set('Content-Type', 'application/octet-stream')
+      .send(content)
+      .expect(200);
+
+    const combineGate = installCombineGate(1);
+    const ownerRequest = request(server)
+      .post(`/api/v1/uploads/${uploadId}/complete`)
+      .set('X-Upload-Token', uploadToken)
+      .send({});
+    const ownerResultPromise = ownerRequest.then(
+      (result) => ({ result }),
+      (error: unknown) => ({ error }),
+    );
+    let ownerSettled = false;
+    void ownerResultPromise.then(() => { ownerSettled = true; });
+    let released = false;
+    try {
+      await combineGate.gate.waitForAll();
+      expect(combineGate.gate.count).toBe(1);
+
+      const loserRequest = request(server)
+        .post(`/api/v1/uploads/${uploadId}/complete`)
+        .set('X-Upload-Token', uploadToken)
+        .send({});
+      const loserResultPromise = loserRequest.then(
+        (result) => ({ result }),
+        (error: unknown) => ({ error }),
+      );
+      const service = app.get(UploadsService) as any;
+      await waitForCondition(
+        () => service.finalizationObservers?.get(uploadId)?.waiters === 1,
+        'disconnected request to join the finalization observer',
+      );
+
+      loserRequest.abort();
+      const loserOutcome = await loserResultPromise;
+      expect('error' in loserOutcome).toBe(true);
+      await waitForCondition(
+        () => !service.finalizationObservers?.has(uploadId),
+        'aborted waiter to leave and cancel its observer',
+      );
+      expect(ownerSettled).toBe(false);
+    } finally {
+      combineGate.gate.release();
+      combineGate.restore();
+      released = true;
+    }
+
+    const ownerOutcome = await ownerResultPromise;
+    expect(ownerSettled).toBe(true);
+    if ('error' in ownerOutcome) throw ownerOutcome.error;
+    expect(ownerOutcome.result.status).toBe(201);
+    expect(released).toBe(true);
   });
 
   it('conflicting concurrent part writes have one winner whose bytes are finalized', async () => {
@@ -123,7 +307,31 @@ describe('Concurrency (Phase 2, HTTP E2E)', () => {
         .set('Content-Type', 'application/octet-stream')
         .send(content);
 
-    const [resultA, resultB] = await Promise.all([putPart(partA), putPart(partB)]);
+    const httpGate = httpBarrier(2, (method, path) => method === 'PUT' && path === `/api/v1/uploads/${uploadId}/parts/0`);
+    const writeGate = installStorageGate(1);
+    let requestA!: Promise<request.Response>;
+    let requestB!: Promise<request.Response>;
+    const { arrivals, result: resultsPromise } = startBehindHttpBarrier(httpGate, () => {
+      requestA = putPart(partA).then((result) => result);
+      requestB = putPart(partB).then((result) => result);
+      return Promise.all([requestA, requestB]);
+    });
+    let winnerHeld = false;
+    let earlyResponse: request.Response | undefined;
+    try {
+      await arrivals;
+      expect(httpGate.count).toBe(2);
+      await writeGate.gate.waitForAll();
+      expect(writeGate.gate.count).toBe(1);
+      winnerHeld = true;
+      earlyResponse = await Promise.race([requestA, requestB]);
+      expect(earlyResponse.status).toBe(409);
+    } finally {
+      writeGate.gate.release();
+      writeGate.restore();
+    }
+    const [resultA, resultB] = await resultsPromise;
+    if (!winnerHeld) throw new Error('The part winner did not reach the held file-write stage');
     expect([resultA.status, resultB.status].sort()).toEqual([200, 409]);
 
     const completed = await request(server)
@@ -163,22 +371,50 @@ describe('Concurrency (Phase 2, HTTP E2E)', () => {
       uploads.push({ id: init.body.data.upload_id, token: init.body.data.upload_token, content, filename });
     }
 
-    const partResults = await Promise.all(uploads.map(({ id, token, content }) =>
+    const partGate = installStorageGate(5);
+    const partResultsPromise = Promise.all(uploads.map(({ id, token, content }) =>
       request(server)
         .put(`/api/v1/uploads/${id}/parts/0`)
         .set('X-Upload-Token', token)
         .set('X-Part-Checksum', createHash('sha256').update(content).digest('hex'))
         .set('Content-Type', 'application/octet-stream')
-        .send(content),
+        .send(content)
+        .then((result) => result),
     ));
+    let partGateError: unknown;
+    try {
+      await partGate.gate.waitForAll();
+      expect(partGate.gate.count).toBe(5);
+    } catch (error) {
+      partGateError = error;
+    } finally {
+      partGate.gate.release();
+      partGate.restore();
+    }
+    const partResults = await partResultsPromise;
+    if (partGateError) throw partGateError;
     expect(partResults.map((result) => result.status)).toEqual([200, 200, 200, 200, 200]);
 
-    const completeResults = await Promise.all(uploads.map(({ id, token }) =>
+    const combineGate = installCombineGate(5);
+    const completeResultsPromise = Promise.all(uploads.map(({ id, token }) =>
       request(server)
         .post(`/api/v1/uploads/${id}/complete`)
         .set('X-Upload-Token', token)
-        .send({}),
+        .send({})
+        .then((result) => result),
     ));
+    let combineGateError: unknown;
+    try {
+      await combineGate.gate.waitForAll();
+      expect(combineGate.gate.count).toBe(5);
+    } catch (error) {
+      combineGateError = error;
+    } finally {
+      combineGate.gate.release();
+      combineGate.restore();
+    }
+    const completeResults = await completeResultsPromise;
+    if (combineGateError) throw combineGateError;
     expect(completeResults.map((result) => result.status)).toEqual([201, 201, 201, 201, 201]);
     const fileIds = completeResults.map((result) => result.body?.data?.file_id);
     expect(fileIds.every(Boolean)).toBe(true);

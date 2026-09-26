@@ -11,6 +11,13 @@ describe('UploadsController audit events', () => {
     user: { id: 'admin-1' },
     ip: '198.51.100.28',
     headers: { 'user-agent': 'Audit test agent' },
+    once: jest.fn(),
+    removeListener: jest.fn(),
+  } as any;
+  const res = {
+    writableEnded: false,
+    once: jest.fn(),
+    removeListener: jest.fn(),
   } as any;
 
   beforeEach(() => {
@@ -43,10 +50,10 @@ describe('UploadsController audit events', () => {
   it('keeps the completion response shape and audits filename and size', async () => {
     uploadsService.completeUpload.mockResolvedValue({ file_id: 'file-1', filename: 'report.pdf', size: 4096 });
 
-    const result = await controller.complete('upload-1', 'upload-secret', {} as any, req);
+    const result = await controller.complete('upload-1', 'upload-secret', {} as any, req, res);
 
     expect(result).toMatchObject({ code: 'OK', data: { file_id: 'file-1' } });
-    expect(result.data).toEqual({ file_id: 'file-1' });
+    expect(result?.data).toEqual({ file_id: 'file-1' });
     expect(auditService.record).toHaveBeenCalledWith({
       accountId: null,
       action: 'upload.completed',
@@ -57,5 +64,6 @@ describe('UploadsController audit events', () => {
       userAgent: 'Audit test agent',
     });
     expect(JSON.stringify(auditService.record.mock.calls[0][0])).not.toContain('upload-secret');
+    expect(uploadsService.completeUpload.mock.calls[0][3]).toBeInstanceOf(AbortSignal);
   });
 });

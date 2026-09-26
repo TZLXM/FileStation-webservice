@@ -34,7 +34,7 @@ export async function teardownEnv(env: TestEnv): Promise<void> {
   await rm(env.dir, { recursive: true, force: true });
 }
 
-export async function createApp(): Promise<INestApplication> {
+export async function createApp(configure?: (app: INestApplication) => void): Promise<INestApplication> {
   const moduleFixture: TestingModule = await Test.createTestingModule({ imports: [AppModule] }).compile();
   const app = moduleFixture.createNestApplication();
   app.use(cookieParser());
@@ -42,6 +42,7 @@ export async function createApp(): Promise<INestApplication> {
   setupSwagger(app);
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }));
   app.useGlobalFilters(new RangeNotSatisfiableFilter());
+  configure?.(app);
   await app.init();
   return app;
 }
