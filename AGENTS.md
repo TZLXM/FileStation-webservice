@@ -20,7 +20,7 @@ FileStation 是一个私有文件传输站 Web 应用，单管理员模式，支
 
 - Phase 1 基础能力、Phase 2 TOTP/恢复码/API Token/MCP/审计/断点续传/并发回归已实现并自动化测试。
 - 真实 MCP 客户端、375px 浏览器/设备布局、TOTP+恢复码真实流程及刷新后断点续传仍待用户手动验收；当前内置浏览器访问 localhost 被 `ERR_BLOCKED_BY_CLIENT` 阻断。
-- 截至 2026-09-26 的 npm audit 有关键生产依赖风险，发布 security gate 为 blocked/pending；详见 `docs/CURRENT-STATE.md`，不得把自动化通过表述成发布完成。
+- 截至 2026-09-26 的独立 security round 已将 full 与 production audit 的 Critical/High 清零；仍保留 Moderate/Low advisories，且 MCP/375px/TOTP-recovery/刷新续传真实场景仍待用户手动验收。详见 `docs/CURRENT-STATE.md`，不得把自动化通过表述成发布完成或称 `npm audit` 全绿。
 
 **详细设计：** [docs/superpowers/specs/2026-07-28-filestation-design.md](docs/superpowers/specs/2026-07-28-filestation-design.md)
 
@@ -262,7 +262,7 @@ git diff --check
 
 ### 11.1 环境要求
 
-- Node.js 20+
+- Node.js 20.17+
 - Nginx 可选；公网 FRP 场景建议作为 TLS 终结/反代并提供初始化本机限制
 - SQLite（嵌入式，无需单独安装）
 

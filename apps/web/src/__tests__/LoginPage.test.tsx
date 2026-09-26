@@ -39,11 +39,12 @@ async function openRecoveryMode() {
 }
 
 describe('LoginPage TOTP flow', () => {
-  let login: ReturnType<typeof vi.fn>;
+  type LoginCallback = (accessToken: string, username: string) => void;
+  let login: ReturnType<typeof vi.fn<LoginCallback>>;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    login = vi.fn();
+    login = vi.fn<LoginCallback>();
     useAuthStore.setState({
       accessToken: null,
       isAuthenticated: false,

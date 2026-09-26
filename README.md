@@ -27,7 +27,7 @@
 
 ## 快速开始
 
-要求 Node.js ≥ 20。
+要求 Node.js ≥ 20.17.0。
 
 ```bash
 git clone https://github.com/TZLXM/FileStation-webservice.git
@@ -86,7 +86,7 @@ Authorization: Bearer <API_TOKEN>
 - [ ] 实际完成 TOTP 启用、登录、禁用及恢复码生成/单次恢复流程
 - [ ] 刷新页面后重新选择原文件并验证断点续传
 
-当前内置浏览器访问本地服务被 `ERR_BLOCKED_BY_CLIENT` 阻断，因此真实客户端/小屏像素验收仍待用户环境完成。npm 依赖安全审计也有未处置 Critical/High 项；见 [当前状态](docs/CURRENT-STATE.md)，不要将自动化通过等同于发布批准。
+当前内置浏览器访问本地服务被 `ERR_BLOCKED_BY_CLIENT` 阻断，因此真实客户端/小屏像素验收仍待用户环境完成。2026-09-26 security round 已清零 npm audit Critical/High，但仍有 Moderate/Low advisories（`npm audit` 仍 exit 1）；详情与建议见 [当前状态](docs/CURRENT-STATE.md)。真实验收仍未完成，不要将自动化通过等同于发布批准。
 
 ## 文档
 
