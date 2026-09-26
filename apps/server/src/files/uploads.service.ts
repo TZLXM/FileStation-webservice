@@ -12,11 +12,13 @@ import { createHash } from 'crypto';
 import { InitUploadDto } from './dto/init-upload.dto';
 import { UploadInitResponse, UploadStatus as UploadStatusType } from '@filestation/shared';
 import { SqliteImmediateTransactionService } from '../common/database/sqlite-immediate-transaction.service';
+import { UploadVerifyHeartbeat, VerifyLeaseError } from './upload-verify-heartbeat';
 
 const COMPLETION_MAX_WAIT_MS = 15 * 60 * 1000;
-const COMPLETION_INITIAL_POLL_INTERVAL_MS = 250;
-const COMPLETION_MAX_POLL_INTERVAL_MS = 5 * 1000;
-const LEGACY_VERIFY_LEASE_MS = 5 * 60 * 1000;
+const COMPLETION_INITIAL_POLL_INTERVAL_MS = 100;
+const COMPLETION_MAX_POLL_INTERVAL_MS = 1000;
+const VERIFY_LEASE_MS = 10 * 60 * 1000;
+const VERIFY_HEARTBEAT_INTERVAL_MS = 30 * 1000;
 
 interface FinalizationObserver {
   controller: AbortController;
@@ -27,6 +29,9 @@ interface FinalizationObserver {
 @Injectable()
 export class UploadsService implements OnModuleDestroy {
   private readonly finalizationObservers = new Map<string, FinalizationObserver>();
+  private readonly activeVerifyHeartbeats = new Set<UploadVerifyHeartbeat>();
+  private verifyLeaseMs = VERIFY_LEASE_MS;
+  private verifyHeartbeatIntervalMs = VERIFY_HEARTBEAT_INTERVAL_MS;
 
   constructor(
     @InjectRepository(UploadSession)
@@ -43,9 +48,13 @@ export class UploadsService implements OnModuleDestroy {
     private sqliteTransactions: SqliteImmediateTransactionService,
   ) {}
 
-  onModuleDestroy(): void {
+  async onModuleDestroy(): Promise<void> {
     for (const observer of this.finalizationObservers.values()) observer.controller.abort();
     this.finalizationObservers.clear();
+    const heartbeats = [...this.activeVerifyHeartbeats];
+    for (const heartbeat of heartbeats) heartbeat.cancel();
+    await Promise.all(heartbeats.map((heartbeat) => heartbeat.stop()));
+    this.activeVerifyHeartbeats.clear();
   }
 
   async initializeUpload(
@@ -253,7 +262,7 @@ export class UploadsService implements OnModuleDestroy {
    * 阶段一 BEGIN IMMEDIATE：条件 UPDATE 抢占，COALESCE 持久化 final_stored_name + 写入租约
    *   （verify_owner_token/verify_lease_until/verify_heartbeat_at）。
    *   v1.7 阻断 1：不再写 final_file_id（REFERENCES files(id) 外键，阶段三才创建文件）。
-   * 阶段二事务外：用持久化 final_stored_name 合并（.tmp + fsync + 原子 rename）+ 校验 + 刷新心跳。
+   * 阶段二事务外：用持久化 final_stored_name 合并（.tmp + fsync + 原子 rename）+ 校验；心跳持续到阶段三提交。
    *   v1.7 阻断 2：阶段一提交后用 findOneByOrFail 重新加载实体（原生 SQL 不映射驼峰）。
    * 阶段三 BEGIN IMMEDIATE：INSERT files + UPDATE ... WHERE status='verifying' AND owner 匹配。
    *   v1.7 阻断 3：检查条件 UPDATE affected；0 时事务内重查（completed 同文件→幂等，否则回滚）。
@@ -275,7 +284,7 @@ export class UploadsService implements OnModuleDestroy {
     // ---------- 阶段一：抢占 + 持久化 final_stored_name + 租约 ----------
     const preStoredName = this.storageService.generateStoredName();
     const ownerToken = uuidv4(); // finalizer 租约 owner
-    const leaseMs = 10 * 60 * 1000; // 租约 10 分钟（远大于最长合并+哈希）
+    const leaseMs = this.verifyLeaseMs;
 
     const claim = await this.sqliteTransactions.run(async (connection) => {
       const now = Date.now();
@@ -321,8 +330,11 @@ export class UploadsService implements OnModuleDestroy {
 
     // ---------- 阶段二：事务外合并与校验（.tmp + fsync + rename + 心跳刷新）----------
     const finalStoredName = claimedSession.finalStoredName!;
+    const heartbeat = this.startVerifyHeartbeat(uploadId, ownerToken);
     try {
+      heartbeat.assertOwned();
       const parts = await this.partsRepository.find({ where: { uploadId, status: UploadPartStatus.READY }, order: { partNumber: 'ASC' } });
+      heartbeat.assertOwned();
       const totalParts = Math.ceil(claimedSession.expectedSize / claimedSession.chunkSize);
       if (parts.length !== totalParts) {
         throw new BadRequestException({ code: 'MISSING_PARTS', message: `Missing parts: expected ${totalParts}, got ${parts.length}` });
@@ -334,11 +346,13 @@ export class UploadsService implements OnModuleDestroy {
       }
 
       // 合并到 .tmp 并 fsync + 原子 rename（v1.7 阻断 4：原子最终文件发布）
-      // combineParts 内部：写 <stored_name>.tmp → fsync → rename → 刷新心跳（每分块/定时）
-      await this.combinePartsWithHeartbeat(uploadId, totalParts, finalStoredName, ownerToken);
+      // combineParts 内部只写 .tmp；owner 心跳覆盖合并、rename、hash、settings 和阶段三。
+      await this.combinePartsWithHeartbeat(uploadId, totalParts, finalStoredName, heartbeat);
 
       // 校验最终哈希（优先请求 final_hash，其次初始化 expected_hash）；持久化实际计算值
-      const actualHash = await this.storageService.calculateFileHash(this.storageService.getFinalPath(finalStoredName));
+      heartbeat.assertOwned();
+      const actualHash = await this.storageService.calculateFileHash(this.storageService.getFinalPath(finalStoredName), heartbeat.signal);
+      heartbeat.assertOwned();
       const expectedHash = finalHash ?? claimedSession.expectedHash;
       if (expectedHash && actualHash !== expectedHash) {
         throw new BadRequestException({ code: 'FINAL_HASH_MISMATCH', message: 'Final file hash mismatch' });
@@ -346,12 +360,14 @@ export class UploadsService implements OnModuleDestroy {
 
       // 阶段三前读默认过期设置（0 = 永久 null）
       const storageSettings = await this.settingsService.getStorageSettings();
+      await heartbeat.refreshNow();
       const fileExpiresAt = storageSettings.default_expire_hours > 0
         ? Date.now() + storageSettings.default_expire_hours * 60 * 60 * 1000
         : null;
 
       // ---------- 阶段三：INSERT files + 条件 UPDATE（带 owner 守卫 + affected 检查）----------
       const newFileId = uuidv4();
+      heartbeat.assertOwned();
       const finalized = await this.sqliteTransactions.run(async (connection) => {
         const now3 = Date.now();
 
@@ -367,10 +383,10 @@ export class UploadsService implements OnModuleDestroy {
         // 条件 UPDATE：仅当仍 verifying 且 owner 匹配（租约未被接管）才完成；同时写回 final_file_id
         const updateResult = await connection.run(
           `UPDATE upload_sessions
-             SET status = 'completed', completed_at = ?, failure_reason = NULL, final_file_id = ?,
+           SET status = 'completed', completed_at = ?, failure_reason = NULL, final_file_id = ?,
                  verify_owner_token = NULL, verify_lease_until = NULL, verify_heartbeat_at = NULL
-           WHERE id = ? AND status = 'verifying' AND verify_owner_token = ?`,
-          [now3, newFileId, uploadId, ownerToken],
+           WHERE id = ? AND status = 'verifying' AND verify_owner_token = ? AND verify_lease_until > ?`,
+          [now3, newFileId, uploadId, ownerToken, now3],
         );
 
         if (updateResult.changes === 1) {
@@ -391,9 +407,18 @@ export class UploadsService implements OnModuleDestroy {
           message: 'Lost finalize ownership (lease taken over or state changed)',
         });
       });
+      await this.stopVerifyHeartbeat(heartbeat);
       this.storageService.deleteUploadTempDir(uploadId).catch(() => {});
       return { file_id: finalized.fileId, filename: claimedSession.filename, size: claimedSession.expectedSize };
     } catch (error: unknown) {
+      try {
+        heartbeat.assertOwned();
+      } catch (leaseError) {
+        if (leaseError instanceof VerifyLeaseError && leaseError.reason === 'cancelled') {
+          await this.releaseVerifyLease(uploadId, ownerToken);
+        }
+        throw leaseError;
+      }
       let errorCode: string | undefined;
       if (error instanceof BadRequestException) {
         const response = error.getResponse();
@@ -404,23 +429,22 @@ export class UploadsService implements OnModuleDestroy {
       const recoverable = ['MISSING_PARTS', 'FINAL_HASH_MISMATCH', 'INVALID_PART_OFFSET'];
       if (errorCode && recoverable.includes(errorCode)) {
         // 可恢复：删除半成品 + 回退 uploading + 清租约
+        heartbeat.assertOwned();
         await this.storageService.deleteFile(finalStoredName).catch(() => {});
-        await this.dataSource.query(
-          `UPDATE upload_sessions SET status = 'uploading', verify_started_at = NULL,
-             verify_owner_token = NULL, verify_lease_until = NULL, verify_heartbeat_at = NULL
-           WHERE id = ? AND status = 'verifying' AND verify_owner_token = ?`,
-          [uploadId, ownerToken],
-        );
+        await this.releaseVerifyLease(uploadId, ownerToken, 'uploading');
       } else {
         // 不可恢复：标记 failed + 清租约（半成品由 FileLifecycleService 清理）
-        await this.dataSource.query(
+        heartbeat.assertOwned();
+        await this.sqliteTransactions.run((connection) => connection.run(
           `UPDATE upload_sessions SET status = 'failed', failure_reason = ?,
              verify_owner_token = NULL, verify_lease_until = NULL, verify_heartbeat_at = NULL
-           WHERE id = ? AND status = 'verifying' AND verify_owner_token = ?`,
-          [error instanceof Error ? error.message : 'Unknown error', uploadId, ownerToken],
-        );
+           WHERE id = ? AND status = 'verifying' AND verify_owner_token = ? AND verify_lease_until > ?`,
+          [error instanceof Error ? error.message : 'Unknown error', uploadId, ownerToken, Date.now()],
+        ));
       }
       throw error;
+    } finally {
+      await this.stopVerifyHeartbeat(heartbeat);
     }
   }
 
@@ -529,42 +553,63 @@ export class UploadsService implements OnModuleDestroy {
 
   /**
    * 合并分块到 <stored_name>.tmp + fsync + 原子 rename 到正式路径（v1.7 阻断 4 原子发布）。
-   * 合并期间用后台定时器刷新租约心跳（verify_heartbeat_at），防恢复任务误杀长合并。
+   * 全流程 heartbeat 由 completeUpload 管理，此处在发布 .tmp 前同步确认 owner 仍有效。
    */
   private async combinePartsWithHeartbeat(
     uploadId: string,
     totalParts: number,
     storedName: string,
-    ownerToken: string,
+    heartbeat: UploadVerifyHeartbeat,
   ): Promise<void> {
     const tmpPath = this.storageService.getFinalPath(`${storedName}.tmp`);
     const finalPath = this.storageService.getFinalPath(storedName);
 
-    // 后台心跳定时器：每 30s 刷新一次租约（合并期间保持 owner 所有权）
-    const heartbeat = setInterval(() => {
-      this.refreshVerifyHeartbeat(uploadId, ownerToken).catch(() => {});
-    }, 30 * 1000);
-
-    try {
-      // 合并到 .tmp（StorageService.combineParts 内部流式 + fsync .tmp）
-      await this.storageService.combineParts(uploadId, totalParts, tmpPath);
-    } finally {
-      clearInterval(heartbeat);
-    }
+    heartbeat.assertOwned();
+    // 合并到 .tmp（StorageService.combineParts 内部流式 + fsync .tmp）
+    await this.storageService.combineParts(uploadId, totalParts, tmpPath, heartbeat.signal);
+    await heartbeat.refreshNow();
+    heartbeat.assertOwned();
 
     // fsync 已由 combineParts 完成；原子 rename 到正式路径
     const fs = await import('fs/promises');
     await fs.rename(tmpPath, finalPath);
+    heartbeat.assertOwned();
   }
 
   /** 刷新 finalizer 租约心跳（仅当仍是 owner 且 verifying） */
-  private async refreshVerifyHeartbeat(uploadId: string, ownerToken: string): Promise<void> {
+  private async refreshVerifyHeartbeat(uploadId: string, ownerToken: string): Promise<boolean> {
     const now = Date.now();
-    await this.dataSource.query(
+    const result = await this.sqliteTransactions.run((connection) => connection.run(
       `UPDATE upload_sessions SET verify_heartbeat_at = ?, verify_lease_until = ?
+       WHERE id = ? AND status = 'verifying' AND verify_owner_token = ? AND verify_lease_until > ?`,
+      [now, now + this.verifyLeaseMs, uploadId, ownerToken, now],
+    ));
+    return result.changes === 1;
+  }
+
+  private startVerifyHeartbeat(uploadId: string, ownerToken: string): UploadVerifyHeartbeat {
+    const heartbeat = new UploadVerifyHeartbeat(
+      this.verifyHeartbeatIntervalMs,
+      () => this.refreshVerifyHeartbeat(uploadId, ownerToken),
+    ).start();
+    this.activeVerifyHeartbeats.add(heartbeat);
+    return heartbeat;
+  }
+
+  private async stopVerifyHeartbeat(heartbeat: UploadVerifyHeartbeat): Promise<void> {
+    await heartbeat.stop();
+    this.activeVerifyHeartbeats.delete(heartbeat);
+  }
+
+  private async releaseVerifyLease(uploadId: string, ownerToken: string, status?: 'uploading'): Promise<void> {
+    const targetStatus = status ? 'status = ?, verify_started_at = NULL,' : '';
+    const parameters = status ? [status, uploadId, ownerToken] : [uploadId, ownerToken];
+    await this.sqliteTransactions.run((connection) => connection.run(
+      `UPDATE upload_sessions SET ${targetStatus}
+         verify_owner_token = NULL, verify_lease_until = NULL, verify_heartbeat_at = NULL
        WHERE id = ? AND status = 'verifying' AND verify_owner_token = ?`,
-      [now, now + 10 * 60 * 1000, uploadId, ownerToken],
-    );
+      parameters,
+    ));
   }
 
   async abortUpload(uploadId: string, uploadToken: string): Promise<void> {

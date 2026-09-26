@@ -89,25 +89,91 @@ export class StorageService implements OnApplicationBootstrap {
     await fs.rm(this.getUploadTempDir(uploadId), { recursive: true, force: true });
   }
 
-  async combineParts(uploadId: string, totalParts: number, finalPath: string): Promise<void> {
+  async combineParts(uploadId: string, totalParts: number, finalPath: string, signal?: AbortSignal): Promise<void> {
+    this.throwIfAborted(signal);
     const writeStream = createWriteStream(finalPath);
+    let succeeded = false;
+    let writeError: Error | null = null;
+    writeStream.on('error', (error) => { writeError = error; });
     try {
       for (let i = 0; i < totalParts; i++) {
+        this.throwIfAborted(signal);
+        if (writeError) throw writeError;
         const readStream = createReadStream(this.getPartPath(uploadId, i));
         await new Promise<void>((resolve, reject) => {
+          const cleanup = () => {
+            signal?.removeEventListener('abort', onAbort);
+            readStream.removeListener('error', onError);
+            writeStream.removeListener('error', onError);
+          };
+          const onError = (error: Error) => {
+            cleanup();
+            reject(error);
+          };
+          const onAbort = () => {
+            const error = this.createAbortError();
+            readStream.destroy();
+            writeStream.destroy();
+            cleanup();
+            reject(error);
+          };
+          if (signal?.aborted) {
+            onAbort();
+            return;
+          }
+          signal?.addEventListener('abort', onAbort, { once: true });
           readStream.pipe(writeStream, { end: false });
-          readStream.on('end', resolve);
-          readStream.on('error', reject);
+          readStream.once('end', () => {
+            cleanup();
+            resolve();
+          });
+          readStream.once('error', onError);
+          writeStream.once('error', onError);
         });
       }
-    } finally {
+      this.throwIfAborted(signal);
       writeStream.end();
-      await new Promise<void>((resolve) => writeStream.on('finish', resolve));
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = () => signal?.removeEventListener('abort', onAbort);
+        const onError = (error: Error) => {
+          cleanup();
+          writeStream.removeListener('finish', onFinish);
+          reject(error);
+        };
+        const onFinish = () => {
+          cleanup();
+          writeStream.removeListener('error', onError);
+          resolve();
+        };
+        const onClose = () => {
+          if (signal?.aborted) onError(this.createAbortError());
+        };
+        const onAbort = () => writeStream.destroy();
+        writeStream.once('error', onError);
+        writeStream.once('finish', onFinish);
+        writeStream.once('close', onClose);
+        signal?.addEventListener('abort', onAbort, { once: true });
+        if (signal?.aborted) onAbort();
+      });
+      if (writeError) throw writeError;
+      this.throwIfAborted(signal);
       const handle = await fs.open(finalPath, 'r+');
       try {
         await handle.sync();
       } finally {
         await handle.close();
+      }
+      this.throwIfAborted(signal);
+      succeeded = true;
+    } finally {
+      if (!succeeded) {
+        if (!writeStream.closed) {
+          await new Promise<void>((resolve) => {
+            writeStream.once('close', resolve);
+            writeStream.destroy();
+          });
+        }
+        await fs.unlink(finalPath).catch(() => {});
       }
     }
   }
@@ -148,13 +214,36 @@ export class StorageService implements OnApplicationBootstrap {
   }
 
   /** 接受绝对路径（calculateFileHash(getFinalPath(storedName))）。 */
-  async calculateFileHash(filePath: string): Promise<string> {
+  async calculateFileHash(filePath: string, signal?: AbortSignal): Promise<string> {
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(this.createAbortError());
+        return;
+      }
       const hash = createHash('sha256');
       const stream = createReadStream(filePath);
+      const cleanup = () => signal?.removeEventListener('abort', onAbort);
+      const onAbort = () => stream.destroy(this.createAbortError());
+      signal?.addEventListener('abort', onAbort, { once: true });
       stream.on('data', (data) => hash.update(data));
-      stream.on('end', () => resolve(hash.digest('hex')));
-      stream.on('error', reject);
+      stream.on('end', () => {
+        cleanup();
+        resolve(hash.digest('hex'));
+      });
+      stream.on('error', (error) => {
+        cleanup();
+        reject(error);
+      });
     });
+  }
+
+  private throwIfAborted(signal?: AbortSignal): void {
+    if (signal?.aborted) throw this.createAbortError();
+  }
+
+  private createAbortError(): Error {
+    const error = new Error('File operation was aborted');
+    error.name = 'AbortError';
+    return error;
   }
 }

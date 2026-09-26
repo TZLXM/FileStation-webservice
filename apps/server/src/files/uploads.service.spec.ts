@@ -171,6 +171,35 @@ describe('UploadsService', () => {
         jest.useRealTimers();
       }
     });
+
+    it('starts polling at 100ms and observes completion within the one-second maximum interval', async () => {
+      jest.useFakeTimers({ now: 1_000 });
+      let isCompleted = false;
+      mockUploadsRepository.findOneBy.mockImplementation(async () => isCompleted
+        ? { ...verifyingSession, status: 'completed', finalFileId: 'file-fast' }
+        : verifyingSession);
+      const pending = (service as any).waitForFinalizedUpload('upload-observed', verifyingSession);
+      void pending.catch(() => {});
+      let settled = false;
+      void pending.then(() => { settled = true; }, () => { settled = true; });
+
+      try {
+        await jest.advanceTimersByTimeAsync(100);
+        expect(mockUploadsRepository.findOneBy).toHaveBeenCalledTimes(2);
+
+        await jest.advanceTimersByTimeAsync(1_500);
+        expect(mockUploadsRepository.findOneBy).toHaveBeenCalledTimes(5);
+        isCompleted = true;
+        await jest.advanceTimersByTimeAsync(899);
+        expect(settled).toBe(false);
+        await jest.advanceTimersByTimeAsync(1);
+        await expect(pending).resolves.toMatchObject({ file_id: 'file-fast' });
+        expect(settled).toBe(true);
+      } finally {
+        service.onModuleDestroy();
+        jest.useRealTimers();
+      }
+    });
   });
 
   describe('part owner transactions', () => {

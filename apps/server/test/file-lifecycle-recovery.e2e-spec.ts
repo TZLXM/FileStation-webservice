@@ -1,16 +1,30 @@
 import { INestApplication } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
 import request from 'supertest';
 import { createHash } from 'crypto';
-import { writeFile } from 'fs/promises';
+import { access, writeFile } from 'fs/promises';
 import { createApp, initAndLogin, setupEnv, teardownEnv, type TestEnv } from './helpers';
 import { FileLifecycleService } from '../src/files/file-lifecycle.service';
 import { StorageService } from '../src/files/storage.service';
+import { SettingsService } from '../src/settings/settings.service';
+import { SqliteImmediateTransactionService } from '../src/common/database/sqlite-immediate-transaction.service';
+import { UploadsService } from '../src/files/uploads.service';
+import { File } from '../src/files/entities/file.entity';
+import { UploadSession } from '../src/files/entities/upload-session.entity';
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
   const promise = new Promise<void>((res) => { resolve = res; });
   return { promise, resolve };
+}
+
+async function waitForCondition(condition: () => boolean | Promise<boolean>, description: string, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await condition())) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${description}`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 2));
+  }
 }
 
 describe('File lifecycle verifying recovery (SQLite integration)', () => {
@@ -180,5 +194,243 @@ describe('File lifecycle verifying recovery (SQLite integration)', () => {
     const session = await readSession(id);
     expect(session.status).toBe('failed');
     expect(session.verify_owner_token).toBeNull();
+  });
+
+  it('keeps a recovery owner alive across a short lease while file inspection is gated', async () => {
+    const content = Buffer.from('recovery-heartbeat-holds-lease');
+    const { id } = await createUpload('recover-heartbeat.bin', content);
+    const storedName = 'recovery-heartbeat-final';
+    await writeFile(storage.getFinalPath(storedName), content);
+    await markVerifying(id, storedName);
+
+    const originalGetFileStats = storage.getFileStats.bind(storage);
+    const inspectionEntered = deferred();
+    const releaseInspection = deferred();
+    const statsSpy = jest.spyOn(storage, 'getFileStats').mockImplementation(async (...args) => {
+      inspectionEntered.resolve();
+      await releaseInspection.promise;
+      return originalGetFileStats(...args);
+    });
+    const originalLeaseMs = (lifecycle as any).verifyLeaseMs;
+    const originalHeartbeatIntervalMs = (lifecycle as any).verifyHeartbeatIntervalMs;
+    (lifecycle as any).verifyLeaseMs = 120;
+    (lifecycle as any).verifyHeartbeatIntervalMs = 15;
+
+    const recovery = lifecycle.recoverVerifyingUploads();
+    let gateError: unknown;
+    try {
+      await inspectionEntered.promise;
+      const claimed = await readSession(id);
+      const claimedOwner = claimed.verify_owner_token;
+      const originalLeaseUntil = claimed.verify_lease_until!;
+      await waitForCondition(
+        async () => Number((await readSession(id)).verify_lease_until) > originalLeaseUntil,
+        'recovery heartbeat to extend its lease',
+      );
+      await waitForCondition(() => Date.now() > originalLeaseUntil, 'initial recovery lease to pass');
+      expect(claimedOwner).not.toBe('expired-owner');
+
+      const secondLifecycle = new FileLifecycleService(
+        dataSource.getRepository(File),
+        dataSource.getRepository(UploadSession),
+        storage,
+        app.get(SettingsService),
+        dataSource,
+        new SqliteImmediateTransactionService(app.get(ConfigService)),
+      );
+      (secondLifecycle as any).verifyLeaseMs = 120;
+      (secondLifecycle as any).verifyHeartbeatIntervalMs = 15;
+      await secondLifecycle.recoverVerifyingUploads();
+
+      const afterCompetitor = await readSession(id);
+      expect(afterCompetitor.verify_owner_token).toBe(claimedOwner);
+      expect(afterCompetitor.status).toBe('verifying');
+      expect(Number(afterCompetitor.verify_lease_until)).toBeGreaterThan(originalLeaseUntil);
+      expect((lifecycle as any).activeVerifyHeartbeats?.size).toBe(1);
+    } catch (error) {
+      gateError = error;
+    } finally {
+      releaseInspection.resolve();
+      statsSpy.mockRestore();
+      (lifecycle as any).verifyLeaseMs = originalLeaseMs;
+      (lifecycle as any).verifyHeartbeatIntervalMs = originalHeartbeatIntervalMs;
+    }
+    await recovery;
+    if (gateError) throw gateError;
+    expect((lifecycle as any).activeVerifyHeartbeats?.size).toBe(0);
+    expect((await readSession(id)).status).toBe('completed');
+  });
+
+  it('aborts recovery I/O and does not publish after its lease owner is replaced', async () => {
+    const content = Buffer.from('recovery-owner-loss-aborts-publish');
+    const { id } = await createUpload('recover-owner-loss.bin', content);
+    const storedName = 'recovery-owner-loss-final';
+    await markVerifying(id, storedName);
+
+    const originalCombine = storage.combineParts.bind(storage);
+    const combineEntered = deferred();
+    const releaseCombine = deferred();
+    let combineSignal: AbortSignal | undefined;
+    const combineSpy = jest.spyOn(storage, 'combineParts').mockImplementation(async (...args: any[]) => {
+      combineSignal = args[3];
+      combineEntered.resolve();
+      await releaseCombine.promise;
+      return originalCombine(args[0], args[1], args[2], combineSignal);
+    });
+    const originalLeaseMs = (lifecycle as any).verifyLeaseMs;
+    const originalHeartbeatIntervalMs = (lifecycle as any).verifyHeartbeatIntervalMs;
+    (lifecycle as any).verifyLeaseMs = 120;
+    (lifecycle as any).verifyHeartbeatIntervalMs = 15;
+
+    const recovery = lifecycle.recoverVerifyingUploads();
+    let gateError: unknown;
+    try {
+      await combineEntered.promise;
+      expect(combineSignal).toBeInstanceOf(AbortSignal);
+      await dataSource.query(
+        `UPDATE upload_sessions SET verify_owner_token = 'replacement-owner', verify_lease_until = ? WHERE id = ?`,
+        [Date.now() + 60_000, id],
+      );
+      await waitForCondition(() => combineSignal!.aborted, 'lost recovery lease to abort active I/O');
+    } catch (error) {
+      gateError = error;
+    } finally {
+      releaseCombine.resolve();
+      combineSpy.mockRestore();
+      (lifecycle as any).verifyLeaseMs = originalLeaseMs;
+      (lifecycle as any).verifyHeartbeatIntervalMs = originalHeartbeatIntervalMs;
+    }
+    await recovery;
+    if (gateError) throw gateError;
+
+    expect((await readSession(id)).verify_owner_token).toBe('replacement-owner');
+    expect((await readSession(id)).status).toBe('verifying');
+    expect(await storage.fileExists(storedName)).toBe(false);
+    await expect(access(storage.getFinalPath(`${storedName}.tmp`))).rejects.toThrow();
+    const [files] = await dataSource.query(`SELECT COUNT(*) AS count FROM files WHERE stored_name = ?`, [storedName]);
+    expect(Number(files.count)).toBe(0);
+    expect((lifecycle as any).activeVerifyHeartbeats?.size).toBe(0);
+  });
+
+  it('keeps normal complete ownership heartbeating through settings lookup and stage-three commit', async () => {
+    const content = Buffer.from('complete-heartbeat-spans-stage-three');
+    const { id, token } = await createUpload('complete-heartbeat.bin', content);
+    const uploads = app.get(UploadsService) as any;
+    const originalLeaseMs = uploads.verifyLeaseMs;
+    const originalHeartbeatIntervalMs = uploads.verifyHeartbeatIntervalMs;
+    uploads.verifyLeaseMs = 120;
+    uploads.verifyHeartbeatIntervalMs = 15;
+
+    const settings = app.get(SettingsService);
+    const originalGetSettings = settings.getStorageSettings.bind(settings);
+    const settingsEntered = deferred();
+    const releaseSettings = deferred();
+    const settingsSpy = jest.spyOn(settings, 'getStorageSettings').mockImplementation(async () => {
+      settingsEntered.resolve();
+      await releaseSettings.promise;
+      return originalGetSettings();
+    });
+
+    const completion = request(app.getHttpServer())
+      .post(`/api/v1/uploads/${id}/complete`)
+      .set('X-Upload-Token', token)
+      .send({})
+      .then((result) => result);
+    let gateError: unknown;
+    try {
+      await settingsEntered.promise;
+      const claimed = await readSession(id);
+      const claimedOwner = claimed.verify_owner_token;
+      const leaseAtGate = Number(claimed.verify_lease_until);
+      await waitForCondition(
+        async () => Number((await readSession(id)).verify_lease_until) > leaseAtGate,
+        'normal complete heartbeat to extend its lease after stage-two work',
+      );
+      await waitForCondition(() => Date.now() > leaseAtGate, 'initial complete lease to pass');
+      expect(claimedOwner).toBeTruthy();
+
+      const competitor = new FileLifecycleService(
+        dataSource.getRepository(File),
+        dataSource.getRepository(UploadSession),
+        storage,
+        settings,
+        dataSource,
+        new SqliteImmediateTransactionService(app.get(ConfigService)),
+      );
+      await competitor.recoverVerifyingUploads();
+      const afterCompetitor = await readSession(id);
+      expect(afterCompetitor.verify_owner_token).toBe(claimedOwner);
+      expect(afterCompetitor.status).toBe('verifying');
+    } catch (error) {
+      gateError = error;
+    } finally {
+      releaseSettings.resolve();
+      settingsSpy.mockRestore();
+      uploads.verifyLeaseMs = originalLeaseMs;
+      uploads.verifyHeartbeatIntervalMs = originalHeartbeatIntervalMs;
+    }
+    const response = await completion;
+    if (gateError) throw gateError;
+    expect(response.status).toBe(201);
+    expect((await readSession(id)).status).toBe('completed');
+  });
+
+  it('does not publish a normal completion after the verifying owner is replaced', async () => {
+    const content = Buffer.from('complete-owner-loss-aborts-publish');
+    const { id, token } = await createUpload('complete-owner-loss.bin', content);
+    const uploads = app.get(UploadsService) as any;
+    const originalLeaseMs = uploads.verifyLeaseMs;
+    const originalHeartbeatIntervalMs = uploads.verifyHeartbeatIntervalMs;
+    uploads.verifyLeaseMs = 120;
+    uploads.verifyHeartbeatIntervalMs = 15;
+
+    const originalCombine = storage.combineParts.bind(storage);
+    const combineEntered = deferred();
+    const releaseCombine = deferred();
+    let combineSignal: AbortSignal | undefined;
+    const combineSpy = jest.spyOn(storage, 'combineParts').mockImplementation(async (...args: any[]) => {
+      combineSignal = args[3];
+      combineEntered.resolve();
+      await releaseCombine.promise;
+      return originalCombine(args[0], args[1], args[2], combineSignal);
+    });
+    const completion = request(app.getHttpServer())
+      .post(`/api/v1/uploads/${id}/complete`)
+      .set('X-Upload-Token', token)
+      .send({})
+      .then((result) => result);
+    let gateError: unknown;
+    try {
+      await combineEntered.promise;
+      expect(combineSignal).toBeInstanceOf(AbortSignal);
+      await dataSource.query(
+        `UPDATE upload_sessions SET verify_owner_token = 'replacement-complete-owner', verify_lease_until = ? WHERE id = ?`,
+        [Date.now() + 60_000, id],
+      );
+      await waitForCondition(() => combineSignal!.aborted, 'lost complete lease to abort active I/O');
+    } catch (error) {
+      gateError = error;
+    } finally {
+      releaseCombine.resolve();
+      combineSpy.mockRestore();
+      uploads.verifyLeaseMs = originalLeaseMs;
+      uploads.verifyHeartbeatIntervalMs = originalHeartbeatIntervalMs;
+    }
+    const response = await completion;
+    if (gateError) throw gateError;
+
+    const session = await readSession(id);
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(session.status).toBe('verifying');
+    expect(session.verify_owner_token).toBe('replacement-complete-owner');
+    const [{ final_stored_name: storedName }] = await dataSource.query(
+      `SELECT final_stored_name FROM upload_sessions WHERE id = ?`,
+      [id],
+    );
+    expect(await storage.fileExists(storedName)).toBe(false);
+    await expect(access(storage.getFinalPath(`${storedName}.tmp`))).rejects.toThrow();
+    const [files] = await dataSource.query(`SELECT COUNT(*) AS count FROM files WHERE stored_name = ?`, [storedName]);
+    expect(Number(files.count)).toBe(0);
+    expect(uploads.activeVerifyHeartbeats.size).toBe(0);
   });
 });

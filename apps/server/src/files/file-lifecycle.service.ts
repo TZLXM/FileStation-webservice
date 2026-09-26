@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, In, LessThan } from 'typeorm';
@@ -10,6 +10,7 @@ import { promises as fs } from 'fs';
 import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { SqliteImmediateTransactionService } from '../common/database/sqlite-immediate-transaction.service';
+import { UploadVerifyHeartbeat } from './upload-verify-heartbeat';
 
 const RECEIVING_TIMEOUT_MS = 10 * 60 * 1000; // receiving 分块超 10 分钟（大于最长 64MB 写入预期）
 const BATCH_SIZE = 100;
@@ -31,11 +32,14 @@ interface StuckVerifyingUpload {
 }
 
 @Injectable()
-export class FileLifecycleService implements OnApplicationBootstrap {
+export class FileLifecycleService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(FileLifecycleService.name);
   // 防 @Cron 重叠（上轮未跑完跳过本轮）；单语句条件 UPDATE 的方法无需 guard
   private processingDeletes = false;
   private recoveringVerifying = false;
+  private readonly activeVerifyHeartbeats = new Set<UploadVerifyHeartbeat>();
+  private verifyLeaseMs = VERIFY_LEASE_MS;
+  private verifyHeartbeatIntervalMs = 30 * 1000;
 
   constructor(
     @InjectRepository(File)
@@ -47,6 +51,13 @@ export class FileLifecycleService implements OnApplicationBootstrap {
     private dataSource: DataSource,
     private sqliteTransactions: SqliteImmediateTransactionService,
   ) {}
+
+  async onModuleDestroy(): Promise<void> {
+    const heartbeats = [...this.activeVerifyHeartbeats];
+    for (const heartbeat of heartbeats) heartbeat.cancel();
+    await Promise.all(heartbeats.map((heartbeat) => heartbeat.stop()));
+    this.activeVerifyHeartbeats.clear();
+  }
 
   /**
    * 启动全量扫描：覆盖进程停机期间的过期文件/删除队列/过期上传/卡死 verifying/孤儿临时文件。
@@ -202,34 +213,36 @@ export class FileLifecycleService implements OnApplicationBootstrap {
        WHERE id = ? AND status = 'verifying'
          AND ((verify_lease_until IS NOT NULL AND verify_lease_until < ?)
            OR (verify_lease_until IS NULL AND verify_started_at < ?))`,
-      [recoveryOwner, now + VERIFY_LEASE_MS, now, session.id, now, now - LEGACY_VERIFY_LEASE_MS],
+      [recoveryOwner, now + this.verifyLeaseMs, now, session.id, now, now - LEGACY_VERIFY_LEASE_MS],
     ));
     if (claimResult.changes !== 1) {
       return; // 已被并发接管或 owner 刚刷新租约
     }
 
-    const storedName = session.finalStoredName;
-    if (!storedName) {
-      // 无 final_stored_name（阶段一未持久化，异常）：防御性回退 uploading。
-      await this.sqliteTransactions.run(async (connection) => {
-        await connection.run(
+    const heartbeat = this.startVerifyHeartbeat(session.id, recoveryOwner);
+    try {
+      const storedName = session.finalStoredName;
+      if (!storedName) {
+        // 无 final_stored_name（阶段一未持久化，异常）：防御性回退 uploading。
+        await heartbeat.refreshNow();
+        await this.sqliteTransactions.run((connection) => connection.run(
           `UPDATE upload_sessions
              SET status = 'uploading', verify_started_at = NULL,
                  verify_owner_token = NULL, verify_lease_until = NULL, verify_heartbeat_at = NULL
-           WHERE id = ? AND status = 'verifying' AND verify_owner_token = ?`,
-          [session.id, recoveryOwner],
-        );
-      });
-      return;
-    }
+           WHERE id = ? AND status = 'verifying' AND verify_owner_token = ? AND verify_lease_until > ?`,
+          [session.id, recoveryOwner, Date.now()],
+        ));
+        return;
+      }
 
-    try {
       // ---- 2. 事务外：判定能否完成 ----
       const stats = await this.storageService.getFileStats(storedName).catch(() => null);
+      heartbeat.assertOwned();
       let canFinalize = stats && Number(stats.size) === session.expectedSize;
       let actualHash: string | null = null;
       if (canFinalize) {
-        actualHash = await this.storageService.calculateFileHash(this.storageService.getFinalPath(storedName)).catch(() => null);
+        actualHash = await this.storageService.calculateFileHash(this.storageService.getFinalPath(storedName), heartbeat.signal).catch(() => null);
+        heartbeat.assertOwned();
         if (session.expectedHash && actualHash !== session.expectedHash) canFinalize = false;
       }
 
@@ -240,28 +253,41 @@ export class FileLifecycleService implements OnApplicationBootstrap {
           `SELECT COUNT(*) AS cnt FROM upload_parts WHERE upload_id = ? AND status = 'ready'`,
           [session.id],
         );
+        heartbeat.assertOwned();
         if (Number(readyParts[0].cnt) === totalParts) {
-          await this.storageService.combineParts(session.id, totalParts, this.storageService.getFinalPath(`${storedName}.tmp`));
+          await heartbeat.refreshNow();
+          await this.storageService.combineParts(
+            session.id,
+            totalParts,
+            this.storageService.getFinalPath(`${storedName}.tmp`),
+            heartbeat.signal,
+          );
+          await heartbeat.refreshNow();
           const fs = await import('fs/promises');
+          heartbeat.assertOwned();
           await fs.rename(this.storageService.getFinalPath(`${storedName}.tmp`), this.storageService.getFinalPath(storedName));
-          actualHash = await this.storageService.calculateFileHash(this.storageService.getFinalPath(storedName)).catch(() => null);
+          heartbeat.assertOwned();
+          actualHash = await this.storageService.calculateFileHash(this.storageService.getFinalPath(storedName), heartbeat.signal).catch(() => null);
+          heartbeat.assertOwned();
           canFinalize = actualHash !== null && (!session.expectedHash || actualHash === session.expectedHash);
         }
       }
 
       if (canFinalize) {
-        await this.finishVerifyingUpload(session, storedName, actualHash, recoveryOwner);
+        await this.finishVerifyingUpload(session, storedName, actualHash, recoveryOwner, heartbeat);
         return;
       }
 
       // ---- 3. 标记 failed（带 owner 守卫）----
+      await heartbeat.refreshNow();
       const failed = await this.sqliteTransactions.run((connection) => connection.run(
         `UPDATE upload_sessions SET status = 'failed', failure_reason = 'verify recovery: final file unavailable',
            verify_owner_token = NULL, verify_lease_until = NULL, verify_heartbeat_at = NULL
-         WHERE id = ? AND status = 'verifying' AND verify_owner_token = ?`,
-        [session.id, recoveryOwner],
+         WHERE id = ? AND status = 'verifying' AND verify_owner_token = ? AND verify_lease_until > ?`,
+        [session.id, recoveryOwner, Date.now()],
       ));
       if (failed.changes !== 1) return; // 期间已被其他 owner 接管；不可删它正在发布的文件
+      await this.stopVerifyHeartbeat(heartbeat);
       await this.storageService.deleteFile(storedName).catch(() => {});
       await this.storageService.deleteUploadTempDir(session.id).catch(() => {});
       this.logger.warn(`Marked stuck verifying upload ${session.id} as failed`);
@@ -273,6 +299,8 @@ export class FileLifecycleService implements OnApplicationBootstrap {
         [session.id, recoveryOwner],
       )).catch(() => {});
       throw err;
+    } finally {
+      await this.stopVerifyHeartbeat(heartbeat);
     }
   }
 
@@ -280,13 +308,21 @@ export class FileLifecycleService implements OnApplicationBootstrap {
    * 恢复任务执行的阶段三：与 completeUpload 阶段三完全同构（v1.7 阻断 3 affected 检查）。
    * BEGIN IMMEDIATE 内 INSERT files + 条件 UPDATE（带 owner 守卫）；affected=0 时重查幂等或回滚。
    */
-  private async finishVerifyingUpload(session: StuckVerifyingUpload, storedName: string, actualHash: string | null, recoveryOwner: string): Promise<void> {
+  private async finishVerifyingUpload(
+    session: StuckVerifyingUpload,
+    storedName: string,
+    actualHash: string | null,
+    recoveryOwner: string,
+    heartbeat: UploadVerifyHeartbeat,
+  ): Promise<void> {
     const storageSettings = await this.settingsService.getStorageSettings();
+    await heartbeat.refreshNow();
     const fileExpiresAt = storageSettings.default_expire_hours > 0
       ? Date.now() + storageSettings.default_expire_hours * 60 * 60 * 1000
       : null;
 
     const newFileId = uuidv4();
+    heartbeat.assertOwned();
     await this.sqliteTransactions.run(async (connection) => {
       const now = Date.now();
 
@@ -301,8 +337,8 @@ export class FileLifecycleService implements OnApplicationBootstrap {
       const updateResult = await connection.run(
         `UPDATE upload_sessions SET status = 'completed', completed_at = ?, failure_reason = NULL, final_file_id = ?,
            verify_owner_token = NULL, verify_lease_until = NULL, verify_heartbeat_at = NULL
-         WHERE id = ? AND status = 'verifying' AND verify_owner_token = ?`,
-        [now, newFileId, session.id, recoveryOwner],
+         WHERE id = ? AND status = 'verifying' AND verify_owner_token = ? AND verify_lease_until > ?`,
+        [now, newFileId, session.id, recoveryOwner, now],
       );
 
       if (updateResult.changes === 1) return;
@@ -319,6 +355,30 @@ export class FileLifecycleService implements OnApplicationBootstrap {
 
     this.logger.log(`Recovered verifying upload ${session.id} -> completed (file ${newFileId})`);
     this.storageService.deleteUploadTempDir(session.id).catch(() => {});
+  }
+
+  private startVerifyHeartbeat(uploadId: string, ownerToken: string): UploadVerifyHeartbeat {
+    const heartbeat = new UploadVerifyHeartbeat(
+      this.verifyHeartbeatIntervalMs,
+      () => this.refreshVerifyHeartbeat(uploadId, ownerToken),
+    ).start();
+    this.activeVerifyHeartbeats.add(heartbeat);
+    return heartbeat;
+  }
+
+  private async refreshVerifyHeartbeat(uploadId: string, ownerToken: string): Promise<boolean> {
+    const now = Date.now();
+    const result = await this.sqliteTransactions.run((connection) => connection.run(
+      `UPDATE upload_sessions SET verify_heartbeat_at = ?, verify_lease_until = ?
+       WHERE id = ? AND status = 'verifying' AND verify_owner_token = ? AND verify_lease_until > ?`,
+      [now, now + this.verifyLeaseMs, uploadId, ownerToken, now],
+    ));
+    return result.changes === 1;
+  }
+
+  private async stopVerifyHeartbeat(heartbeat: UploadVerifyHeartbeat): Promise<void> {
+    await heartbeat.stop();
+    this.activeVerifyHeartbeats.delete(heartbeat);
   }
 
   /**
