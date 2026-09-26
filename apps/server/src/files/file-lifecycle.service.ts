@@ -16,6 +16,9 @@ const RECEIVING_TIMEOUT_MS = 10 * 60 * 1000; // receiving 分块超 10 分钟（
 const BATCH_SIZE = 100;
 const VERIFY_LEASE_MS = 10 * 60 * 1000;
 const LEGACY_VERIFY_LEASE_MS = 5 * 60 * 1000;
+const UUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const OWNER_VERIFY_TEMP_PATTERN = new RegExp(`^(${UUID_PATTERN})\\.verify-(${UUID_PATTERN})\\.tmp$`, 'i');
+const LEGACY_VERIFY_TEMP_PATTERN = new RegExp(`^(${UUID_PATTERN})\\.tmp$`, 'i');
 
 interface StuckVerifyingUpload {
   id: string;
@@ -256,17 +259,24 @@ export class FileLifecycleService implements OnApplicationBootstrap, OnModuleDes
         heartbeat.assertOwned();
         if (Number(readyParts[0].cnt) === totalParts) {
           await heartbeat.refreshNow();
+          const tempPath = this.storageService.getVerificationTempPath(storedName, recoveryOwner);
           await this.storageService.combineParts(
             session.id,
             totalParts,
-            this.storageService.getFinalPath(`${storedName}.tmp`),
+            tempPath,
             heartbeat.signal,
           );
-          await heartbeat.refreshNow();
-          const fs = await import('fs/promises');
-          heartbeat.assertOwned();
-          await fs.rename(this.storageService.getFinalPath(`${storedName}.tmp`), this.storageService.getFinalPath(storedName));
-          heartbeat.assertOwned();
+          try {
+            await heartbeat.refreshNow();
+            const fs = await import('fs/promises');
+            heartbeat.assertOwned();
+            await fs.rename(tempPath, this.storageService.getFinalPath(storedName));
+            heartbeat.assertOwned();
+          } catch (error) {
+            const fs = await import('fs/promises');
+            await fs.unlink(tempPath).catch(() => {});
+            throw error;
+          }
           actualHash = await this.storageService.calculateFileHash(this.storageService.getFinalPath(storedName), heartbeat.signal).catch(() => null);
           heartbeat.assertOwned();
           canFinalize = actualHash !== null && (!session.expectedHash || actualHash === session.expectedHash);
@@ -411,15 +421,11 @@ export class FileLifecycleService implements OnApplicationBootstrap, OnModuleDes
    * 1) temp/<upload_id>/ 目录但 upload_sessions 不存在 → 整目录删除
    * 2) 会话为 completed/aborted/expired/failed → 整目录删除
    * 3) 会话为 initiated/uploading/verifying → 只删 *.part.tmp（owner 临时文件），保留 part_*.part
+   * 4) storage 根目录只回收租约失效的 owner verify staging 与旧版共享 .tmp；活 owner 的 staging 保留
    */
   async scanOrphanTempFiles(): Promise<void> {
     const tempRoot = this.storageService.getTempRoot();
-    let entries: string[];
-    try {
-      entries = await fs.readdir(tempRoot);
-    } catch {
-      return; // temp 根目录不存在
-    }
+    const entries = await fs.readdir(tempRoot).catch(() => [] as string[]);
 
     for (const uploadId of entries) {
       const dir = join(tempRoot, uploadId);
@@ -437,6 +443,40 @@ export class FileLifecycleService implements OnApplicationBootstrap, OnModuleDes
         if (name.endsWith('.part.tmp')) {
           await fs.unlink(join(dir, name)).catch(() => {});
         }
+      }
+    }
+
+    await this.scanOrphanVerificationTempFiles();
+  }
+
+  /** Reclaim per-owner staging files left by crashes; a live lease protects its exact path. */
+  private async scanOrphanVerificationTempFiles(): Promise<void> {
+    const storageRoot = this.storageService.getStorageRoot();
+    const entries = await fs.readdir(storageRoot).catch(() => [] as string[]);
+    for (const name of entries) {
+      const ownerMatch = name.match(OWNER_VERIFY_TEMP_PATTERN);
+      const legacyMatch = ownerMatch ? null : name.match(LEGACY_VERIFY_TEMP_PATTERN);
+      if (!ownerMatch && !legacyMatch) continue;
+
+      const storedName = (ownerMatch ?? legacyMatch)![1];
+      const ownerToken = ownerMatch?.[2];
+      const now = Date.now();
+      const active = ownerToken
+        ? await this.dataSource.query(
+          `SELECT 1 FROM upload_sessions
+           WHERE final_stored_name = ? AND status = 'verifying'
+             AND verify_owner_token = ? AND verify_lease_until > ? LIMIT 1`,
+          [storedName, ownerToken, now],
+        )
+        : await this.dataSource.query(
+          `SELECT 1 FROM upload_sessions
+           WHERE final_stored_name = ? AND status = 'verifying'
+             AND (verify_lease_until > ? OR (verify_lease_until IS NULL AND verify_started_at > ?))
+           LIMIT 1`,
+          [storedName, now, now - LEGACY_VERIFY_LEASE_MS],
+        );
+      if (active.length === 0) {
+        await fs.unlink(join(storageRoot, name)).catch(() => {});
       }
     }
   }

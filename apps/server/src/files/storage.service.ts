@@ -28,6 +28,10 @@ export class StorageService implements OnApplicationBootstrap {
     return this.tempPath;
   }
 
+  getStorageRoot(): string {
+    return this.storagePath;
+  }
+
   getUploadTempDir(uploadId: string): string {
     return join(this.tempPath, uploadId);
   }
@@ -42,6 +46,11 @@ export class StorageService implements OnApplicationBootstrap {
 
   getFinalPath(storedName: string): string {
     return join(this.storagePath, storedName);
+  }
+
+  /** Each verification owner stages to a distinct path so an obsolete owner cannot unlink its successor's output. */
+  getVerificationTempPath(storedName: string, ownerToken: string): string {
+    return this.getFinalPath(`${storedName}.verify-${ownerToken}.tmp`);
   }
 
   async createUploadTempDir(uploadId: string): Promise<void> {

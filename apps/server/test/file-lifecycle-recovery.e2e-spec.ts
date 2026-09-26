@@ -3,7 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
 import request from 'supertest';
 import { createHash } from 'crypto';
-import { access, writeFile } from 'fs/promises';
+import { access, readFile, writeFile } from 'fs/promises';
+import { PassThrough } from 'stream';
 import { createApp, initAndLogin, setupEnv, teardownEnv, type TestEnv } from './helpers';
 import { FileLifecycleService } from '../src/files/file-lifecycle.service';
 import { StorageService } from '../src/files/storage.service';
@@ -196,6 +197,39 @@ describe('File lifecycle verifying recovery (SQLite integration)', () => {
     expect(session.verify_owner_token).toBeNull();
   });
 
+  it('preserves live verification temp files and removes stale owner and legacy temp files', async () => {
+    const liveContent = Buffer.from('live-verification-temp');
+    const staleContent = Buffer.from('stale-verification-temp');
+    const { id: liveId } = await createUpload('live-verify-temp.bin', liveContent);
+    const { id: staleId } = await createUpload('stale-verify-temp.bin', staleContent);
+    const liveStoredName = '11111111-1111-4111-8111-111111111111';
+    const staleStoredName = '22222222-2222-4222-8222-222222222222';
+    const liveOwner = '33333333-3333-4333-8333-333333333333';
+    const staleOwner = '44444444-4444-4444-8444-444444444444';
+    await markVerifying(liveId, liveStoredName, { leaseUntil: Date.now() + 60_000 });
+    await markVerifying(staleId, staleStoredName);
+    await dataSource.query(`UPDATE upload_sessions SET verify_owner_token = ?, verify_lease_until = ? WHERE id = ?`,
+      [liveOwner, Date.now() + 60_000, liveId]);
+    await dataSource.query(`UPDATE upload_sessions SET verify_owner_token = ? WHERE id = ?`, [staleOwner, staleId]);
+
+    const liveTemp = storage.getFinalPath(`${liveStoredName}.verify-${liveOwner}.tmp`);
+    const liveLegacyTemp = storage.getFinalPath(`${liveStoredName}.tmp`);
+    const staleTemp = storage.getFinalPath(`${staleStoredName}.verify-${staleOwner}.tmp`);
+    const legacyTemp = storage.getFinalPath(`${staleStoredName}.tmp`);
+    await writeFile(liveTemp, liveContent);
+    await writeFile(liveLegacyTemp, liveContent);
+    await writeFile(staleTemp, staleContent);
+    await writeFile(legacyTemp, staleContent);
+
+    await lifecycle.scanOrphanTempFiles();
+
+    expect(await readFile(liveTemp)).toEqual(liveContent);
+    expect(await readFile(liveLegacyTemp)).toEqual(liveContent);
+    await expect(access(staleTemp)).rejects.toThrow();
+    await expect(access(legacyTemp)).rejects.toThrow();
+    await dataSource.query(`UPDATE upload_sessions SET status = 'aborted' WHERE id IN (?, ?)`, [liveId, staleId]);
+  });
+
   it('keeps a recovery owner alive across a short lease while file inspection is gated', async () => {
     const content = Buffer.from('recovery-heartbeat-holds-lease');
     const { id } = await createUpload('recover-heartbeat.bin', content);
@@ -271,8 +305,10 @@ describe('File lifecycle verifying recovery (SQLite integration)', () => {
     const combineEntered = deferred();
     const releaseCombine = deferred();
     let combineSignal: AbortSignal | undefined;
+    let combineTempPath: string | undefined;
     const combineSpy = jest.spyOn(storage, 'combineParts').mockImplementation(async (...args: any[]) => {
       combineSignal = args[3];
+      combineTempPath = args[2];
       combineEntered.resolve();
       await releaseCombine.promise;
       return originalCombine(args[0], args[1], args[2], combineSignal);
@@ -306,9 +342,128 @@ describe('File lifecycle verifying recovery (SQLite integration)', () => {
     expect((await readSession(id)).verify_owner_token).toBe('replacement-owner');
     expect((await readSession(id)).status).toBe('verifying');
     expect(await storage.fileExists(storedName)).toBe(false);
-    await expect(access(storage.getFinalPath(`${storedName}.tmp`))).rejects.toThrow();
+    await expect(access(combineTempPath!)).rejects.toThrow();
     const [files] = await dataSource.query(`SELECT COUNT(*) AS count FROM files WHERE stored_name = ?`, [storedName]);
     expect(Number(files.count)).toBe(0);
+    expect((lifecycle as any).activeVerifyHeartbeats?.size).toBe(0);
+  });
+
+  it('keeps a replacement recovery combine intact while the old owner cleans up its aborted stream', async () => {
+    const content = Buffer.from('replacement-owner-must-survive-old-cleanup');
+    const { id } = await createUpload('recover-double-owner.bin', content);
+    const storedName = 'recovery-double-owner-final';
+    await markVerifying(id, storedName);
+
+    const partPath = storage.getPartPath(id, 0);
+    const replacementTempReady = deferred();
+    const releaseOldCleanup = deferred();
+    const releaseReplacementCombine = deferred();
+    const blockedPartRead = new PassThrough();
+    let didBlockOldRead = false;
+    let didGateOldCleanup = false;
+    let combineCalls = 0;
+    let oldTmpPath: string | undefined;
+    let replacementTmpPath: string | undefined;
+
+    const fsRuntime = require('fs') as typeof import('fs');
+    const originalCreateReadStream = fsRuntime.createReadStream.bind(fsRuntime);
+    const originalUnlink = fsRuntime.promises.unlink.bind(fsRuntime.promises);
+    const originalCombine = storage.combineParts.bind(storage);
+    const readStreamSpy = jest.spyOn(fsRuntime as any, 'createReadStream').mockImplementation((...args: any[]) => {
+      const path = args[0] as string;
+      if (String(path) === partPath && !didBlockOldRead) {
+        didBlockOldRead = true;
+        return blockedPartRead;
+      }
+      return (originalCreateReadStream as any)(...args);
+    });
+    const unlinkSpy = jest.spyOn(fsRuntime.promises as any, 'unlink').mockImplementation(async (...args: any[]) => {
+      const path = args[0] as string;
+      if (oldTmpPath && String(path) === oldTmpPath && !didGateOldCleanup) {
+        didGateOldCleanup = true;
+        await releaseOldCleanup.promise;
+      }
+      return (originalUnlink as any)(...args);
+    });
+    const combineSpy = jest.spyOn(storage, 'combineParts').mockImplementation(async (
+      uploadId: string,
+      totalParts: number,
+      finalPath: string,
+      signal?: AbortSignal,
+    ) => {
+      combineCalls += 1;
+      if (combineCalls === 1) oldTmpPath = finalPath;
+      else replacementTmpPath = finalPath;
+
+      await originalCombine(uploadId, totalParts, finalPath, signal);
+      if (combineCalls === 2) {
+        replacementTempReady.resolve();
+        await releaseReplacementCombine.promise;
+      }
+    });
+
+    const originalLeaseMs = (lifecycle as any).verifyLeaseMs;
+    const originalHeartbeatIntervalMs = (lifecycle as any).verifyHeartbeatIntervalMs;
+    (lifecycle as any).verifyLeaseMs = 180;
+    (lifecycle as any).verifyHeartbeatIntervalMs = 15;
+    const secondLifecycle = new FileLifecycleService(
+      dataSource.getRepository(File),
+      dataSource.getRepository(UploadSession),
+      storage,
+      app.get(SettingsService),
+      dataSource,
+      new SqliteImmediateTransactionService(app.get(ConfigService)),
+    );
+    const oldRecovery = lifecycle.recoverVerifyingUploads();
+    let secondRecovery: Promise<void> | undefined;
+    let testError: unknown;
+    let replacementBytesAfterOldCleanup: Buffer | undefined;
+
+    try {
+      await waitForCondition(() => didBlockOldRead, 'old owner to enter the real part read stream');
+      await waitForCondition(async () => {
+        if (!oldTmpPath) return false;
+        try { await access(oldTmpPath); return true; } catch { return false; }
+      }, 'old owner to create its real combine output');
+
+      await dataSource.query(
+        `UPDATE upload_sessions SET verify_owner_token = 'replacement-placeholder', verify_lease_until = ? WHERE id = ?`,
+        [Date.now() - 1, id],
+      );
+      await waitForCondition(() => didGateOldCleanup, 'old owner abort cleanup to reach its gated unlink');
+
+      secondRecovery = secondLifecycle.recoverVerifyingUploads();
+      await waitForCondition(() => combineCalls === 2, 'replacement owner to enter real combineParts');
+      await replacementTempReady.promise;
+      expect(replacementTmpPath).toBeTruthy();
+      expect(replacementTmpPath).not.toBe(oldTmpPath);
+
+      releaseOldCleanup.resolve();
+      await oldRecovery;
+      await expect(access(oldTmpPath!)).rejects.toThrow();
+      replacementBytesAfterOldCleanup = await readFile(replacementTmpPath!);
+    } catch (error) {
+      testError = error;
+    } finally {
+      blockedPartRead.destroy();
+      releaseOldCleanup.resolve();
+      releaseReplacementCombine.resolve();
+      await oldRecovery;
+      await secondRecovery;
+      await secondLifecycle.onModuleDestroy();
+      readStreamSpy.mockRestore();
+      unlinkSpy.mockRestore();
+      combineSpy.mockRestore();
+      (lifecycle as any).verifyLeaseMs = originalLeaseMs;
+      (lifecycle as any).verifyHeartbeatIntervalMs = originalHeartbeatIntervalMs;
+    }
+
+    if (testError) throw testError;
+    expect(replacementBytesAfterOldCleanup).toEqual(content);
+    expect(await readFile(storage.getFinalPath(storedName))).toEqual(content);
+    expect((await readSession(id)).status).toBe('completed');
+    const [files] = await dataSource.query(`SELECT COUNT(*) AS count FROM files WHERE stored_name = ?`, [storedName]);
+    expect(Number(files.count)).toBe(1);
     expect((lifecycle as any).activeVerifyHeartbeats?.size).toBe(0);
   });
 
@@ -388,8 +543,10 @@ describe('File lifecycle verifying recovery (SQLite integration)', () => {
     const combineEntered = deferred();
     const releaseCombine = deferred();
     let combineSignal: AbortSignal | undefined;
+    let combineTempPath: string | undefined;
     const combineSpy = jest.spyOn(storage, 'combineParts').mockImplementation(async (...args: any[]) => {
       combineSignal = args[3];
+      combineTempPath = args[2];
       combineEntered.resolve();
       await releaseCombine.promise;
       return originalCombine(args[0], args[1], args[2], combineSignal);
@@ -420,7 +577,8 @@ describe('File lifecycle verifying recovery (SQLite integration)', () => {
     if (gateError) throw gateError;
 
     const session = await readSession(id);
-    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(response.status).toBe(409);
+    expect(response.body.message?.code ?? response.body.code ?? response.body.error?.code).toBe('UPLOAD_FINALIZE_LOST');
     expect(session.status).toBe('verifying');
     expect(session.verify_owner_token).toBe('replacement-complete-owner');
     const [{ final_stored_name: storedName }] = await dataSource.query(
@@ -428,7 +586,7 @@ describe('File lifecycle verifying recovery (SQLite integration)', () => {
       [id],
     );
     expect(await storage.fileExists(storedName)).toBe(false);
-    await expect(access(storage.getFinalPath(`${storedName}.tmp`))).rejects.toThrow();
+    await expect(access(combineTempPath!)).rejects.toThrow();
     const [files] = await dataSource.query(`SELECT COUNT(*) AS count FROM files WHERE stored_name = ?`, [storedName]);
     expect(Number(files.count)).toBe(0);
     expect(uploads.activeVerifyHeartbeats.size).toBe(0);

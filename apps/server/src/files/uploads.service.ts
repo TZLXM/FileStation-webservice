@@ -262,7 +262,7 @@ export class UploadsService implements OnModuleDestroy {
    * 阶段一 BEGIN IMMEDIATE：条件 UPDATE 抢占，COALESCE 持久化 final_stored_name + 写入租约
    *   （verify_owner_token/verify_lease_until/verify_heartbeat_at）。
    *   v1.7 阻断 1：不再写 final_file_id（REFERENCES files(id) 外键，阶段三才创建文件）。
-   * 阶段二事务外：用持久化 final_stored_name 合并（.tmp + fsync + 原子 rename）+ 校验；心跳持续到阶段三提交。
+   * 阶段二事务外：用持久化 final_stored_name 合并到 owner 专属 staging、fsync、原子 rename 并校验；心跳持续到阶段三提交。
    *   v1.7 阻断 2：阶段一提交后用 findOneByOrFail 重新加载实体（原生 SQL 不映射驼峰）。
    * 阶段三 BEGIN IMMEDIATE：INSERT files + UPDATE ... WHERE status='verifying' AND owner 匹配。
    *   v1.7 阻断 3：检查条件 UPDATE affected；0 时事务内重查（completed 同文件→幂等，否则回滚）。
@@ -328,7 +328,7 @@ export class UploadsService implements OnModuleDestroy {
     // v1.7 阻断 2：用 TypeORM 重新加载实体（原生 SQL 返回 snake_case，Repository.create 不映射驼峰）
     const claimedSession = await this.uploadsRepository.findOneByOrFail({ id: uploadId });
 
-    // ---------- 阶段二：事务外合并与校验（.tmp + fsync + rename + 心跳刷新）----------
+    // ---------- 阶段二：事务外合并与校验（owner staging + fsync + rename + 心跳刷新）----------
     const finalStoredName = claimedSession.finalStoredName!;
     const heartbeat = this.startVerifyHeartbeat(uploadId, ownerToken);
     try {
@@ -345,9 +345,8 @@ export class UploadsService implements OnModuleDestroy {
         }
       }
 
-      // 合并到 .tmp 并 fsync + 原子 rename（v1.7 阻断 4：原子最终文件发布）
-      // combineParts 内部只写 .tmp；owner 心跳覆盖合并、rename、hash、settings 和阶段三。
-      await this.combinePartsWithHeartbeat(uploadId, totalParts, finalStoredName, heartbeat);
+      // 合并到 owner 专属 staging 并 fsync + 原子 rename；owner 心跳覆盖合并、rename、hash、settings 和阶段三。
+      await this.combinePartsWithHeartbeat(uploadId, totalParts, finalStoredName, ownerToken, heartbeat);
 
       // 校验最终哈希（优先请求 final_hash，其次初始化 expected_hash）；持久化实际计算值
       heartbeat.assertOwned();
@@ -416,6 +415,13 @@ export class UploadsService implements OnModuleDestroy {
       } catch (leaseError) {
         if (leaseError instanceof VerifyLeaseError && leaseError.reason === 'cancelled') {
           await this.releaseVerifyLease(uploadId, ownerToken);
+          if (requestSignal?.aborted) throw this.createAbortError();
+        }
+        if (leaseError instanceof VerifyLeaseError && leaseError.reason === 'lost') {
+          throw new ConflictException({
+            code: 'UPLOAD_FINALIZE_LOST',
+            message: 'Lost finalize ownership (lease taken over or state changed)',
+          });
         }
         throw leaseError;
       }
@@ -552,28 +558,36 @@ export class UploadsService implements OnModuleDestroy {
   }
 
   /**
-   * 合并分块到 <stored_name>.tmp + fsync + 原子 rename 到正式路径（v1.7 阻断 4 原子发布）。
-   * 全流程 heartbeat 由 completeUpload 管理，此处在发布 .tmp 前同步确认 owner 仍有效。
+   * 合并分块到 owner 专属 staging 文件 + fsync + 原子 rename 到正式路径。
+   * 全流程 heartbeat 由 completeUpload 管理，此处在发布正式文件前同步确认 owner 仍有效。
    */
   private async combinePartsWithHeartbeat(
     uploadId: string,
     totalParts: number,
     storedName: string,
+    ownerToken: string,
     heartbeat: UploadVerifyHeartbeat,
   ): Promise<void> {
-    const tmpPath = this.storageService.getFinalPath(`${storedName}.tmp`);
+    const tmpPath = this.storageService.getVerificationTempPath(storedName, ownerToken);
     const finalPath = this.storageService.getFinalPath(storedName);
 
     heartbeat.assertOwned();
-    // 合并到 .tmp（StorageService.combineParts 内部流式 + fsync .tmp）
-    await this.storageService.combineParts(uploadId, totalParts, tmpPath, heartbeat.signal);
-    await heartbeat.refreshNow();
-    heartbeat.assertOwned();
+    try {
+      // StorageService 流式写入并 fsync owner 专属 staging 文件。
+      await this.storageService.combineParts(uploadId, totalParts, tmpPath, heartbeat.signal);
+      await heartbeat.refreshNow();
+      heartbeat.assertOwned();
 
-    // fsync 已由 combineParts 完成；原子 rename 到正式路径
-    const fs = await import('fs/promises');
-    await fs.rename(tmpPath, finalPath);
-    heartbeat.assertOwned();
+      // fsync 已由 combineParts 完成；发布前再次确认当前 owner。
+      const fs = await import('fs/promises');
+      await fs.rename(tmpPath, finalPath);
+      heartbeat.assertOwned();
+    } catch (error) {
+      // staging 路径包含本 owner token；失权后只清理自己的未发布文件。
+      const fs = await import('fs/promises');
+      await fs.unlink(tmpPath).catch(() => {});
+      throw error;
+    }
   }
 
   /** 刷新 finalizer 租约心跳（仅当仍是 owner 且 verifying） */
