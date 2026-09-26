@@ -272,7 +272,6 @@ git diff --check
 |------|------|--------|
 | `FILESTATION_STORAGE_PATH` | 文件存储路径 | `./data/storage` |
 | `FILESTATION_DB_PATH` | SQLite 数据库路径 | `./data/filestation.db` |
-| `FILESTATION_INIT_TOKEN` | 初始化 Token（可选） | 自动生成 |
 | `FILESTATION_PORT` | 服务端口 | `8080` |
 | `JWT_SECRET` | JWT 与 TOTP 密文 key 派生 | 生产环境必须设置且保持稳定 |
 
@@ -284,7 +283,7 @@ git diff --check
 - [ ] 数据库迁移测试通过
 - [ ] 审阅并处置 `npm audit` Critical/High；如保留例外需单独记录风险接受，不能把有 Critical/High 的审计称为通过
 - [ ] 版本号更新（SemVer）
-- [ ] CHANGELOG 更新
+- [ ] 若仓库维护 CHANGELOG 文件则更新；当前仓库没有 CHANGELOG，以 `docs/CURRENT-STATE.md` 记录变更和验证
 
 ## 12. 禁止事项
 

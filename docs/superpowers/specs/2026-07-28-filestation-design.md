@@ -96,7 +96,7 @@ proxy_set_header Host $host;
 **Node.js 绑定（以启动命令为准）：**
 - `npm start`：`0.0.0.0:8080`，静态托管开启。
 - `npm run start:bynginx`：`127.0.0.1:8080`，静态托管关闭。
-- 公网反代应覆盖而非保留客户端提供的安全相关头；应用当前不启用 Express `trust proxy`，因此代理后的 `req.ip`/协议/绝对 MCP 分享 URL 不应被当作原始客户端事实。MCP 返回的相对 `share_url` 是规范链接。
+- 公网反代应覆盖而非保留客户端提供的安全相关头；应用当前不启用 Express `trust proxy`，因此反代请求的 `req.ip` 是应用看到的直接上游（Nginx 模式通常为代理地址），审计 IP 不是原始客户端 IP。`McpController` 的 `share_url_absolute` 按 `req.protocol` 与 `Host` 头生成；反代后的 scheme/Host 不受信任，不能作为安全 origin。MCP 返回的相对 `share_url` 是规范链接；Phase 3 入口功能应使用配置并校验过的 `public_base_url` 生成公开链接。
 
 ### 3.3 初始化安全（一次性 Token；Nginx 可选加强）
 
@@ -653,46 +653,31 @@ temp/<upload_id>/
 - 用途：仅内容下载，不用于其他 API
 - 响应头：`Referrer-Policy: no-referrer`, `Cache-Control: private, no-store`
 
-### 5.3 认证流程（完整）
+### 5.3 当前认证流程（as-built）
 
-**密码登录 + TOTP：**
+**管理员密码登录与 TOTP：**
 ```
 POST /api/v1/auth/login
 {username, password}
 
-← {
-    requires_second_factor: true,
-    login_challenge: "ch_abc123...",  -- 5分钟有效，单次使用
-    available_methods: ["totp", "webauthn"]
-}
+当管理员已启用 TOTP：
+← {requires_second_factor: true, login_challenge, available_methods: ["totp"]}  // challenge 5 分钟有效、单次使用
 
 POST /api/v1/auth/login/totp
 {login_challenge, totp_code}
 
-← {
-    access_token,
-    refresh_token,
-    expires_in
-}
+当管理员尚未启用 TOTP 时，密码登录直接完成；两种成功路径都会在响应体返回 access_token 与 expires_in，刷新凭据不在响应体中。
+成功响应通过 Set-Cookie 设置 refresh_token（HttpOnly、SameSite=Strict、生产环境 Secure，7 天）。
+
+POST /api/v1/auth/refresh
+从 HttpOnly refresh_token Cookie 读取并轮换会话凭据；响应体返回新的 access_token、expires_in、username，刷新凭据仍通过 Set-Cookie 返回。
 ```
 
-**WebAuthn 登录：**
-```
-POST /api/v1/auth/login
-{username, password}
+单管理员模式下，`totp_required` 不是选择“是否对登录追加二次验证”的开关：只要账户存在 active TOTP，密码登录就总是要求 TOTP challenge。该设置只约束策略状态——开启前必须已有 active TOTP；开启后禁止移除 TOTP，须先关闭该要求。
 
-← {requires_second_factor: true, login_challenge, available_methods: ["webauthn"]}
+WebAuthn 登录/注册端点尚未实现，属于 Phase 4 路线图；当前两步登录响应的 `available_methods` 仅包含 `totp`。
 
-POST /api/v1/auth/login/webauthn/options
-{login_challenge}
-← {publicKeyCredentialRequestOptions}
-
-POST /api/v1/auth/login/webauthn/verify
-{login_challenge, credential}
-← {access_token, refresh_token}
-```
-
-**API Token 交换：**
+**API Token 交换（REST API）：**
 ```
 POST /api/v1/auth/api-token/exchange
 Authorization: Bearer fs_api_xxx
@@ -702,6 +687,8 @@ Authorization: Bearer fs_api_xxx
     expires_in
 }
 ```
+
+REST exchange 会签发 1 小时 `principal_type: api_token` JWT；受保护 API 请求仍从数据库读取其 backing Token 行及 scopes，并检查撤销/到期，因此吊销后后续 JWT 请求会被拒绝，不会留下一个可独立使用至 1 小时届满的 JWT。已开始处理的在途请求不会被追溯取消。MCP 则走另一条认证路径：每个 `/api/v1/mcp` 请求直接使用 API Token（其有效期可由创建时设置），不先 exchange 为 JWT；两条路径的后续请求均受 backing Token 撤销/到期状态约束。
 
 **API Token 权限限制：**
 - 默认不能管理其他 Token
@@ -838,7 +825,7 @@ Referrer-Policy: no-referrer
 
 | 方法 | 端点 | 认证/说明 |
 |------|------|------|
-| POST | `/api/v1/uploads` | 管理员 JWT + `files:write`；初始化，单文件最大 100 GiB，分块 64 KiB–64 MiB |
+| POST | `/api/v1/uploads` | 管理员 JWT 放行；API Token JWT 必须有 `files:write`；初始化，单文件最大 100 GiB，分块 64 KiB–64 MiB |
 | PUT | `/api/v1/uploads/:id/parts/:partNumber` | `X-Upload-Token` + `X-Part-Checksum`；原始分块 body |
 | GET | `/api/v1/uploads/:id` | `X-Upload-Token`；查询状态 |
 | POST | `/api/v1/uploads/:id/resume` | `X-Upload-Token`；校验/续传并返回服务端分块状态 |
@@ -938,7 +925,8 @@ MCP 实际工具、权限 scope 和 body/上传上限见第 10.2 节；不要将
 
 ### 10.1 API Token 与 scope
 
-- Token 格式为 `fs_api_` + 48 位小写十六进制（192 bit 随机数）；明文只在创建响应显示一次，数据库保存 SHA-256 全值及 12 字符展示前缀。查验先校验格式，再对输入明文计算 SHA-256 并按 `token_hash` 全值精确查找，不以展示前缀认证。exchange 为 1 小时 JWT，JWT scope 不可提升：每次请求从 Token 行重新加载 scope，并检查撤销/到期。
+- Token 格式为 `fs_api_` + 48 位小写十六进制（192 bit 随机数）；明文只在创建响应显示一次，数据库保存 SHA-256 全值及 12 字符展示前缀。查验先校验格式，再对输入明文计算 SHA-256 并按 `token_hash` 全值精确查找，不以展示前缀认证。当前 `api_tokens.token_hash` 只有 `NOT NULL`，没有 `INDEX` 或 `UNIQUE` 约束；Token 仅服务于单管理员且预期数量较低，当前接受全表精确查找，发行时的 192-bit 随机数使重复值概率极低，但唯一性未由数据库强制。若规模或查询负载改变，应以数据库迁移审计已有 hash 后增加唯一索引，并验证写入与查找路径。
+- REST exchange 为 1 小时 `principal_type: api_token` JWT；JWT scope 不可提升，每次请求从 Token 行重新加载 scope 并检查撤销/到期，所以吊销后下一个 API 请求即拒绝。MCP 不经 exchange，直接在每个请求校验长期 API Token；吊销同样对后续请求生效，在途请求不会被追溯取消。
 - 管理路由为 `POST/GET /api/v1/api-tokens`、`DELETE /api/v1/api-tokens/:id`；管理员专属。exchange 路由为 `POST /api/v1/auth/api-token/exchange`。
 
 | Scope | 能力范围 |
@@ -954,7 +942,7 @@ MCP 实际工具、权限 scope 和 body/上传上限见第 10.2 节；不要将
 - MCP 默认关闭；开启后仅支持无状态 Streamable HTTP `POST /api/v1/mcp`，每个请求均以 `Authorization: Bearer <API_TOKEN>` 认证；GET/DELETE 返回 404。它直接用长期 API Token，不先 exchange JWT。
 - MCP 专用 JSON body 上限 16 MiB，仅在功能已启用且 Token 校验成功后解析；普通 JSON/urlencoded 请求仍使用 Express 默认 100 KiB 限制。
 - Agent 单文件上限 `mcp_max_upload_mb` 默认 32 MiB、可设 1–512 MiB；每个 MCP 上传分块的解码原始字节上限 8 MiB，支持 chunk 64 KiB–8 MiB，未显式传入时为 `min(8 MiB, transfer.default_chunk_size)`。空文件直接完成，不调用 `upload_part`。
-- MCP 工具共 11 个：`server_info`（有效 Token，无额外 scope）、`list_files`（`files:read`）、`list_folders`（`folders:read`）、`create_folder`（`folders:write`）、`upload_init`、`upload_part`、`complete_upload`、`delete_file`（后四项均 `files:write`）、`create_share`（`shares:write`）、`list_shares`（`shares:read`）、`revoke_share`（`shares:write`）。每次调用记为 `mcp.tool_called`，工具复用同一上传/分享业务服务。
+- MCP 工具共 11 个：`server_info`（有效 Token，无额外 scope）、`list_files`（`files:read`）、`list_folders`（`folders:read`）、`create_folder`（`folders:write`）、`upload_init`、`upload_part`、`complete_upload`、`delete_file`（后四项均 `files:write`）、`create_share`（`shares:write`）、`list_shares`（`shares:read`）、`revoke_share`（`shares:write`）。工具 handler 到达各自 audit callsite 时可能写 `mcp.tool_called`，并非每次调用尝试都会有记录：16 MiB 请求体上限/协议/schema 校验、认证、scope 拒绝，以及 `upload_init` 超单文件限制、`upload_part` Base64/解码字节大小校验均先于对应埋点。`server_info` 与列表工具在读取服务前记录；多数 mutation 工具在业务服务成功后记录，因此该 action 既不等价于所有 attempt 计数，也不保证每条都表示成功。工具复用同一上传/分享业务服务。
 - `share_url` 相对路径是规范值；绝对 URL 仅为便利展示，因代理头不受信任，不保证反代下 origin 正确。MCP SDK 锁定 `@modelcontextprotocol/sdk@1.30.1`、Zod `3.25.76`；协议客户端的具体配置格式由客户端决定，本项目不承诺某一桌面客户端配置模板。
 
 ### 10.3 TOTP 与恢复码
@@ -965,7 +953,7 @@ MCP 实际工具、权限 scope 和 body/上传上限见第 10.2 节；不要将
 
 ### 10.4 上传恢复与并发完成
 
-- 普通上传单文件最大 100 GiB，chunk 64 KiB–64 MiB，默认 chunk 8 MiB，session 有效期 24 小时。初始化用管理员 JWT + `files:write`；之后 parts/status/resume/complete/abort 由 `X-Upload-Token` 授权。
+- 普通上传单文件最大 100 GiB，chunk 64 KiB–64 MiB，默认 chunk 8 MiB，session 有效期 24 小时。初始化需管理员 JWT（admin principal 自动放行）或带 `files:write` 的 API Token JWT；之后 parts/status/resume/complete/abort 由 `X-Upload-Token` 授权。
 - complete 的 owner lease 为 10 分钟、每 30 秒 heartbeat；同进程观察者不持 SQLite 写事务等待最终状态，绝对等待上限 15 分钟；失去 owner 返回 `409 UPLOAD_FINALIZE_LOST`。DB 写入在 `BEGIN IMMEDIATE` 短事务，合并、hash 与文件 I/O 在事务外。
 - Owner staging 文件必须保持 `<stored UUID>.verify-<owner UUID>.tmp`；旧版 `<stored UUID>.tmp` 由有界兼容扫描回收。不要绕过 owner check 清理其他 owner staging。
 - **部署硬限制：不可让旧版本与新版本进程同时写同一数据库/存储目录。** 升级需先 drain/stop 所有旧进程再启动新版本；混版时旧进程仍使用共享 staging 名，数据库 lease 不是文件系统 CAS，无法保护新 owner 的 staging。

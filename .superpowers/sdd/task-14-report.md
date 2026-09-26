@@ -51,7 +51,21 @@ Registry metadata read-only checks：`sqlite3@6.0.1` Node `>=20.17.0`, peer `nod
 - `npm run lint --workspace=@filestation/server` 与 Web 等均 exit 1：没有 `eslint` 可执行文件；shared 无 lint script。
 - `CI=true npm test` 实际 exit 1：根脚本先运行 server 25/172/20 todo、Web 15/131 均通过，最终因 `packages/shared` 缺少 `test` script 失败；`npm run test --workspace=@filestation/shared` 显式 exit 1: `Missing script: "test"`。根聚合不能作为全绿证据；server/Web 显式通过。
 
+## Task14 review round 1 — REJECTED（5×P2）
+
+复核意见均回到实现与数据库结构确认后再更正文档；本轮没有改业务代码：
+
+1. **MCP audit 不是全量 attempt 日志。** 对照 `McpController`、`McpService`：`mcp.tool_called` 只在各 handler 到达埋点时写；请求体超 16 MiB、协议/schema/auth/scope 拒绝，以及 upload_init 单文件超限、upload_part Base64/解码字节拒绝都可能无 audit。`server_info`/列表工具在读取前审计，mutation 多数在服务成功后审计，不能把 action 解释成统一成功/失败结果。
+2. **Token hash schema 与双认证路径。** migration/entity 未给 `api_tokens.token_hash` 建索引或 UNIQUE；服务计算完整 SHA-256 并以 `findOne({ where: { tokenHash } })` 查找。文档说明单管理员低预期基数、192-bit 随机发行下的现状取舍与未来迁移索引/唯一约束方案。REST exchange 是 1h `api_token` JWT，JWT Guard 仍逐请求查询 backing row；MCP 每次直接校验 API Token。两种方式吊销后下一次鉴权请求拒绝，在途请求不回滚。
+3. **`totp_required` 不是二次验证选择器。** `AuthService.login` 对任何 active TOTP 都创建单次挑战；设置服务只要求开启策略前已有 active TOTP，`TotpService.disable` 在策略开启时拒绝禁用。当前单管理员语义已写准。
+4. **认证流程按 as-built 重写。** 登录 challenge 仅 `available_methods: ["totp"]`；refresh token 由 HttpOnly Cookie 传递，不在 JSON body；WebAuthn 登录/注册端点未实现，仍属 Phase 4。
+5. **修正环境变量、上传与反代事实。** AGENTS 删除代码不支持的 `FILESTATION_INIT_TOKEN`，无仓库 CHANGELOG 时要求记录 `docs/CURRENT-STATE.md`；普通上传初始化对 admin JWT 自动放行，但 API Token JWT 必须带 `files:write`；未启用 Express `trust proxy` 时审计 `req.ip` 是直接上游/Nginx peer，`share_url_absolute` 的 request scheme/Host 不可信，公开 URL 应待 Phase 3 用配置校验后的 `public_base_url`。
+
+修订验证：`npm run typecheck` exit 0；`git diff --check` exit 0（只有 LF→CRLF 提示）。复审修正提交后应安排新的独立审阅；发布安全门仍 blocked/pending。
+
 ## 最终状态
 
-- 文档更新可以提交并交给父 Agent 安排独立 GPT-5.6 Sol medium review。
+- 首轮独立 Task14 文档审阅结果为 **REJECTED，5×P2**。已逐项对照 Controller/Service、migration/entity、Nginx 配置和现有测试修正相关文档，没有改业务代码；修改范围为 AGENTS、CURRENT-STATE、ADR-0005 与设计文档。
+- 复审修正后验证：`npm run typecheck` exit 0；`git diff --check` exit 0（仅 LF→CRLF 提示）。其余代码测试此前在 Task14 初次提交前已完整运行，当前修正仅涉及 Markdown。
+- 当前修正提交后等待父 Agent 安排第二轮独立 review；不得将首轮 REJECTED 记为最终批准。
 - **Phase 2 发布批准仍 blocked/pending**：production dependency closure 存在 Critical `tar` + 13 High findings，尚未修复或由授权人正式接受；真实客户端/设备手动验收也未完成。自动化通过只表示实现验证完成，不代表发布验收完成。
