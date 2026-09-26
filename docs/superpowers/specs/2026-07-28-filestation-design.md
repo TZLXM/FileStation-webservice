@@ -1,18 +1,15 @@
-# FileStation 文件传输站 - 设计文档 v2.2
+# FileStation 文件传输站 - 设计文档 v2.3
 
 ## 1. 项目概述
 
 私有文件传输站 Web 应用，单管理员模式，支持多传输入口、灵活分享控制、细粒度权限管理。
 
-**核心特性：**
-- 多传输入口智能选路（直连 / 多 FRP 地址）
-- 文件 URL 直链（免密预览 / 密码保护 / 管理员验证）
-- 临时码授权访客上传下载
-- 文件自动过期 + 手动延长/永久保留
-- 全局限速 + 入口限速 + 角色限速
-- 多设备管理员认证（TOTP / API Token / WebAuthn）
-- 虚拟文件夹管理
-- WebUI 全配置
+**当前已实现核心能力（Phase 1/2）：**
+- 私有文件上传/下载、HTTP Range、分块续传、页面分享（免密/密码）、虚拟文件夹与自动到期清理
+- 管理员认证（密码 + TOTP/一次性恢复码）、API Token scopes、默认关闭的 MCP Agent 与审计
+- Web 管理设置、上传恢复 UI 与并发完成保护
+
+**后续路线图（尚未实现）：** 多传输入口智能选路、直链分享、临时码、全局/入口/角色限速、WebAuthn、P2P 与统计面板。
 
 **v2.2 核心修正：**
 - SQLite 兼容性：移除 FOR UPDATE，改用条件更新抢占
@@ -29,6 +26,10 @@
 - 文件夹删除：MVP 仅允许删除空文件夹
 - 临时码配额：reserved_files/completed_files 原子预留
 - 安全预览：MIME 白名单恢复，CSP sandbox
+
+**v2.3 实现状态说明：** v2.2 是历史设计基线；Phase 2 已实现细节、当前端点/限制和部署残余风险以第 10 节、`docs/CURRENT-STATE.md` 与代码/测试为准。旧版示例中未在第 10 节标为已实现的能力仍属设计或后续路线图，不可据此推断已上线。
+
+**版本历史：** v2.3（2026-09-26）补充 Phase 2 as-built 契约、实际部署模式、审计/Agent/认证/上传安全参数，以及尚未完成的用户验收边界。
 
 ---
 
@@ -47,6 +48,8 @@
 ---
 
 ## 3. 部署架构（信任边界明确）
+
+Nginx 是可选反向代理而非运行前置条件。实际支持两种启动模式：`npm start` 由单个 Node 进程监听 `0.0.0.0:8080` 并托管 `apps/web/dist`；`npm run start:bynginx` 监听 `127.0.0.1:8080`、不托管前端，由 Nginx 提供静态文件并代理 API。下面的 FRP/Nginx 拓扑是公网部署建议，不代表无 Nginx 时 Node 会识别真实客户端来源或限制本机初始化；一次性初始化 Token 才是应用层保护，Nginx allow/deny 可作为额外防线。当前实现不提供 Unix-domain socket 监听配置。
 
 ### 3.1 正确流量方向
 
@@ -90,14 +93,14 @@ proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 proxy_set_header Host $host;
 ```
 
-**Node.js 绑定：**
-- 默认：`127.0.0.1:8080`
-- 推荐：Unix Socket `/tmp/filestation.sock`（进一步隔离）
-- 仅信任来自 Nginx 的 `X-Entry-Id`
+**Node.js 绑定（以启动命令为准）：**
+- `npm start`：`0.0.0.0:8080`，静态托管开启。
+- `npm run start:bynginx`：`127.0.0.1:8080`，静态托管关闭。
+- 公网反代应覆盖而非保留客户端提供的安全相关头；应用当前不启用 Express `trust proxy`，因此代理后的 `req.ip`/协议/绝对 MCP 分享 URL 不应被当作原始客户端事实。MCP 返回的相对 `share_url` 是规范链接。
 
-### 3.3 初始化安全（Nginx 层 + Token 双保险）
+### 3.3 初始化安全（一次性 Token；Nginx 可选加强）
 
-**方式：Nginx allow/deny + 一次性 Token**
+**应用层：哈希存储的一次性初始化 Token，10 分钟过期，成功后立即失效。** Nginx `allow/deny` 仅在反代部署中可额外限制初始化请求来源，当前应用本身不判断请求是否来自 `127.0.0.1`。不要将可选代理层描述为默认部署前提。
 ```
 启动时控制台输出：
 =================================================
@@ -304,6 +307,8 @@ CREATE TABLE upload_parts (
 CREATE INDEX idx_upload_sessions_token ON upload_sessions(upload_token_hash);
 CREATE INDEX idx_upload_sessions_status ON upload_sessions(status, expires_at);
 ```
+
+> **v2.3 实现补充：** 实际 `upload_sessions` 还包含 `verify_owner_token`、`verify_lease_until`、`verify_heartbeat_at` 与 `target_folder_id`。`final_stored_name` 和每个 owner token 均使用 UUIDv4；owner 的合并 staging 文件名固定为 `<stored UUID>.verify-<owner UUID>.tmp`，旧版 `<stored UUID>.tmp` 仅作兼容清理。生命周期孤儿扫描依赖该命名不变量识别并安全回收文件；不得任意改名/改 UUID 格式。DB 租约是数据库 owner fence，不是跨进程文件系统 CAS/锁。
 
 **上传完成三阶段：**
 
@@ -567,6 +572,8 @@ CREATE INDEX idx_audit_logs_account ON audit_logs(account_id, created_at);
 CREATE INDEX idx_audit_logs_action ON audit_logs(action, created_at);
 ```
 
+当前 `AuditAction` 固定值为：`auth.login`、`auth.login_failed`、`auth.api_token_exchanged`、`api_token.created`、`api_token.revoked`、`upload.initiated`、`upload.completed`、`file.deleted`、`share.created`、`share.revoked`、`settings.updated`、`mcp.tool_called`、`auth.totp_enabled`、`auth.totp_disabled`、`auth.totp_failed`、`recovery.generated`、`recovery.used`。新增埋点应复用受控 action，不把凭据放进 `details`。
+
 ### 4.9 系统配置
 
 ```sql
@@ -796,9 +803,9 @@ Referrer-Policy: no-referrer
 
 ### 6.5 日志脱敏
 
-- 禁止记录：密码、TOTP、完整 Token、临时码 secret
-- 脱敏：Token 前缀、IP /24 匿名化
-- 审计日志：90 天保留，定期清理
+- 禁止记录：密码、TOTP secret/code、完整 API Token、上传 Token、恢复码明文、临时码 secret。
+- 当前审计只做 IP 匿名化（IPv4 截断到 `/24`、IPv6 保留前 3 段，IPv4-mapped IPv6 同样处理）、User-Agent 截断到 256 字符；不要假设 `details` 会自动做通用凭据脱敏。
+- 审计保留 90 天，每日 04:00 清理；记录/读取异常不会改变业务操作结果，损坏的 details 作为 `null` 返回。
 
 ---
 
@@ -810,31 +817,33 @@ Referrer-Policy: no-referrer
 
 | 方法 | 端点 | 说明 |
 |------|------|------|
-| POST | `/api/v1/auth/init` | 首次初始化（Nginx 限制 + Token） |
+| GET | `/api/v1/auth/status` | 初始化/登录状态 |
+| POST | `/api/v1/auth/init` | 首次初始化（一次性 Token；Nginx 可选加强） |
 | POST | `/api/v1/auth/login` | 账号密码 → login_challenge |
 | POST | `/api/v1/auth/login/totp` | TOTP 二次验证 |
-| POST | `/api/v1/auth/login/webauthn/options` | WebAuthn 登录选项 |
-| POST | `/api/v1/auth/login/webauthn/verify` | WebAuthn 登录验证 |
 | POST | `/api/v1/auth/refresh` | Refresh Token |
 | POST | `/api/v1/auth/logout` | 登出 |
-| GET | `/api/v1/auth/sessions` | 会话列表 |
-| DELETE | `/api/v1/auth/sessions/:id` | 吊销会话 |
-| POST | `/api/v1/auth/password/change` | 修改密码 |
 | POST | `/api/v1/auth/totp/setup` | TOTP 设置 |
 | POST | `/api/v1/auth/totp/confirm` | TOTP 确认启用 |
-| DELETE | `/api/v1/auth/authenticators/:id` | 删除认证器 |
-| POST | `/api/v1/auth/webauthn/register/options` | WebAuthn 注册选项 |
-| POST | `/api/v1/auth/webauthn/register/verify` | WebAuthn 注册验证 |
-| GET | `/api/v1/auth/api-tokens` | Token 列表 |
-| POST | `/api/v1/auth/api-tokens` | 创建 Token |
-| DELETE | `/api/v1/auth/api-tokens/:id` | 吊销 Token |
+| POST | `/api/v1/auth/totp/disable` | 密码 + TOTP 关闭 TOTP |
 | POST | `/api/v1/auth/api-token/exchange` | API Token 换 JWT |
 | POST | `/api/v1/auth/recovery/generate` | 生成恢复码 |
 | POST | `/api/v1/auth/recovery/verify` | 使用恢复码 |
 
+> WebAuthn 登录/注册、会话管理、密码更改以及其他未在当前 Controller 中实现的旧版设计端点不属于已实现 API。
+
 ### 7.2 文件 `/api/v1/files/*`
 
 ### 7.3 上传 `/api/v1/uploads/*`
+
+| 方法 | 端点 | 认证/说明 |
+|------|------|------|
+| POST | `/api/v1/uploads` | 管理员 JWT + `files:write`；初始化，单文件最大 100 GiB，分块 64 KiB–64 MiB |
+| PUT | `/api/v1/uploads/:id/parts/:partNumber` | `X-Upload-Token` + `X-Part-Checksum`；原始分块 body |
+| GET | `/api/v1/uploads/:id` | `X-Upload-Token`；查询状态 |
+| POST | `/api/v1/uploads/:id/resume` | `X-Upload-Token`；校验/续传并返回服务端分块状态 |
+| POST | `/api/v1/uploads/:id/complete` | `X-Upload-Token`；可选 `final_hash`，三阶段幂等完成 |
+| DELETE | `/api/v1/uploads/:id` | `X-Upload-Token`；中止 |
 
 ### 7.4 分享 `/api/v1/shares/*`
 
@@ -849,7 +858,18 @@ Referrer-Policy: no-referrer
 |------|------|------|
 | GET | `/f/:id/:filename` | 302 重定向到带 Token URL |
 
-### 7.6-7.9 其他（同 v2.1）
+### 7.6 Agent、Token 与审计接口
+
+| 方法 | 端点 | 说明 |
+|------|------|------|
+| POST | `/api/v1/api-tokens` | 管理员 JWT 创建 Token；明文仅返回一次 |
+| GET | `/api/v1/api-tokens` | 管理员 JWT 查看 Token 元信息 |
+| DELETE | `/api/v1/api-tokens/:id` | 管理员 JWT 吊销 Token |
+| POST | `/api/v1/mcp` | MCP Streamable HTTP；默认关闭，直接校验 API Token |
+| GET/DELETE | `/api/v1/mcp` | 当前返回 404；不提供有状态会话 |
+| GET | `/api/v1/audit-logs` | 管理员 JWT 分页查询，可按 action 过滤 |
+
+MCP 实际工具、权限 scope 和 body/上传上限见第 10.2 节；不要将早期路线图端点当成已实现 API。
 
 ---
 
@@ -869,13 +889,14 @@ Referrer-Policy: no-referrer
 
 ### Phase 2: 可靠性（2 周）
 
-- [ ] TOTP 认证（login_challenge 流程）
-- [ ] API Token（exchange 端点 + scopes）
-- [ ] 恢复码机制
-- [ ] 断点续传（崩溃恢复）
-- [ ] 原子计数（所有场景）
-- [ ] 审计日志
-- [ ] 并发/压力测试
+- [x] TOTP 认证（login_challenge 流程与设置页）
+- [x] API Token（exchange 端点 + scopes）与内嵌 MCP 工具
+- [x] 恢复码机制（后端与 Web UI）
+- [x] 断点续传（服务端恢复 + Web 客户端）
+- [x] 审计日志
+- [x] 上传/下载并发与压力回归
+
+> 自动化实现与验证不等于发布验收：真实 MCP 客户端、375px 视口、TOTP/恢复码端到端，以及刷新后的浏览器断点续传仍需用户手动验收。已知内置浏览器对 localhost 返回 `ERR_BLOCKED_BY_CLIENT`，该环境下的像素级检查尚未完成。
 
 ### Phase 3: 多入口传输（2 周）
 
@@ -896,7 +917,7 @@ Referrer-Policy: no-referrer
 
 ---
 
-## 9. 关键设计决策记录（v2.2 更新）
+## 9. 关键设计决策记录（v2.3 更新）
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
@@ -911,8 +932,50 @@ Referrer-Policy: no-referrer
 | 临时码配额 | reserved_files/completed_files | 原子预留，防并发超额 |
 | 安全预览 | MIME 白名单 + CSP sandbox | 防 XSS |
 
+## 10. Phase 2 已实现契约（v2.3）
+
+本节记录按现有 Controller、Service、DTO、锁文件与自动化测试核实的实现契约；若未来实现变化，需同步更新本节及 `docs/CURRENT-STATE.md`。
+
+### 10.1 API Token 与 scope
+
+- Token 格式为 `fs_api_` + 48 位小写十六进制（192 bit 随机数）；明文只在创建响应显示一次，数据库保存 SHA-256 全值及 12 字符展示前缀。查验先校验格式，再对输入明文计算 SHA-256 并按 `token_hash` 全值精确查找，不以展示前缀认证。exchange 为 1 小时 JWT，JWT scope 不可提升：每次请求从 Token 行重新加载 scope，并检查撤销/到期。
+- 管理路由为 `POST/GET /api/v1/api-tokens`、`DELETE /api/v1/api-tokens/:id`；管理员专属。exchange 路由为 `POST /api/v1/auth/api-token/exchange`。
+
+| Scope | 能力范围 |
+|------|------|
+| `files:read` / `files:write` | 浏览/读取文件；写入、删除、初始化上传 |
+| `folders:read` / `folders:write` | 浏览/创建/修改文件夹 |
+| `shares:read` / `shares:write` | 浏览/创建/吊销分享 |
+
+受保护 Controller 路由必须显式声明最小 `@RequireScopes(...)`；缺省对 API Token 拒绝，不得以全局 Guard 或默认空数组绕过。纯管理员管理面必须保留 `AdminOnlyGuard`。
+
+### 10.2 内嵌 MCP Agent
+
+- MCP 默认关闭；开启后仅支持无状态 Streamable HTTP `POST /api/v1/mcp`，每个请求均以 `Authorization: Bearer <API_TOKEN>` 认证；GET/DELETE 返回 404。它直接用长期 API Token，不先 exchange JWT。
+- MCP 专用 JSON body 上限 16 MiB，仅在功能已启用且 Token 校验成功后解析；普通 JSON/urlencoded 请求仍使用 Express 默认 100 KiB 限制。
+- Agent 单文件上限 `mcp_max_upload_mb` 默认 32 MiB、可设 1–512 MiB；每个 MCP 上传分块的解码原始字节上限 8 MiB，支持 chunk 64 KiB–8 MiB，未显式传入时为 `min(8 MiB, transfer.default_chunk_size)`。空文件直接完成，不调用 `upload_part`。
+- MCP 工具共 11 个：`server_info`（有效 Token，无额外 scope）、`list_files`（`files:read`）、`list_folders`（`folders:read`）、`create_folder`（`folders:write`）、`upload_init`、`upload_part`、`complete_upload`、`delete_file`（后四项均 `files:write`）、`create_share`（`shares:write`）、`list_shares`（`shares:read`）、`revoke_share`（`shares:write`）。每次调用记为 `mcp.tool_called`，工具复用同一上传/分享业务服务。
+- `share_url` 相对路径是规范值；绝对 URL 仅为便利展示，因代理头不受信任，不保证反代下 origin 正确。MCP SDK 锁定 `@modelcontextprotocol/sdk@1.30.1`、Zod `3.25.76`；协议客户端的具体配置格式由客户端决定，本项目不承诺某一桌面客户端配置模板。
+
+### 10.3 TOTP 与恢复码
+
+- TOTP 使用当前 `otplib@12.0.1` authenticator 默认参数（SHA-1、6 位、30 秒）并接受前后各一个 step；登录 challenge 5 分钟且单次使用。已消费 step 通过条件更新防止重放。
+- Setup 的 secret/otpauth URL/二维码只在 setup 响应返回；数据库密文使用 AES-256-GCM（12-byte IV、16-byte tag），加密 key 为 `SHA-256(JWT_SECRET)`。生产环境须持久化、妥善备份并保持 `JWT_SECRET` 稳定；更换后既有 TOTP 密文无法解密。
+- 恢复组含 10 个一次性 Crockford Base32 码，每码 10 个字符（50 bit），显示分组 `4-4-2`，有效期 24 小时；仅显示一次、数据库仅存 Argon2id 哈希（memory 19,456 KiB、time 2、parallelism 1）。账户连续 5 次失败锁 15 分钟；IP admission 有 5 分钟逐请求 reservation，达到 10 个历史失败/活动 reservation 后限流。成功恢复会原子消费代码、吊销旧 session 并创建新 session。
+
+### 10.4 上传恢复与并发完成
+
+- 普通上传单文件最大 100 GiB，chunk 64 KiB–64 MiB，默认 chunk 8 MiB，session 有效期 24 小时。初始化用管理员 JWT + `files:write`；之后 parts/status/resume/complete/abort 由 `X-Upload-Token` 授权。
+- complete 的 owner lease 为 10 分钟、每 30 秒 heartbeat；同进程观察者不持 SQLite 写事务等待最终状态，绝对等待上限 15 分钟；失去 owner 返回 `409 UPLOAD_FINALIZE_LOST`。DB 写入在 `BEGIN IMMEDIATE` 短事务，合并、hash 与文件 I/O 在事务外。
+- Owner staging 文件必须保持 `<stored UUID>.verify-<owner UUID>.tmp`；旧版 `<stored UUID>.tmp` 由有界兼容扫描回收。不要绕过 owner check 清理其他 owner staging。
+- **部署硬限制：不可让旧版本与新版本进程同时写同一数据库/存储目录。** 升级需先 drain/stop 所有旧进程再启动新版本；混版时旧进程仍使用共享 staging 名，数据库 lease 不是文件系统 CAS，无法保护新 owner 的 staging。
+
+### 10.5 自动化状态与发布前手动验收
+
+Phase 2 的实现、server/Web 自动化测试与静态验证可独立完成，但不能替代用户的发布验收。真实 MCP 客户端联调、375px 实机/浏览器布局、TOTP 与恢复码真实流程、刷新页面后的文件断点续传仍需手动确认；当前内置浏览器访问 localhost 被 `ERR_BLOCKED_BY_CLIENT` 阻断，因此不能声称这些视觉/真实客户端验收已完成。当前依赖安全门见 `docs/CURRENT-STATE.md`。
+
 ---
 
-*文档版本: v2.2*
+*文档版本: v2.3*
 *创建日期: 2026-07-28*
-*审阅状态: 已根据 AI 审阅意见三次修正，实现级问题闭合*
+*审阅状态: v2.3 补充 Phase 2 as-built 事实；实现/自动化状态与待用户验收分开记录*

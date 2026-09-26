@@ -6,26 +6,21 @@
 
 FileStation 是一个私有文件传输站 Web 应用，单管理员模式，支持多传输入口、灵活分享控制、细粒度权限管理。
 
-**核心能力：**
-- 多传输入口智能选路（直连 / 多 FRP 地址）
-- 文件 URL 直链（免密预览 / 密码保护 / 管理员验证）
-- 临时码授权访客上传下载
-- 文件自动过期 + 手动延长/永久保留
-- 全局限速 + 入口限速 + 角色限速
-- 多设备管理员认证（TOTP / API Token / WebAuthn）
-- 虚拟文件夹管理
-- WebUI 全配置
+**当前已实现能力：**
+- 私有文件上传/下载、Range、分享页（免密/密码）、虚拟文件夹、到期清理
+- 管理员密码登录、TOTP 两步验证、一次性恢复码
+- API Token、细粒度 scope、默认关闭的内嵌 MCP Agent、审计查询
+- 分块上传、服务端恢复和 Web 端断点续传
+
+多入口选路、WebAuthn、临时码、P2P、入口/全局限速等仍属于 Phase 3/4 路线图，勿描述为当前已交付。
 
 ## 2. 当前阶段
 
-**Phase 1: MVP（当前）**
-- 项目脚手架
-- 安全初始化
-- 账号密码登录 + JWT
-- 文件上传/下载
-- 文件夹管理
-- 文件有效期
-- 分享链接（page 类型）
+**Phase 1 MVP 与 Phase 2 自动化实现/验证已完成；发布验收未完成。**
+
+- Phase 1 基础能力、Phase 2 TOTP/恢复码/API Token/MCP/审计/断点续传/并发回归已实现并自动化测试。
+- 真实 MCP 客户端、375px 浏览器/设备布局、TOTP+恢复码真实流程及刷新后断点续传仍待用户手动验收；当前内置浏览器访问 localhost 被 `ERR_BLOCKED_BY_CLIENT` 阻断。
+- 截至 2026-09-26 的 npm audit 有关键生产依赖风险，发布 security gate 为 blocked/pending；详见 `docs/CURRENT-STATE.md`，不得把自动化通过表述成发布完成。
 
 **详细设计：** [docs/superpowers/specs/2026-07-28-filestation-design.md](docs/superpowers/specs/2026-07-28-filestation-design.md)
 
@@ -90,7 +85,7 @@ npm run lint
 
 ### 6.2 初始化安全
 
-- 首次初始化必须在本机进行（Nginx `allow 127.0.0.1`）
+- 首次初始化必须使用短时、一次性初始化 Token；公网反代部署应额外限制初始化路由，不得假设应用会识别远端请求是否来自本机
 - 一次性初始化 Token 10 分钟有效期
 - 初始化完成后 Token 立即失效
 
@@ -100,12 +95,24 @@ npm run lint
 - 临时码 secret 使用 Argon2id 哈希
 - API Token 仅存储 SHA-256 哈希
 - JWT 必须区分 `principal_type: admin | api_token`
+- API Token 只保存不可逆校验值，创建明文仅展示一次；每次请求必须校验 Token 仍有效并按当前授权拒绝越权
+- 受保护路由必须遵循最小权限和默认拒绝原则；TOTP 等加密密钥依赖生产 `JWT_SECRET`，必须稳定备份。实现细节见 `docs/CURRENT-STATE.md`
 
-### 6.4 文件安全
+### 6.4 Agent/MCP 安全
+
+- 默认关闭 Agent 接入；只授予完成任务所需的最小权限，敏感凭据须通过受保护的 Authorization header 传递
+- API Token 创建明文只展示一次；及时吊销不再使用的 Token，不得在 URL query、客户端源码、日志、截图或提交中暴露
+- 对 Agent 请求继续强制逐工具/路由最小权限和专用资源上限；不得为 Agent 全局放宽普通 API 的解析/上传限额。实际端点、工具、scope 与大小限制见 `docs/CURRENT-STATE.md`
+- 不把某个具体 MCP 客户端配置文件格式当成稳定项目契约；README 示例必须用占位符，不可复述真实 Token
+- `audit_logs.details` 不做通用凭据脱敏；严禁记录密码、TOTP secret/code、完整 API/Upload Token、恢复码、临时码 secret
+
+### 6.5 文件安全
 
 - 用户上传的 HTML/SVG/JS 强制 `Content-Disposition: attachment`
 - 允许 inline 的 MIME 类型白名单：图片/视频/音频/PDF
 - 响应头必须包含 `X-Content-Type-Options: nosniff` 和 `Content-Security-Policy: sandbox`
+- 上传 finalizer 必须保留 owner 专属 staging 与孤儿扫描间的不变量，不得清理/覆盖其他 owner 的文件；具体命名及验证测试见 `docs/CURRENT-STATE.md`
+- **禁止混合版本并写**：旧版和新版进程不能同时写相同数据库/存储路径。升级前先 drain/stop 所有旧进程，再启动新版本；SQLite lease 不是文件系统 CAS。
 
 ## 7. 开发流程
 
@@ -114,7 +121,7 @@ npm run lint
 1. 确认当前状态：`docs/CURRENT-STATE.md`
 2. 写或更新测试
 3. 实现最小改动
-4. 运行 `npm test` 和 `npm run typecheck`
+4. 显式运行 server unit、server full E2E、Web Vitest（`--run --no-cache`）、`npm run typecheck`、`npm run build` 与 `git diff --check`；仓库根 `npm test` 因 `packages/shared` 没有 `test` script 会退出 1，不可误报为全套测试失败或通过
 5. 更新 `docs/CURRENT-STATE.md`
 6. 按文档治理规则检查是否需要更新其他文档
 7. 提交
@@ -163,10 +170,17 @@ docs: update CURRENT-STATE for Phase 1 completion
 ### 7.3 提交前检查
 
 ```bash
+npm test --workspace=@filestation/server -- --runInBand
+npm run test:e2e --workspace=@filestation/server
+cd apps/web
+npx vitest run --no-cache
+cd ../..
 npm run typecheck
-npm run lint
-npm test
+npm run build
+git diff --check
 ```
+
+`npm run lint` 当前需要 `eslint` 可执行文件，但 server/web 的已安装依赖中没有 ESLint，shared 也没有 lint script；应复核现状并准确报告“不可用”，不得声称 lint 通过。根 `npm test` 包含无 `test` script 的 shared workspace，会非零退出；用上面的 workspace 命令分别验证。
 
 ## 8. 功能开发指南
 
@@ -249,7 +263,7 @@ npm test
 ### 11.1 环境要求
 
 - Node.js 20+
-- Nginx（生产环境必需）
+- Nginx 可选；公网 FRP 场景建议作为 TLS 终结/反代并提供初始化本机限制
 - SQLite（嵌入式，无需单独安装）
 
 ### 11.2 环境变量
@@ -260,14 +274,15 @@ npm test
 | `FILESTATION_DB_PATH` | SQLite 数据库路径 | `./data/filestation.db` |
 | `FILESTATION_INIT_TOKEN` | 初始化 Token（可选） | 自动生成 |
 | `FILESTATION_PORT` | 服务端口 | `8080` |
+| `JWT_SECRET` | JWT 与 TOTP 密文 key 派生 | 生产环境必须设置且保持稳定 |
 
 ### 11.3 发布检查清单
 
 - [ ] `npm run build` 成功
-- [ ] `npm test` 全部通过
+- [ ] server unit + server full E2E + Web Vitest 显式通过；不要依赖会在 shared workspace 失败的根 `npm test`
 - [ ] `npm run typecheck` 无错误
 - [ ] 数据库迁移测试通过
-- [ ] 安全扫描通过（npm audit）
+- [ ] 审阅并处置 `npm audit` Critical/High；如保留例外需单独记录风险接受，不能把有 Critical/High 的审计称为通过
 - [ ] 版本号更新（SemVer）
 - [ ] CHANGELOG 更新
 
@@ -279,6 +294,7 @@ npm test
 - **禁止** 在 URL 查询参数中传递密码或长期 Token
 - **禁止** 使用 `Access-Control-Allow-Origin: *`
 - **禁止** 提交 `data/` 目录下的运行时数据
+- **禁止** 混合旧/新版本进程同时写同一 SQLite DB 与 storage；升级前停止旧进程
 
 ## 13. 故障排查
 

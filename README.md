@@ -4,7 +4,7 @@
 
 ## 已实现功能
 
-- **安全初始化**：首次启动生成一次性初始化 Token（哈希存储、10 分钟有效、仅本机可完成初始化）
+- **安全初始化**：首次启动生成哈希存储的一次性初始化 Token（10 分钟有效、成功后失效）；公网反代可额外限制初始化路由
 - **认证**：账号密码登录 + JWT Access Token + Refresh Token（HttpOnly Cookie）+ 登录锁定（账号维度固定锁定 + IP 维度独立限速）
 - **分块上传**：三阶段完成协议（抢占 → 合并校验 → 落库），租约心跳 + 崩溃后自动恢复续传
 - **下载**：HTTP Range 支持（断点续传/多线程下载器兼容），416 标准响应
@@ -16,7 +16,7 @@
 - **MCP 服务**：启用设置中的 MCP 开关后，可通过无状态 Streamable HTTP `/api/v1/mcp` 使用 11 个文件、文件夹、上传与分享工具；直接使用 API Token，并按 token scopes 校验权限
 - **审计日志**：管理员可通过 `GET /api/v1/audit-logs` 分页查询关键操作，支持按 action 筛选；IP 匿名化并保留 90 天
 
-其余路线图功能（Phase 2-4）：TOTP / WebAuthn 认证、多 FRP 入口智能选路、直链分享、限速控制、临时码、P2P 传输、统计面板。详见 [当前状态](docs/CURRENT-STATE.md)。
+**Phase 2 功能实现和自动化验证已完成，但发布验收尚未完成。** WebAuthn、多 FRP 入口智能选路、直链分享、限速控制、临时码、P2P 传输和统计面板仍属 Phase 3/4 路线图。当前安全门、用户手动验收与已知限制见[当前状态](docs/CURRENT-STATE.md)。
 
 ## 技术栈
 
@@ -38,6 +38,8 @@ npm start
 ```
 
 首次启动后，控制台会打印完整的初始化地址和一次性 Token，浏览器打开该地址设置管理员账号即可。
+
+生产环境应预先设置 `JWT_SECRET` 并妥善备份。TOTP 密文加密 key 从该值派生；更换它会导致已保存的 TOTP secret 无法解密。
 
 ### 部署模式
 
@@ -66,6 +68,26 @@ Nginx 是**可选项**，不是必需的：
 | `FILESTATION_DB_PATH` | `./data/filestation.db` | SQLite 数据库路径 |
 | `JWT_SECRET` | — | JWT 签名密钥，**生产环境必须设置** |
 
+### Agent / MCP 接入
+
+在 Web 设置中启用 MCP 并创建一个只授予所需 scope 的 API Token。Token 明文仅在创建时显示一次；丢失后需吊销并重新签发。MCP 使用无状态 Streamable HTTP `POST`：
+
+```text
+Endpoint: https://<YOUR_HOST>/api/v1/mcp
+Authorization: Bearer <API_TOKEN>
+```
+
+`<API_TOKEN>` 是占位符，不是可用凭据。请使用 HTTPS，不要把 Token 放入 URL、源码、日志、截图或仓库。客户端配置文件格式因 MCP 客户端而异，本项目不声称提供某个桌面客户端专属 JSON 模板；请按所用客户端当前文档配置 endpoint 与安全凭据存储。MCP 默认关闭、每个工具按 API Token scope 授权；单文件默认上限 32 MiB（设置可调 1–512 MiB），单分块解码后最多 8 MiB，MCP JSON body 最多 16 MiB。
+
+### 手动验收（待完成，不代表发布已通过）
+
+- [ ] 用用户实际 MCP 客户端联调 list、上传、分享及撤销，并确认 Token 最小 scope/吊销行为
+- [ ] 在真实浏览器或设备检查 375px 布局
+- [ ] 实际完成 TOTP 启用、登录、禁用及恢复码生成/单次恢复流程
+- [ ] 刷新页面后重新选择原文件并验证断点续传
+
+当前内置浏览器访问本地服务被 `ERR_BLOCKED_BY_CLIENT` 阻断，因此真实客户端/小屏像素验收仍待用户环境完成。npm 依赖安全审计也有未处置 Critical/High 项；见 [当前状态](docs/CURRENT-STATE.md)，不要将自动化通过等同于发布批准。
+
 ## 文档
 
 - [当前状态](docs/CURRENT-STATE.md) — 实现进度和里程碑
@@ -76,12 +98,18 @@ Nginx 是**可选项**，不是必需的：
 ## 开发
 
 ```bash
-npm run dev        # 开发模式（前后端并行，热更新）
-npm run typecheck  # 类型检查
-npm run lint       # Lint
-npm test           # 测试
-npm run build      # 构建（shared → server → web）
+npm run dev                                            # 开发模式（前后端并行，热更新）
+npm run typecheck                                     # 类型检查
+npm run build                                         # 构建（shared → server → web）
+npm test --workspace=@filestation/server -- --runInBand # Server 单测
+npm run test:e2e --workspace=@filestation/server      # Server 全量 E2E
+cd apps/web
+npx vitest run --no-cache                             # Web Vitest（单次运行）
+cd ../..
+git diff --check                                      # 补丁空白检查
 ```
+
+根 `npm test` 会遍历所有 workspace，但 `packages/shared` 没有 test script，因而退出非零；请显式运行上面的 Server/Web 命令，勿误报为完整测试套件通过。当前已安装依赖未提供 ESLint 可执行文件，`npm run lint` 可能不可用，需复核后如实报告。
 
 ## 许可证
 
@@ -89,4 +117,4 @@ MIT
 
 ---
 
-*项目状态: Phase 1 MVP 已完成，Phase 2 进行中（API Token、审计日志与 MCP 服务已实现）*
+*项目状态: Phase 1 与 Phase 2 自动化实现已完成；发布安全门和用户手动验收待完成，详见 docs/CURRENT-STATE.md*

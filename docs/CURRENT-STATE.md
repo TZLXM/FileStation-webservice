@@ -2,16 +2,18 @@
 
 Updated: 2026-09-26
 
-FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成并通过浏览器全流程验证**。
+FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 2 实现/自动化验证已完成；Phase 2 发布验收仍 blocked/pending。** 代码测试通过不能替代用户手动验收或未解决的依赖安全门。
 
 ## 项目状态
 
 | 方面 | 状态 |
 |------|------|
-| 设计文档 | v2.2 已完成；Phase 1 实施计划迭代至 v1.7（经两轮外部评审） |
+| 设计文档 | v2.3 as-built 更新；Phase 1 实施计划迭代至 v1.7（经两轮外部评审） |
 | 项目管理 | AGENTS.md 已建立 |
 | 代码实现 | Phase 1 MVP 完成；Phase 2 TOTP 两步登录与设置页管理、恢复码前后端、API Token、审计日志、MCP 服务及对应 Web 页面已实现；Task 10 第三轮复审修复、Task 11 最终复审、Task 12 断点续传 UI 与 Task 13 并发/压力测试修复均已获独立审阅批准 |
-| 测试 | Task 13 第三轮修复轮：server unit 25 suites / 172 passed / 20 todo；server E2E 9 suites / 83 passed；concurrency + recovery + folder concurrency 连续 3 轮，每轮 3 suites / 18 passed；Web 15 files / 131 passed；root typecheck/build、diff-check 通过。Lint 不可用（server/web 未安装 ESLint，shared 无 lint 脚本）；Phase 1 浏览器端到端手动验证通过 |
+| 自动化 | Task14 文档变更后：server unit 25 suites / 172 passed / 20 todo；full server E2E 9 suites / 83 passed；Web `npx vitest run --no-cache` 15 files / 131 passed；root typecheck/build/diff-check 通过。Lint 不可用；CI 单次 `npm test` 的 server/Web 均通过，但根聚合最终因 shared 缺少 `test` script 退出 1 |
+| 用户手动验收 | **Pending**：真实 MCP 客户端、375px 小屏、TOTP/恢复码真实流程、页面刷新后的文件断点续传；Phase 1 的既有浏览器验证不代表 Phase 2 验收 |
+| 发布安全门 | **Blocked/Pending**：2026-09-26 `npm audit` 仍有 Critical/High；未运行 `npm audit fix`，未升级大版本；风险与兼容性细节见下文 |
 | 部署 | 单进程模式（默认）与 Nginx 反代模式均可用；已推送至 GitHub |
 
 ## 设计决策摘要
@@ -58,7 +60,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 - [x] 基础设置页（默认有效期/分块大小/清理宽限/登录锁定参数）
 - [x] Nginx 可选化（单进程静态托管模式，ADR-0004）
 
-### Phase 2: 可靠性（进行中）
+### Phase 2: 可靠性（实现/自动化完成，发布验收待完成）
 
 - [x] TOTP 认证（AES-256-GCM 密文、管理员 setup/confirm/disable、单次 login_challenge 两步登录、两步登录 UI、设置页启停与强制 TOTP 开关）
 - [x] API Token 管理、exchange 短期 JWT 与 scopes（默认拒绝，scope 以数据库为准）
@@ -70,6 +72,12 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 - [x] Web API Token 管理、MCP 设置与审计日志分页/操作过滤页面
 - [x] 前端全局导航与移动端适配（文件夹抽屉、文件卡片、触屏操作、分享/设置页布局）
 - [x] 并发/压力测试（下载额度、同 session complete 幂等、冲突分块竞争、不同 session 并发上传/完成）
+
+#### 发布验收状态
+
+- **实现 + 自动化验证：** Phase 2 功能已实现；Task 13 独立复审 APPROVED。Task14 文档变更后的 server unit 25 suites / 172 passed / 20 todo、完整 server E2E 9 suites / 83 passed、Web 15 files / 131 passed、typecheck/build/diff-check 均通过。
+- **用户验收：** 尚未完成。真实 MCP 客户端联调、375px 真实浏览器/设备、TOTP 启用/登录/禁用与恢复码流程、刷新页面后的续传须由用户在可用浏览器环境确认。当前 Codex 内置浏览器访问 localhost 为 `ERR_BLOCKED_BY_CLIENT`，未重试，像素 QA 仍待办。
+- **依赖安全门：** **Blocked/Pending**，详见“依赖审计快照”。不得在安全门解除或经独立风险接受前称为 Phase 2 发布验收/发布完成。
 
 ### Phase 3: 多入口传输
 
@@ -113,18 +121,48 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 - 生产环境必须设置 `JWT_SECRET`
 - Nginx 模式下 Nginx 必须覆盖 `X-Entry-Id` Header（Phase 3 多入口）
 
+### 上传部署不变量（2026-09-26 更新）
+
+- 孤儿扫描依赖最终存储名和 owner token 均为 UUIDv4，并识别 `<stored UUID>.verify-<owner UUID>.tmp` 与旧版 `<stored UUID>.tmp`。不得擅改 staging 命名、UUID 格式或清理其他 owner 的临时文件。
+- **混合版本并写不受支持。** 新旧版本不能同时操作同一 SQLite 数据库和 storage；升级时需先 drain/stop 全部旧进程，再启动新版本。DB lease 是 owner claim/fence，不是跨进程文件系统 CAS；旧版使用共享临时文件命名。
+
+### 自动化验证边界
+
+- Task14 显式运行 server unit：25 suites / 172 passed / 20 todo；完整 server E2E：9 suites / 83 passed；Web `npx vitest run --no-cache`：15 files / 131 passed；root `npm run typecheck`、`npm run build`、`git diff --check` 通过。
+- 根 `CI=true npm test` 已实际运行：server 25 suites / 172 passed / 20 todo、Web 15 files / 131 passed，随后因 `packages/shared/package.json` 没有 `test` script 以 exit 1 结束；显式 shared workspace 同样返回 `Missing script: "test"`。不能把根聚合报告成全绿；server/Web 显式 no-cache 命令均独立 exit 0。
+- Lint 复核：server 与 Web 的 `npm run lint` 都因找不到 `eslint` 可执行文件退出 1；shared 没有 `lint` script。Lint 状态是不可用，不是通过。
+
+### 依赖审计快照（2026-09-26）
+
+基于当前 `package-lock.json` 执行 `npm audit --json`（registry 返回的当日快照）：
+
+| 范围 | Audit findings | Critical | High | Moderate | Low | direct / transitive | fix 建议（SemVer） |
+|------|---------------:|---------:|-----:|---------:|----:|---------------------:|-------------------:|
+| 全依赖 | 46 | 2 | 19 | 19 | 6 | 17 / 29 | 31 major，15 non-major |
+| `--omit=dev` 生产依赖闭包 | 28 | 1 | 13 | 11 | 3 | 12 / 16 | 22 major，6 non-major |
+
+`npm audit` findings 是当前锁文件/注册表 advisory 视图，不应与旧 Task 记录（例如 `npm install` 当时报告的 39 项）混为同一快照；Task14 不运行 `npm audit fix`，不做 dependency override 或大版本升级。
+
+- **生产 Critical：`tar@6.2.1`，间接依赖。** 路径包括 `sqlite3@5.1.7 → node-gyp@8.4.1 → tar`、`sqlite3@5.1.7 → tar`，以及 `bcrypt@5.1.1 → @mapbox/node-pre-gyp@1.0.11 → tar`。当前代码引用 `tar.extract` 的位置在依赖安装器：node-gyp 解压 Node headers、node-pre-gyp 解压原生预编译包；仓库 `apps/server/src` 没有直接调用 `tar` 的 HTTP/API 路径。因此这是依赖安装/原生构建阶段的归档解包攻击面（包括依赖归档不可信/被篡改时的路径逃逸/覆盖/读取/拒绝服务风险），不是当前文件上传 HTTP 路径的直接 tar 调用。但它处于 production dependency closure，`npm audit --omit=dev` 仍报告 Critical，**security gate 仍 blocked/pending**。
+- **Dev Critical：`vitest@1.6.1`。** Advisory 仅在 Vitest UI server 正在监听时可读取/执行任意文件；它不是生产 server 的 HTTP 依赖。当前 `test:ui` 是单独的开发命令，不应在不受信网络开放 UI server。Audit 建议 Vitest 5 主版本。
+- **生产 High direct：** `@nestjs/platform-express@10.4.22`、`@nestjs/serve-static@4.0.2`、`bcrypt@5.1.1`、`sqlite3@5.1.7`。npm 给出的主要修复路线均为 major（Nest 12 / bcrypt 6 / sqlite3 6）；另有多项间接 High。
+- npm 元数据显示 `sqlite3@6.0.1` 要求 Node `>=20.17.0` 且 peer `node-gyp@12.x`；仓库 root `engines` 目前仅声明 Node `>=20.0.0`。TypeORM `0.3.31` 的 `sqlite3` peerOptional 范围包含 `^5.0.3 || ^6.0.0`，但这不构成对新 native install chain、Node 最低版本或本项目迁移/运行测试的完整兼容证明。`bcrypt@6.0.0` 要求 Node `>=18`，但仍需验证 native install/build。建议另立安全修复任务，在升级 Node 最低版本后，先验证 sqlite3/bcrypt 新链路与迁移/全量并发回归；不要用 override 猜测绕过。
+- `npm audit --omit=dev` 的 13 项 High 及其他 production advisories 仍需在后续安全任务逐项审查。当前 Task14 仅准确记录风险，没有修依赖；不能把 npm audit 说成通过。
+
 ## 文档引用
 
 - **设计文档**: [docs/superpowers/specs/2026-07-28-filestation-design.md](superpowers/specs/2026-07-28-filestation-design.md)
-- **Phase 1 实施计划**: [docs/superpowers/plans/2026-07-28-phase1-mvp-v1.7.md](superpowers/plans/2026-07-28-phase1-mvp-v1.7.md)（当前权威版本）
+- **Phase 1 实施计划**: [docs/superpowers/plans/2026-07-28-phase1-mvp-v1.7.md](superpowers/plans/2026-07-28-phase1-mvp-v1.7.md)（历史实现计划）
 - **Agent 手册**: [AGENTS.md](../AGENTS.md)
 - **架构决策**: [docs/adr/](adr/)
+- **MCP 决策**: [ADR-0005](adr/0005-mcp-embedded-with-api-token.md)
 
 ## 待办事项
 
 ### Phase 2 后续
 
-暂无；新增 Phase 2 工作需另行规划。
+- 发布 security gate：另立安全修复任务，先评审并修复/单独接受当前 Critical/High npm audit advisory；Task14 未修改依赖。
+- 用户手动验收：真实 MCP 客户端、375px 小屏/设备；TOTP 与恢复码流程；刷新页面后的上传续传。
 
 ### 待设计（Phase 3+）
 
@@ -171,6 +209,7 @@ FileStation 是一个私有文件传输站 Web 应用，**Phase 1: MVP 已完成
 - **2026-09-26**: Task 13 第二轮复审修复（提交 `b5c262c`）：normal complete 与 FileLifecycle recovery 共用 owner-guarded 独立 SQLite heartbeat，覆盖完整 stage2 至 stage3 提交；renew 必须命中未过期 lease 与当前 owner，失权会 abort combine/hash 并阻止 rename/finalize，模块销毁及异常路径清理 heartbeat。新增短 lease + 可控 I/O gate 的跨 lease/独立 lifecycle 竞争、恢复与正常 complete owner replacement 不发布回归。Focused concurrency/recovery/folder E2E 连续 3 轮各 16 passed；server unit 25 suites / 172 passed / 20 todo、全量 E2E 9 suites / 81 passed、Web 15 files / 131 passed，root typecheck/build/diff-check 通过。Lint 不可用（server/web 缺少 ESLint，shared 无 lint script）；等待最终独立复审。
 - **2026-09-26**: Task 13 第三轮复审修复：RED 用真实 `StorageService.combineParts` 和两个独立 FileLifecycle/SQLite immediate transaction 实例复现旧 owner abort cleanup 删除 replacement 的共享 `<stored>.tmp`，改为 `<stored>.verify-<owner UUID>.tmp` owner 专属 staging；合并后通过 heartbeat 立即续租并再次 owner-guard，再原子 rename 发布，失败只 unlink 自身 staging。启动孤儿扫描保护匹配 token 且 lease 未过期的 staging，清理过期 owner staging 与旧版 `<stored>.tmp`；旧版无 lease 行按 5 分钟 legacy 窗口保护。另将 VerifyLeaseError('lost') 映射回 HTTP 409 `UPLOAD_FINALIZE_LOST`，仅 request 已 abort 时把 cancelled 变为可由 Controller 吞掉的 AbortError。三项新/收紧回归均先 RED 后 GREEN；focused concurrency/recovery/folder E2E 连续 3 轮各 18 passed，server unit 25 suites / 172 passed / 20 todo、全量 E2E 9 suites / 83 passed、Web 15 files / 131 passed、root typecheck/build/diff-check 通过。Lint 不可用；滚动升级不应让未升级旧进程与新版本并行写同一 DB/storage，部署时先停止旧进程，避免旧版共享临时路径和非原子 owner fence 窗口。
 - **2026-09-26**: Task 13 最终独立复审 APPROVED（无 Critical/P1/P2），批准代码提交 `414aa1e8e34ff37e6bcce8882d0eab02e6053cde`。最终验证记录：focused concurrency/recovery/folder E2E 连续 3 轮各 18 passed；server unit 25 suites / 172 passed / 20 todo；server E2E 9 suites / 83 passed；Web `npx vitest run --no-cache` 15 files / 131 passed；root typecheck/build 与 `git diff --check` 通过。测试中的 owner-loss AbortError/被拒 complete 与 MCP `request entity too large` 是回归用例预期日志；默认 Web Vitest 在 131 项均通过后写 cache 遇 EPERM，`--no-cache` 全量复跑 exit 0。孤儿扫描依赖不变量：final stored name 与 owner token 均保持 UUIDv4，才能匹配 `<stored UUID>.verify-<owner UUID>.tmp` / legacy `<stored UUID>.tmp` 并回收孤儿。部署残余边界：新旧版本不能同时对同一 DB/storage 做 finalization，升级前先 drain/stop 旧进程；数据库 lease fence 不是跨进程文件系统锁。
+- **2026-09-26**: Task 14 文档收尾更新设计 v2.3、ADR-0005、Agent 手册与 README；补充 Task13 混合版本部署硬限制、UUID staging 不变量、Phase2 用户验收 pending 和 npm audit gate。文档变更后 server unit 25 suites / 172 passed / 20 todo、完整 E2E 9 suites / 83 passed、Web no-cache 15 files / 131 passed、typecheck/build/diff-check 通过；根 `CI=true npm test` 最终因 shared 缺少 `test` script exit 1，lint 因无 ESLint 无法运行。npm audit 当前快照 46 findings（production 闭包 28，含 Critical `tar@6.2.1`），未运行自动修复/大版本升级；发布 security gate 与真实 MCP/375px/TOTP-recovery/刷新续传手动验收均仍 pending，未宣称 Phase2 发布验收完成。
 
 ---
 
