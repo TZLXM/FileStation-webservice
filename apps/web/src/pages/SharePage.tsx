@@ -55,9 +55,10 @@ export default function SharePage() {
         { 'Authorization': `Bearer ${downloadToken}` },
       );
 
-      // 使用票据 URL 下载
+      // 使用票据 URL 下载（子路径部署：服务端返回的 ticket_url 是根路径绝对地址，需加 base 前缀）
+      const basePath = import.meta.env.VITE_BASE_PATH || '';
       const a = document.createElement('a');
-      a.href = response.data!.ticket_url;
+      a.href = `${basePath}${response.data!.ticket_url}`;
       a.download = shareInfo?.filename || 'download';
       a.click();
     } catch (err: any) {
