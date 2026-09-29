@@ -30,9 +30,11 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 function App() {
+  // 子路径部署支持：构建时注入 VITE_BASE_PATH（如 /fs），默认根路径
+  const basePath = import.meta.env.VITE_BASE_PATH || '';
   return (
     <RecoveryGenerationProvider>
-      <BrowserRouter>
+      <BrowserRouter basename={basePath}>
         <Routes>
           <Route path="/init" element={<InitPage />} />
           <Route path="/login" element={<LoginPage />} />

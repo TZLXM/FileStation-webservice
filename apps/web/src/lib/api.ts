@@ -1,6 +1,7 @@
 import { ApiResponse } from '@filestation/shared';
 
-const API_BASE = '/api/v1';
+// 子路径部署支持：构建时注入 VITE_API_BASE（如 /fs/api/v1），默认根路径 /api/v1
+const API_BASE = import.meta.env.VITE_API_BASE || '/api/v1';
 
 export type UploadApiStatus = 'initiated' | 'uploading' | 'verifying' | 'completed' | 'aborted' | 'expired' | 'failed';
 
