@@ -1,3 +1,4 @@
+import { syncRecoveryTree, verifyExistingBootstrap } from "./backup-assets";
 import { createHash } from "node:crypto";
 import {
   copyFile,
@@ -22,7 +23,8 @@ import {
 import {
   ProcessIdentityProvider,
 } from "../state/boot-identity";
-import { AttemptJournal } from "../state/attempt-journal";
+import { assertLaunchRecoverySafe, unresolvedRecoveryMarker } from "../state/launch-recovery";
+import { AttemptJournal, JournalCorruptError } from "../state/attempt-journal";
 import {
   ManagedInstallMetadata,
   loadManagedInstallMetadata,
@@ -124,7 +126,7 @@ interface CopyOptions {
   excludedPaths: string[];
   releaseOnly?: boolean;
   symlinkBoundary?: string;
-  absoluteInternalSymlinkTarget?: boolean;
+  destinationBoundary?: string;
 }
 
 class BootstrapDurableFileSystem extends NodeDurableFileSystem {
@@ -259,12 +261,13 @@ async function copySafeTree(options: CopyOptions): Promise<CopyEntry[]> {
           throw new Error(`legacy source symlink escapes its root: ${relative}`);
         }
         const targetMetadata = await stat(targetAbsolute);
+        const relocatedTarget = path.join(options.destinationBoundary ?? options.destinationRoot, path.relative(symlinkBoundary, targetAbsolute));
         await options.fs.ensurePrivateDirectory(path.dirname(destination));
         if (process.platform === "win32" && targetMetadata.isDirectory()) {
-          await options.fs.createJunction(targetAbsolute, destination);
+          await options.fs.createJunction(relocatedTarget, destination);
         } else {
           await options.fs.symlink(
-            options.absoluteInternalSymlinkTarget ? targetAbsolute : target,
+            path.relative(path.dirname(destination), relocatedTarget),
             destination,
           );
         }
@@ -272,7 +275,7 @@ async function copySafeTree(options: CopyOptions): Promise<CopyEntry[]> {
           path: normalizeRelative(relative),
           type: "symlink",
           size: 0,
-          target: normalizeRelative(target),
+          target: normalizeRelative(path.relative(path.dirname(destination), relocatedTarget)),
         });
         continue;
       }
@@ -441,7 +444,23 @@ async function assertOldProcessStopped(
     );
   }
   const currentBoot = await options.identityProvider.current();
-  if (currentBoot.value !== options.oldBootIdentity) {
+  const providerPattern = currentBoot.provider === "linux-proc"
+    ? /^linux:(?!00000000-0000-0000-0000-000000000000$)[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
+    : currentBoot.provider === "windows-cim"
+      ? /^win32:\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3,7}Z$/ : undefined;
+  const valid = (value: string) => providerPattern?.test(value) &&
+    (currentBoot.provider !== "windows-cim" ||
+      (Number.isFinite(Date.parse(value.slice(6))) &&
+       new Date(value.slice(6)).toISOString() === value.slice(6).replace(/\.(\d+)Z$/, (_, fraction: string) => `.${fraction.slice(0, 3)}Z`)));
+  if (!valid(currentBoot.value) || !valid(options.oldBootIdentity))
+    throw new Error("old boot identity is invalid or not comparable to the current provider boot identity");
+  const processPattern = currentBoot.provider === "linux-proc" ? /^linux-starttime:\d+$/ : /^win32:\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3,7}Z$/;
+  if (!processPattern.test(options.oldProcessCreatedAt) ||
+      (currentBoot.provider === "windows-cim" &&
+       (!valid(options.oldProcessCreatedAt) || options.oldProcessCreatedAt.length !== currentBoot.value.length)))
+    throw new Error("old process creation identity is invalid for the boot identity provider");
+  const comparableBoot = (value: string) => value.replace(/\.(\d+)Z$/, (_, fraction: string) => `.${fraction.padEnd(7, "0")}Z`);
+  if (comparableBoot(currentBoot.value) !== comparableBoot(options.oldBootIdentity)) {
     return;
   }
   const alive = await options.identityProvider.isProcessAlive(
@@ -569,9 +588,9 @@ export async function bootstrapManagedInstall(
     legacyRoot: options.legacyRoot,
     installRoot: options.installRoot,
     configuredPaths: {
-      database: environment.FILESTATION_DB_PATH,
-      storage: environment.FILESTATION_STORAGE_PATH,
-      temp: environment.FILESTATION_TEMP_PATH,
+      database: options.configuredPaths?.database ?? environment.FILESTATION_DB_PATH,
+      storage: options.configuredPaths?.storage ?? environment.FILESTATION_STORAGE_PATH,
+      temp: options.configuredPaths?.temp ?? environment.FILESTATION_TEMP_PATH,
     },
     overrides: options.overrides,
     relativePathPolicy: options.relativePathPolicy,
@@ -630,6 +649,7 @@ export async function bootstrapManagedInstall(
     ) {
       const current = path.join(pathPlan.installRoot, "current");
       const currentRealpath = await fs.realpath(current);
+      await verifyExistingBootstrap(existing, pathPlan.proposed, releaseRealpath, currentRealpath, fs);
       return resultFor(
         "already-bootstrapped",
         existing,
@@ -756,7 +776,7 @@ export async function bootstrapManagedInstall(
         fs,
         excludedPaths,
         symlinkBoundary: pathPlan.legacyRoot,
-        absoluteInternalSymlinkTarget: true,
+        destinationBoundary: releaseRealpath,
       });
     }
 
@@ -830,6 +850,7 @@ export async function bootstrapManagedInstall(
             size: envBytes.length,
           }
         : { present: false },
+      snapshotReceipt,
       snapshot: {
         storedPath: "database.sqlite",
         sha256: sha256(await readFile(snapshotPath)),
@@ -852,6 +873,7 @@ export async function bootstrapManagedInstall(
       manifestBytes,
       { mode: 0o600 },
     );
+    await syncRecoveryTree(pathPlan.installRoot, fs);
     await fs.writeAtomic(
       managedMetadataPath,
       Buffer.from(`${JSON.stringify(metadata, null, 2)}\n`, "utf8"),
@@ -893,6 +915,8 @@ export async function inspectManagedUpdate(
 ): Promise<ManagedUpdateInspection> {
   const fs = options.fs ?? new NodeDurableFileSystem();
   const metadata = await loadManagedInstallMetadata(root, { fs });
+  const marker = await unresolvedRecoveryMarker(root, fs);
+  if (marker) return { state: "active", installId: metadata.installId, pendingAction: `unresolved-${marker}` };
   const journalPath = path.join(path.resolve(root), "update-attempt.journal");
   if (!(await fs.exists(journalPath))) {
     return {
@@ -900,15 +924,23 @@ export async function inspectManagedUpdate(
       installId: metadata.installId,
     };
   }
-  const journal = await AttemptJournal.open(path.resolve(root), { fs });
-  const snapshot = await journal.readSnapshot();
+  let snapshot;
+  try { snapshot = await AttemptJournal.inspect(path.resolve(root), { fs }); }
+  catch (error) {
+    if (!(error instanceof JournalCorruptError)) throw error;
+    return { state: "active", installId: metadata.installId, pendingAction: "uncertain-journal-recovery-required" };
+  }
   if (!snapshot.phase) {
     return {
       state: "no-active-update",
       installId: metadata.installId,
     };
   }
-  const terminal = TERMINAL_PHASES.has(snapshot.phase);
+  let terminal = TERMINAL_PHASES.has(snapshot.phase) && !snapshot.pending;
+  if (terminal) {
+    try { await assertLaunchRecoverySafe(root, await fs.realpath(metadata.currentPath), fs); }
+    catch { terminal = false; }
+  }
   return {
     state: terminal ? "terminal" : "active",
     installId: metadata.installId,

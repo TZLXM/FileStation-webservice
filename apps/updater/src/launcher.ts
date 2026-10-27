@@ -1,6 +1,7 @@
 import { readFile as readFileFromDisk, realpath } from "node:fs/promises";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { assertLaunchRecoverySafe } from "./state/launch-recovery";
 import { parse as parseDotenv } from "dotenv";
 import {
   DurableFileSystem,
@@ -9,6 +10,7 @@ import {
 import {
   ManagedInstallPaths,
   canonicalPathKey,
+  canonicalizePotentialPath,
   pathWithin,
   sameCanonicalPath,
 } from "./bootstrap/path-plan";
@@ -270,6 +272,21 @@ export function validateManagedLaunch(
   };
 }
 
+/** Read-only filesystem checks shared by CLI and direct server startup. */
+export async function validateManagedLaunchOnDisk(
+  input: ManagedLaunchValidationInput,
+  fs: DurableFileSystem = new NodeDurableFileSystem(),
+): Promise<ManagedLaunchPlan> {
+  const plan = validateManagedLaunch(input);
+  for (const key of ["database", "storage", "temp"] as const) {
+    const actual = await canonicalizePotentialPath(plan.paths[key], plan.installRoot);
+    if (!sameCanonicalPath(actual, plan.paths[key]))
+      throw new Error(`${key} canonical target drift detected before writes`);
+  }
+  await assertLaunchRecoverySafe(plan.installRoot, plan.releaseRealpath, fs);
+  return plan;
+}
+
 export async function launchManagedInstall(
   options: LaunchManagedInstallOptions,
 ): Promise<LaunchManagedInstallResult> {
@@ -293,13 +310,13 @@ export async function launchManagedInstall(
     storage: environment.values.FILESTATION_STORAGE_PATH,
     temp: environment.values.FILESTATION_TEMP_PATH,
   };
-  const plan = validateManagedLaunch({
+  const plan = await validateManagedLaunchOnDisk({
     cwd: options.cwd ?? process.cwd(),
     executableRealpath,
     installMetadata: metadata,
     currentRealpath,
     configuredPaths,
-  });
+  }, fs);
 
   for (const [key, value] of Object.entries(environment.values)) {
     targetEnvironment[key] = value;
@@ -314,7 +331,7 @@ export async function launchManagedInstall(
   );
   const importer =
     options.importer ??
-    ((specifier: string) => import(specifier));
+    (async (specifier: string) => require(fileURLToPath(specifier)));
   const imported = await importer(pathToFileURL(serverMain).href);
   return { plan, imported };
 }

@@ -55,8 +55,16 @@ if ($ByNginx) {
   $env:FILESTATION_HOST = "127.0.0.1"
 }
 
+$Root = [System.IO.Path]::GetFullPath($Root)
 $cliArguments = @($cli, "launch", "--root", $Root)
 if ($DryRun) { $cliArguments += "--dry-run" }
 $node = Resolve-FileStationNode
-& $node @cliArguments
-exit $LASTEXITCODE
+if (-not (Test-Path -LiteralPath (Join-Path $Root "managed-install.json") -PathType Leaf)) {
+  throw "managed-install.json metadata is missing at the installation root"
+}
+Push-Location -LiteralPath $Root
+try {
+  & $node @cliArguments
+  $launchExitCode = $LASTEXITCODE
+} finally { Pop-Location }
+exit $launchExitCode

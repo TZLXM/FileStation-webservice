@@ -97,6 +97,7 @@ export interface DurableFileSystem {
   readdir(directory: string): Promise<string[]>;
   symlink(target: string, link: string): Promise<void>;
   createJunction(target: string, link: string): Promise<void>;
+  syncFile(filename: string): Promise<void>;
   fsyncDirectory(directory: string): Promise<void>;
   statfs(candidate: string): Promise<DurableStatFs>;
   protect(filename: string, directory: boolean): Promise<void>;
@@ -555,6 +556,21 @@ export class NodeDurableFileSystem implements DurableFileSystem {
     if (!this.windows) throw new Error("Windows junction requires win32");
     await symlink(path.win32.resolve(target), link, "junction");
     await this.fsyncDirectory(path.dirname(link));
+  }
+
+  /** Flush an existing recovery asset without rewriting or truncating it. */
+  async syncFile(filename: string): Promise<void> {
+    if (this.windows) {
+      const handle = this.windows.api.create(filename, GENERIC_WRITE, 7, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH);
+      try {
+        this.windows.diagnostics.flushFileBuffers++;
+        await this.flushFile(filename, async () => { this.windows!.api.flush(handle); });
+      } finally { this.windows.api.close(handle); }
+    } else {
+      const handle = await open(filename, "r+");
+      try { await this.flushFile(filename, () => handle.sync()); }
+      finally { await handle.close(); }
+    }
   }
 
   async fsyncDirectory(directory: string): Promise<void> {

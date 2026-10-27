@@ -1,4 +1,4 @@
-import { access } from "node:fs/promises";
+import { lstat } from "node:fs/promises";
 import path from "node:path";
 
 export interface StartupModeInput {
@@ -13,7 +13,7 @@ export type StartupMode =
 
 async function exists(filename: string): Promise<boolean> {
   try {
-    await access(filename);
+    await lstat(filename);
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
@@ -57,6 +57,15 @@ export async function detectStartupMode(
     seen.add(key);
     if (await exists(path.join(root, "managed-install.json"))) {
       return { mode: "managed", root };
+    }
+  }
+
+  // A managed layout or durable marker cannot silently fall back to legacy.
+  for (const candidate of seen) {
+    for (const marker of ["current", "releases", "updater", ".bootstrap-in-progress.json", "update-attempt.journal", "update.lock", "update.recovery.lock"]) {
+      if (marker === "updater" && path.basename(candidate).toLowerCase() === "apps") continue;
+      if (await exists(path.join(candidate, marker)))
+        throw new Error(`managed-install.json is missing for managed layout at ${candidate}`);
     }
   }
 

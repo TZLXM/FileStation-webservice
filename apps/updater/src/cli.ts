@@ -13,7 +13,7 @@ import {
   launchManagedInstall,
   loadInstallEnvironment,
   loadManagedInstallMetadata,
-  validateManagedLaunch,
+  validateManagedLaunchOnDisk,
 } from "./launcher";
 import {
   PlatformBootIdentityProvider,
@@ -245,8 +245,8 @@ export async function main(
       realpath(path.join(currentRealpath, "apps/server/dist/main.js")),
   );
   if (values["dry-run"] === true) {
-    const plan = validateManagedLaunch({
-      cwd: installRoot,
+    const plan = await validateManagedLaunchOnDisk({
+      cwd: process.cwd(),
       executableRealpath,
       currentRealpath,
       installMetadata: metadata,
@@ -263,7 +263,7 @@ export async function main(
   }
   await launchManagedInstall({
     root: installRoot,
-    cwd: installRoot,
+    cwd: process.cwd(),
     currentRealpath,
     executableRealpath,
     metadata,

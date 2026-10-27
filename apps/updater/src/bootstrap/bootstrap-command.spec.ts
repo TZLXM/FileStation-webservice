@@ -1,17 +1,20 @@
 import { createHash } from "node:crypto";
 import {
+  cp,
   lstat,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
   readlink,
+  rename,
   realpath,
   rm,
   symlink,
   unlink,
   writeFile,
 } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -126,7 +129,7 @@ async function sourceFixture(): Promise<SourceFixture> {
 
 function stoppedProcess(): ProcessIdentityProvider {
   return {
-    current: async () => ({ provider: "linux-proc", value: "fixture-boot" }),
+    current: async () => ({ provider: "linux-proc", value: "linux:11111111-2222-3333-4444-555555555555" }),
     processCreatedAt: jest.fn(),
     isProcessAlive: async () => false,
     listeningPid: async () => undefined,
@@ -146,7 +149,7 @@ function commonOptions(
     },
     relativePathPolicy: "preserve" as const,
     oldPid: 4242,
-    oldBootIdentity: "fixture-boot",
+    oldBootIdentity: "linux:11111111-2222-3333-4444-555555555555",
     oldProcessCreatedAt: "linux-starttime:123",
     identityProvider: stoppedProcess(),
     snapshotDatabase: async ({
@@ -449,7 +452,7 @@ describe("managed bootstrap", () => {
         path.join(result.installRoot, "node_modules/fixture-workspace"),
       ),
     ).toBe(
-      path.join(fixture.legacyRoot, "packages/fixture-workspace"),
+      path.join(result.releaseRealpath, "packages/fixture-workspace"),
     );
     await expect(
       readFile(
@@ -492,4 +495,110 @@ describe("managed bootstrap", () => {
       /authenticated Task 9 recovery orchestrator/,
     );
   });
+  it("honors configured paths supplied by CLI dotenv merging", async () => {
+    fixture = await sourceFixture();
+    await writeFile(path.join(fixture.legacyRoot, "custom.db"), "custom database");
+    const result = await bootstrapManagedInstall({ ...commonOptions(fixture),
+      configuredPaths: { database: "./custom.db", storage: "./custom-storage", temp: "./custom-temp" } });
+    expect(result.paths.database).toBe(path.join(fixture.legacyRoot, "custom.db"));
+    expect(result.paths.storage).toBe(path.join(fixture.legacyRoot, "custom-storage"));
+    expect(result.paths.temp).toBe(path.join(fixture.legacyRoot, "custom-temp"));
+  });
+
+  it.each(["typo", "win32:2026-01-01T00:00:00.000Z", "linux:bad", "linux:00000000-0000-0000-0000-000000000000"])("fails closed on unrecognized or incomparable old boot %s", async (oldBootIdentity) => {
+    fixture = await sourceFixture();
+    await expect(bootstrapManagedInstall({ ...commonOptions(fixture), oldBootIdentity })).rejects.toThrow(/boot.*identity|identity.*boot/i);
+    await expect(lstat(fixture.installRoot)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("keeps backup, release and standalone dependency resolution after old source moves", async () => {
+    fixture = await sourceFixture();
+    await writeFile(path.join(fixture.legacyRoot, "packages/fixture-workspace/package.json"), JSON.stringify({ name: "fixture-workspace", main: "index.js" }));
+    await writeFile(path.join(fixture.legacyRoot, "packages/fixture-workspace/index.js"), "module.exports = 'fixture workspace';\n");
+    const result = await bootstrapManagedInstall(commonOptions(fixture));
+    const moved = path.join(fixture.root, "moved-source");
+    await rename(fixture.legacyRoot, moved);
+    for (const tree of [result.releaseRealpath, path.join(result.installRoot, "backups", result.backupId, "legacy-source"), result.installRoot]) {
+      await expect(readFile(path.join(tree, "node_modules/fixture-workspace/index.js"), "utf8")).resolves.toBe("module.exports = 'fixture workspace';\n");
+      expect(await realpath(path.join(tree, "node_modules/fixture-workspace"))).not.toContain(moved);
+      const run = spawnSync(process.execPath, ["-e", "require('node:assert/strict').equal(require('fixture-workspace'), 'fixture workspace')"], { cwd: tree, encoding: "utf8", windowsHide: true });
+      expect(run.stderr).toBe(""); expect(run.status).toBe(0);
+    }
+    const restored = path.join(fixture.root, "restored-source");
+    const backup = path.join(result.installRoot, "backups", result.backupId);
+    await cp(path.join(backup, "legacy-source"), restored, { recursive: true, dereference: true });
+    await cp(path.join(backup, "env/legacy.env"), path.join(restored, ".env"));
+    await mkdir(path.join(restored, "data"), { recursive: true });
+    await cp(path.join(backup, "database.sqlite"), path.join(restored, "data/filestation.db"));
+    const restart = spawnSync(process.execPath, ["-e", "require('node:assert/strict').equal(require('fixture-workspace'), 'fixture workspace')"], { cwd: restored, encoding: "utf8", windowsHide: true });
+    expect(restart.stderr).toBe(""); expect(restart.status).toBe(0);
+    await expect(readFile(path.join(restored, "src.txt"), "utf8")).resolves.toBe("fixture source\n");
+  });
+
+  it.each(["paths", "current", "manifest", "snapshot", "source", "env"])("rejects damaged idempotent installation: %s", async (damage) => {
+    fixture = await sourceFixture();
+    const result = await bootstrapManagedInstall(commonOptions(fixture));
+    const backup = path.join(result.installRoot, "backups", result.backupId);
+    if (damage === "paths") {
+      const filename = path.join(result.installRoot, "managed-install.json");
+      const metadata = JSON.parse(await readFile(filename, "utf8"));
+      metadata.paths.temp = path.join(fixture.root, "wrong-temp");
+      await writeFile(filename, JSON.stringify(metadata));
+    } else if (damage === "current") {
+      await unlink(path.join(result.installRoot, "current"));
+      await symlink(fixture.legacyRoot, path.join(result.installRoot, "current"), process.platform === "win32" ? "junction" : "dir");
+    } else {
+      const filename = { manifest: "MANIFEST.json", snapshot: "database.sqlite", source: "legacy-source/src.txt", env: "env/legacy.env" }[damage as "manifest" | "snapshot" | "source" | "env"];
+      await writeFile(path.join(backup, filename), "corruption");
+    }
+    await expect(bootstrapManagedInstall(commonOptions(fixture))).rejects.toThrow();
+  });
+
+  it("status and recover reject torn tails with zero mutating adapter calls", async () => {
+    fixture = await sourceFixture();
+    await bootstrapManagedInstall(commonOptions(fixture));
+    await writeFile(path.join(fixture.installRoot, "update-attempt.journal"), '{"torn":');
+    const fs = new NodeDurableFileSystem();
+    const ensure = jest.spyOn(fs, "ensurePrivateDirectory");
+    const protect = jest.spyOn(fs, "protect");
+    await expect(inspectManagedUpdate(fixture.installRoot, { fs })).resolves.toMatchObject({ state: "active" });
+    await expect(recoverManagedUpdate(fixture.installRoot, { fs })).rejects.toThrow(/Task 9|recovery/i);
+    expect(ensure).not.toHaveBeenCalled();
+    expect(protect).not.toHaveBeenCalled();
+  });
+
+  it.each(["src.txt", "database.sqlite"])("never publishes success after asset flush failure: %s", async (basename) => {
+    fixture = await sourceFixture();
+    const fs = new (class extends NodeDurableFileSystem {
+      override async protect(): Promise<void> {}
+      protected override async flushFile(filename: string, flush: () => Promise<void>): Promise<void> {
+        if (path.basename(filename) === basename) throw new Error("fixture asset flush failure");
+        await super.flushFile(filename, flush);
+      }
+    })();
+    await expect(bootstrapManagedInstall({ ...commonOptions(fixture), fs })).rejects.toThrow(/asset flush failure/);
+    await expect(lstat(fixture.installRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(path.join(fixture.legacyRoot, "src.txt"), "utf8")).resolves.toBe("fixture source\n");
+  });
+
+  it("accepts only a valid different boot as proof of the old process absence", async () => {
+    fixture = await sourceFixture();
+    const provider = stoppedProcess(); const probe = jest.fn(async () => true); provider.isProcessAlive = probe;
+    const result = await bootstrapManagedInstall({ ...commonOptions(fixture), identityProvider: provider, oldBootIdentity: "linux:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", dryRun: true });
+    expect(result.state).toBe("dry-run"); expect(probe).not.toHaveBeenCalled();
+    await expect(lstat(fixture.installRoot)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not treat equivalent Windows timestamp precision as a different boot", async () => {
+    fixture = await sourceFixture();
+    const provider: ProcessIdentityProvider = {
+      current: async () => ({ provider: "windows-cim", value: "win32:2026-10-28T00:00:00.0000000Z" }),
+      processCreatedAt: async () => "win32:2026-10-28T00:01:00.0000000Z",
+      isProcessAlive: async () => true,
+    };
+    await expect(bootstrapManagedInstall({ ...commonOptions(fixture), identityProvider: provider,
+      oldBootIdentity: "win32:2026-10-28T00:00:00.000Z", oldProcessCreatedAt: "win32:2026-10-28T00:01:00.0000000Z" })).rejects.toThrow(/alive|identity/i);
+    await expect(lstat(fixture.installRoot)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
 });

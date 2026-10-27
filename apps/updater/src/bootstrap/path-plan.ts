@@ -1,4 +1,4 @@
-import { realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 
 export type ManagedPathKey = "database" | "storage" | "temp";
@@ -81,6 +81,14 @@ export async function canonicalizePotentialPath(
       return path.resolve(existing, ...missing.reverse());
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      // A dangling reparse point is an existing redirection, not a missing leaf.
+      // Never canonicalize it by walking past it to an unrelated lexical parent.
+      try {
+        if ((await lstat(cursor)).isSymbolicLink())
+          throw new Error("canonical path contains a dangling symlink or junction");
+      } catch (entryError) {
+        if ((entryError as NodeJS.ErrnoException).code !== "ENOENT") throw entryError;
+      }
       const parent = path.dirname(cursor);
       if (parent === cursor) throw error;
       const basename = path.basename(cursor);

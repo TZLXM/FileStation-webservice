@@ -3,6 +3,7 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   unlink,
@@ -16,6 +17,8 @@ import {
   ManagedInstallMetadata,
   validateManagedLaunch,
 } from "./launcher";
+import { AttemptJournal } from "./state/attempt-journal";
+import { context } from "./test-support";
 import { NodeDurableFileSystem } from "./platform/durable-fs";
 
 class CountingReadOnlyFs extends NodeDurableFileSystem {
@@ -295,4 +298,66 @@ describe("managed launcher", () => {
     ).rejects.toThrow(/managed-install\.json.*missing|metadata.*missing/i);
     expect(importer).not.toHaveBeenCalled();
   });
+  it.each(["database", "storage", "temp"] as const)("rejects fresh canonical %s ancestor drift before import or writes", async (key) => {
+    const value = await fixture(); root = value.root;
+    const parent = path.dirname(value.metadata.paths[key]);
+    await rename(parent, `${parent}-moved`);
+    await symlink(`${parent}-moved`, parent, process.platform === "win32" ? "junction" : "dir");
+    const fs = new CountingReadOnlyFs(); const importer = jest.fn();
+    await expect(launchManagedInstall({ root: value.installRoot, cwd: value.installRoot, fs, importer, processEnvironment: {} })).rejects.toThrow(/canonical.*(drift|target)|canonical path/i);
+    expect(fs.writeCount).toBe(0); expect(importer).not.toHaveBeenCalled();
+    await unlink(parent);
+  });
+
+  it.each(["PREPARED", "SWITCH_INTENT", "CURRENT_SWITCHED", "COMMITTED", "torn", "lock", "marker"])("refuses ambiguous recovery state %s before module import", async (phase) => {
+    const value = await fixture(); root = value.root;
+    if (phase === "torn") await writeFile(path.join(value.installRoot, "update-attempt.journal"), '{"partial":');
+    else if (phase === "lock") await writeFile(path.join(value.installRoot, "update.lock"), "uncertain");
+    else if (phase === "marker") await writeFile(path.join(value.installRoot, ".bootstrap-in-progress.json"), "{}");
+    else {
+      const journal = await AttemptJournal.open(value.installRoot);
+      await journal.beginAttempt({ ...context(), phase: phase as "PREPARED", targetVersion: "9.9.9" });
+    }
+    const fs = new CountingReadOnlyFs(); const importer = jest.fn();
+    await expect(launchManagedInstall({ root: value.installRoot, cwd: value.installRoot, fs, importer, processEnvironment: {} })).rejects.toThrow(/recovery|journal|COMMITTED|Task 9/i);
+    expect(fs.writeCount).toBe(0); expect(importer).not.toHaveBeenCalled();
+  });
+  it("rejects COMMITTED current of the same version when switch target differs", async () => {
+    const value = await fixture(); root = value.root;
+    await writeFile(path.join(value.release, "package.json"), JSON.stringify({ version: "0.2.5" }));
+    const journal = await AttemptJournal.open(value.installRoot);
+    await journal.beginAttempt(context());
+    const switched = await journal.appendIntent({ attemptId: "attempt-01", fence: 1, phase: "SWITCH_INTENT", action: "attach-current", payload: { target: value.oldRelease } });
+    await journal.appendCompletion({ attemptId: "attempt-01", fence: 1, intentId: switched.id, phase: "CURRENT_SWITCHED" });
+    const commit = await journal.appendIntent({ attemptId: "attempt-01", fence: 1, phase: "READY_TO_COMMIT", action: "commit-update" });
+    await journal.appendCompletion({ attemptId: "attempt-01", fence: 1, intentId: commit.id, phase: "COMMITTED" });
+    await expect(launchManagedInstall({ root: value.installRoot, cwd: value.installRoot, processEnvironment: {}, importer: jest.fn() })).rejects.toThrow(/COMMITTED|recovery/i);
+  });
+
+  it("allows the journal-authorized COMMITTED current after locks are released", async () => {
+    const value = await fixture(); root = value.root;
+    await writeFile(path.join(value.release, "package.json"), JSON.stringify({ version: "0.2.5" }));
+    const journal = await AttemptJournal.open(value.installRoot);
+    await journal.beginAttempt(context());
+    const switched = await journal.appendIntent({ attemptId: "attempt-01", fence: 1, phase: "SWITCH_INTENT", action: "attach-current", payload: { target: value.release } });
+    await journal.appendCompletion({ attemptId: "attempt-01", fence: 1, intentId: switched.id, phase: "CURRENT_SWITCHED" });
+    const commit = await journal.appendIntent({ attemptId: "attempt-01", fence: 1, phase: "READY_TO_COMMIT", action: "commit-update" });
+    await journal.appendCompletion({ attemptId: "attempt-01", fence: 1, intentId: commit.id, phase: "COMMITTED" });
+    const fs = new CountingReadOnlyFs(); const importer = jest.fn();
+    await launchManagedInstall({ root: value.installRoot, cwd: value.installRoot, processEnvironment: {}, targetEnvironment: {}, fs, importer });
+    expect(fs.writeCount).toBe(0); expect(importer).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a missing-leaf path beneath a dangling ancestor junction", async () => {
+    const value = await fixture(); root = value.root;
+    const parent = path.dirname(value.metadata.paths.database);
+    await rm(parent, { recursive: true });
+    await symlink(path.join(root, "missing-target"), parent, process.platform === "win32" ? "junction" : "dir");
+    const fs = new CountingReadOnlyFs(); const importer = jest.fn();
+    try {
+      await expect(launchManagedInstall({ root: value.installRoot, cwd: value.installRoot, fs, importer, processEnvironment: {} })).rejects.toThrow(/canonical|dangling/i);
+      expect(fs.writeCount).toBe(0); expect(importer).not.toHaveBeenCalled();
+    } finally { await unlink(parent); }
+  });
+
 });

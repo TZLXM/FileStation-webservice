@@ -48,4 +48,6 @@ if [[ ! -f "$CLI" ]]; then
   echo "Updater CLI is not built. Run: npm run build --workspace=@filestation/updater" >&2
   exit 1
 fi
+ROOT="$(CDPATH= cd -- "$ROOT" && pwd)"
+cd -- "$ROOT"
 exec "$NODE_BIN" "$CLI" launch --root "$ROOT" "${FORWARD[@]}"

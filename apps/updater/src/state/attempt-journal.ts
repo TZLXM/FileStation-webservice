@@ -498,6 +498,19 @@ export class AttemptJournal {
     return journal;
   }
 
+  /** Strict read-only inspection: unlike recovery reads, never discards a torn tail. */
+  static async inspect(root: string, options: AttemptJournalOptions = {}): Promise<AttemptJournalSnapshot> {
+    const fs = options.fs ?? new NodeDurableFileSystem();
+    const filename = path.join(root, JOURNAL_FILENAME);
+    if (await fs.exists(filename)) {
+      const raw = await fs.readFile(filename);
+      if (raw.length && raw.at(-1) !== 0x0a)
+        throw new JournalCorruptError("partial journal tail requires exclusive recovery");
+    }
+    const journal = new AttemptJournal(root, filename, fs, options.now ?? (() => new Date()), options.id ?? randomUUID);
+    return summarize(await journal.loadAndRepair(true));
+  }
+
   private withWrite<T>(operation: () => Promise<T>): Promise<T> {
     const next = this.writeQueue.then(operation, operation);
     this.writeQueue = next.then(
@@ -507,13 +520,14 @@ export class AttemptJournal {
     return next;
   }
 
-  private async loadAndRepair(): Promise<JournalRecord[]> {
+  private async loadAndRepair(strict = false): Promise<JournalRecord[]> {
     if (!(await this.fs.exists(this.filename))) return [];
     const raw = await this.fs.readFile(this.filename);
     if (raw.length > MAX_JOURNAL_BYTES)
       throw new JournalCorruptError("journal exceeds size limit");
     let retained = raw;
     if (raw.length && raw[raw.length - 1] !== 0x0a) {
+      if (strict) throw new JournalCorruptError("partial journal tail requires exclusive recovery");
       const boundary = raw.lastIndexOf(0x0a);
       retained = boundary < 0 ? Buffer.alloc(0) : raw.subarray(0, boundary + 1);
 

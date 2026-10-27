@@ -67,4 +67,11 @@ describe("server startup mode", () => {
       }),
     ).rejects.toThrow(/managed-install\.json.*missing/i);
   });
+  it.each(["releases/v0.2.0/apps/server/dist/main.js", "updater/dist/cli.js", "current/apps/server/dist/main.js"])("rejects managed layout without metadata or env: %s", async (relative) => {
+    const installRoot = path.join(root, "managed");
+    const executable = path.join(installRoot, relative);
+    await mkdir(path.dirname(executable), { recursive: true });
+    await writeFile(executable, "fixture");
+    await expect(detectStartupMode({ cwd: installRoot, executableRealpath: executable, environment: {} })).rejects.toThrow(/managed.*missing/i);
+  });
 });

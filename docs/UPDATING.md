@@ -138,8 +138,9 @@ storage tree. Any reviewed absolute path override must be an existing canonical
 path and also requires `--accept-path-change`; prepare and validate data at the
 new location separately before starting the managed service.
 
-Start from the installation root so the root `.env` is loaded before server
-modules. Variables already present in the calling process take precedence:
+The source checkout helpers below select the installation root as the child
+process cwd. Root `.env` values load before server modules; variables already
+present in the calling process take precedence:
 
 ```powershell
 .\scripts\start-filestation.ps1 -Root C:\FileStation
@@ -148,6 +149,25 @@ modules. Variables already present in the calling process take precedence:
 ```bash
 scripts/start-filestation.sh --root /srv/filestation
 ```
+
+For the installed standalone updater, use the installation root as cwd:
+
+```powershell
+Set-Location C:\FileStation
+node .\updater\dist\cli.js launch --root .
+```
+
+```bash
+cd /srv/filestation
+node updater/dist/cli.js launch --root .
+```
+
+Direct CLI launch from a different cwd fails before loading the server. A missing
+managed metadata file, changed canonical target (including an ancestor junction),
+active/pending update, torn journal tail or unresolved staging marker also fails
+closed. A completed update must agree with the journal's COMMITTED target version
+and current release. `status` and `recover` inspect the journal without creating
+or protecting directories; uncertain state requires Task 9 recovery.
 
 Use `--dry-run` on `bootstrap` or `launch` to inspect validation without
 creating directories or opening the database. `filestation-updater status
@@ -160,7 +180,20 @@ the recoverable `legacy-source` tree, and a separate `env/legacy.env` copy.
 Restore by stopping the managed process, reviewing that manifest, placing the
 legacy tree and env file at a separate exact path, and starting the old command
 from the original legacy root. Never run old and new versions against the same
-database or storage.
+database or storage. Internal dependency links in the backup and release point
+inside their copied trees; the standalone updater resolves dependencies from the
+managed release. When restoring the source to a different directory, materialize
+those workspace links as ordinary directories or recreate them inside the restored
+tree, restore the separate env file and verified snapshot, and explicitly review
+the resulting canonical data paths before running the old command. The original
+storage is preserved separately; it is never included in the source backup.
+
+Bootstrap flushes copied assets, snapshot and their parent entries before
+publishing managed metadata/current. An idempotent rerun verifies the planned
+paths, expected release, backup manifest, recorded SQLite integrity/FK receipt,
+snapshot/source/env hashes and internal links. A damaged installation is rejected;
+keep the original source intact and investigate instead of treating it as an
+already completed bootstrap.
 
 Nginx configuration is intentionally untouched. Review `proxy_pass` and the
 manual root or `/fs/` configuration, run `nginx -t`, and reload Nginx yourself.
