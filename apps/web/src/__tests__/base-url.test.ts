@@ -150,7 +150,14 @@ describe('Nginx initialization guard versus installed Express matcher', () => {
   const express = serverRequire('express') as typeof import('express');
   const router = express.Router();
   router.post('/api/v1/auth/init', (_req, res) => res.end());
-  const initLayer = router.stack[0];
+  // Express's public ILayer declaration omits this installed runtime method.
+  function hasRuntimeMatch(layer: unknown): layer is { match(path: string): boolean } {
+    return typeof layer === 'object' && layer !== null
+      && 'match' in layer && typeof layer.match === 'function';
+  }
+  const candidateLayer = router.stack[0];
+  if (!hasRuntimeMatch(candidateLayer)) throw new Error('Installed Express Layer.match is unavailable');
+  const initLayer = candidateLayer;
 
   function selectedLocation(uri: string) {
     // Static model of Nginx normalized URI and exact/regex/prefix precedence.
