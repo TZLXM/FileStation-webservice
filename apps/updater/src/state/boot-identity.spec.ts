@@ -125,3 +125,24 @@ describe("PlatformBootIdentityProvider", () => {
     expect(await provider.isProcessAlive(process.pid, creation)).toBe(true);
   });
 });
+
+describe("review identity failures", () => {
+  it.each(["EACCES", "EIO", "malformed"])("fails closed on Linux %s with a live PID probe", async code => {
+    const provider = new PlatformBootIdentityProvider({ platform: "linux", kill: () => true,
+      readFile: async () => { if (code === "malformed") return "bad stat"; throw Object.assign(new Error(code), { code }); } });
+    await expect(provider.isProcessAlive(123, "old")).rejects.toBeInstanceOf(BootIdentityError);
+  });
+  it("fails closed on CIM failure and malformed response", async () => {
+    for (const response of ["failure", "malformed"]) {
+      const provider = new PlatformBootIdentityProvider({ platform: "win32", kill: () => true,
+        runPowerShell: async () => { if (response === "failure") throw new Error("CIM unavailable"); return "garbage"; } });
+      await expect(provider.isProcessAlive(123, "old")).rejects.toBeInstanceOf(BootIdentityError);
+    }
+  });
+  it("accepts only confirmed absence", async () => {
+    const linux = new PlatformBootIdentityProvider({ platform: "linux", readFile: async () => { throw Object.assign(new Error("absent"), { code: "ENOENT" }); } });
+    expect(await linux.isProcessAlive(123, "old")).toBe(false);
+    const win = new PlatformBootIdentityProvider({ platform: "win32", runPowerShell: async () => { throw Object.assign(new Error("absent"), { code: 3 }); } });
+    expect(await win.isProcessAlive(123, "old")).toBe(false);
+  });
+});

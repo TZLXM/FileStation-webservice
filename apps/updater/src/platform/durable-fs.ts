@@ -147,6 +147,7 @@ export interface WindowsNativeApi {
   move(source: string, target: string, flags: number): void;
   volumePath(filename: string): string;
   volumeSerial(volumePath: string): number;
+  volumeGuid(volumePath: string): string;
 }
 
 export interface WindowsDiagnostics {
@@ -189,6 +190,7 @@ export function createWindowsNativeApi(): WindowsNativeApi {
   const getVolumePathName = dll.func(
     "int __stdcall GetVolumePathNameW(const char16_t *filename, _Out_ uint16_t *volumePath, uint32_t length)",
   );
+  const getVolumeName = dll.func("int __stdcall GetVolumeNameForVolumeMountPointW(const char16_t *mount, _Out_ uint16_t *name, uint32_t length)");
   const getVolumeInformation = dll.func(
     "int __stdcall GetVolumeInformationW(const char16_t *root, void *label, uint32_t labelLength, _Out_ uint32_t *serial, void *maxComponent, void *flags, void *filesystem, uint32_t filesystemLength)",
   );
@@ -254,6 +256,11 @@ export function createWindowsNativeApi(): WindowsNativeApi {
         }
       }
       return output.subarray(0, end).toString("utf16le");
+    },
+    volumeGuid(volumePath) {
+      const output = Buffer.alloc(1024);
+      if (!getVolumeName(volumePath, output, 512)) throw winError("GetVolumeNameForVolumeMountPointW failed", getLastError());
+      return output.toString("utf16le").split("\0")[0].toLowerCase();
     },
     volumeSerial(volumePath) {
       // Koffi writes into the array supplied for the serial output pointer.
@@ -341,6 +348,10 @@ export class NodeDurableFileSystem implements DurableFileSystem {
     }
   }
 
+  protected async flushFile(_filename: string, flush: () => Promise<void>): Promise<void> {
+    await flush();
+  }
+
   async append(
     filename: string,
     bytes: Buffer,
@@ -366,7 +377,7 @@ export class NodeDurableFileSystem implements DurableFileSystem {
         this.windows.diagnostics.writeThroughFile++;
         this.windows.api.write(handle, bytes);
         this.windows.diagnostics.flushFileBuffers++;
-        this.windows.api.flush(handle);
+        await this.flushFile(filename, async () => { this.windows!.api.flush(handle); });
       } finally {
         this.windows.api.close(handle);
       }
@@ -390,7 +401,7 @@ export class NodeDurableFileSystem implements DurableFileSystem {
             throw new Error("Short durable append");
           offset += result.bytesWritten;
         }
-        await handle.sync();
+        await this.flushFile(filename, () => handle.sync());
       } finally {
         await handle.close();
       }
@@ -419,7 +430,7 @@ export class NodeDurableFileSystem implements DurableFileSystem {
         this.windows.diagnostics.writeThroughFile++;
         this.windows.api.write(handle, bytes);
         this.windows.diagnostics.flushFileBuffers++;
-        this.windows.api.flush(handle);
+        await this.flushFile(filename, async () => { this.windows!.api.flush(handle); });
       } finally {
         this.windows.api.close(handle);
       }
@@ -441,7 +452,7 @@ export class NodeDurableFileSystem implements DurableFileSystem {
             throw new Error("Short durable write");
           offset += result.bytesWritten;
         }
-        await handle.sync();
+        await this.flushFile(filename, () => handle.sync());
       } finally {
         await handle.close();
       }
@@ -469,7 +480,7 @@ export class NodeDurableFileSystem implements DurableFileSystem {
       const handle = await open(filename, "r+");
       try {
         await handle.truncate(size);
-        await handle.sync();
+        await this.flushFile(filename, () => handle.sync());
       } finally {
         await handle.close();
       }
@@ -619,22 +630,23 @@ export class NodeDurableFileSystem implements DurableFileSystem {
         throw new Error("Unable to determine current Windows user SID");
       this.currentUserSid = sid;
     }
-    const grants = directory
-      ? [
-          `*${this.currentUserSid}:(OI)(CI)F`,
-          "*S-1-5-18:(OI)(CI)F",
-          "*S-1-5-32-544:(OI)(CI)F",
-        ]
-      : [
-          `*${this.currentUserSid}:F`,
-          "*S-1-5-18:F",
-          "*S-1-5-32-544:F",
-        ];
-    await execFileAsync(
-      "icacls.exe",
-      [filename, "/inheritance:r", "/grant:r", ...grants, "/Q"],
-      { windowsHide: true },
-    );
+    // Replace the complete DACL; /grant:r alone leaves unrelated explicit ACEs.
+    const escaped = filename.replace(/'/g, "''");
+    const inheritance = directory ? "ContainerInherit, ObjectInherit" : "None";
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      `$acl = New-Object System.Security.AccessControl.${directory ? "DirectorySecurity" : "FileSecurity"}`,
+      "$acl.SetAccessRuleProtection($true, $false)",
+      ...[...new Set([this.currentUserSid, "S-1-5-18", "S-1-5-32-544"])].map(sid =>
+        `$sid = New-Object System.Security.Principal.SecurityIdentifier('${sid}'); $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', '${inheritance}', 'None', 'Allow'); $acl.AddAccessRule($rule)`),
+      `[System.IO.${directory ? 'Directory' : 'File'}]::SetAccessControl('${escaped}', $acl)`,
+      `$actual = [System.IO.${directory ? 'Directory' : 'File'}]::GetAccessControl('${escaped}')`,
+      `$expected = @('${this.currentUserSid}', 'S-1-5-18', 'S-1-5-32-544') | Select-Object -Unique`,
+      "$rules = @($actual.Access)",
+      "if (!$actual.AreAccessRulesProtected -or $rules.Count -ne $expected.Count) { throw 'Unexpected DACL' }",
+      "foreach ($rule in $rules) { if ($rule.IsInherited -or $rule.AccessControlType -ne 'Allow' -or $rule.FileSystemRights -ne 'FullControl' -or $expected -notcontains $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value) { throw 'Unexpected ACE' } }",
+    ].join("; ");
+    await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { windowsHide: true });
     this.windows.diagnostics.aclProtections++;
   }
 }

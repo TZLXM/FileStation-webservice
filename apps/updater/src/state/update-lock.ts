@@ -19,6 +19,8 @@ import {
 
 export type { ProcessIdentityProvider } from "./boot-identity";
 
+import { acquireRecoveryGuard, RecoveryGuard } from "../platform/recovery-guard";
+
 const OWNER_LOCK = "update.lock";
 const RECOVERY_LOCK = "update.recovery.lock";
 
@@ -301,6 +303,7 @@ export class RecoveryLockHandle {
     private readonly journal: AttemptJournal,
     private readonly provider: ProcessIdentityProvider,
     private readonly recoveryRecord: LockRecord,
+    private readonly guard: RecoveryGuard,
     private readonly servicePort?: number,
   ) {}
 
@@ -308,7 +311,8 @@ export class RecoveryLockHandle {
     return this.recoveryRecord.fence;
   }
 
-  private async assertActive(): Promise<void> {
+  async assertActive(): Promise<void> {
+    await this.guard.assertActive();
     if (this.released) throw new LockFailure("recovery lock is released");
     const filename = path.join(this.root, RECOVERY_LOCK);
     if (!(await this.fs.exists(filename)))
@@ -360,11 +364,35 @@ export class RecoveryLockHandle {
     }
   }
 
+  /** Destructive repair is available only after this retained recovery owner
+   * proves the journal writer (and any interrupted replacement writer) stopped. */
+  async assertJournalRepairAllowed(): Promise<void> {
+    await this.assertActive();
+    const snapshot = await this.journal.readSnapshot();
+    if (!snapshot.owner || snapshot.attemptId !== this.recoveryRecord.attemptId)
+      throw new LockFailure("tail repair attempt identity cannot be verified");
+    const current = decode(await this.fs.readFile(path.join(this.root, OWNER_LOCK)), "owner");
+    if (!recordMatchesContext(current, snapshot.records.at(-1)!.context)) {
+      const payload = snapshot.pending?.payload;
+      if (snapshot.pending?.action !== "replace-owner" || !isObject(payload) || !isObject(payload.nextContext) || !recordMatchesContext(current, payload.nextContext as unknown as AttemptContext))
+        throw new LockFailure("tail repair owner differs from journal");
+      if (await this.provider.isProcessAlive(current.owner.pid, current.owner.processCreatedAt))
+        throw new LockFailure("replacement journal writer is still alive");
+    }
+    await this.verifyOldOwnerStopped(snapshot, current);
+  }
+
+  async repairJournalTail(): Promise<void> {
+    await this.journal.repairTail(this);
+  }
+
   async takeoverHandoff(
     input: TakeoverHandoffInput,
   ): Promise<LockHandle> {
     await this.assertActive();
     validateActor(input.owner);
+    if (input.owner.pid !== this.recoveryRecord.owner.pid || input.owner.processCreatedAt !== this.recoveryRecord.owner.processCreatedAt || input.owner.bootIdentity !== this.recoveryRecord.owner.bootIdentity)
+      throw new LockFailure("actor boot/process identity does not own recovery lock");
     await verifyLocalActor(input.owner, this.provider);
     const snapshot = await this.journal.readSnapshot();
     if (!snapshot.initialized || !snapshot.attemptId)
@@ -391,6 +419,9 @@ export class RecoveryLockHandle {
       if (!isObject(payload) || !isObject(payload.nextContext))
         throw new LockFailure("owner replacement intent is malformed");
       const next = payload.nextContext as unknown as AttemptContext;
+      const differentActor = next.owner.pid !== input.owner.pid || next.owner.processCreatedAt !== input.owner.processCreatedAt;
+      if (differentActor && await this.provider.isProcessAlive(next.owner.pid, next.owner.processCreatedAt))
+        throw new LockFailure("interrupted replacement owner is still alive");
       if (recordMatchesContext(currentRecord, next)) {
         await this.journal.appendCompletion({
           attemptId: snapshot.attemptId,
@@ -400,6 +431,7 @@ export class RecoveryLockHandle {
           nextContext: next,
           result: { handedOff: true },
         });
+        if (differentActor) return this.recoverAttempt({ ...input, expectedFence: next.fence });
         return new LockHandle(this.root, this.fs, currentRecord);
       }
       if (
@@ -421,11 +453,8 @@ export class RecoveryLockHandle {
         next,
         await this.fs.readFile(lockPath),
       );
-      return new LockHandle(
-        this.root,
-        this.fs,
-        decode(await this.fs.readFile(lockPath), "owner"),
-      );
+      if (differentActor) return this.recoverAttempt({ ...input, expectedFence: next.fence });
+      return new LockHandle(this.root, this.fs, decode(await this.fs.readFile(lockPath), "owner"));
     }
 
     if (snapshot.pending)
@@ -450,6 +479,7 @@ export class RecoveryLockHandle {
       nextFence,
       "HANDOFF_READY",
     );
+    nextContext.owner.handoffIdentityHash = snapshot.owner.handoffIdentityHash;
     const intent = await this.journal.appendIntent({
       attemptId: snapshot.attemptId,
       fence: snapshot.fence,
@@ -472,6 +502,35 @@ export class RecoveryLockHandle {
         "owner",
       ),
     );
+  }
+
+  /** Authenticated recovery of an active attempt. Preserves phase and any
+   * in-flight filesystem intent. COMMITTED remains COMMITTED. No rollback is
+   * selected here: the orchestrator must honor the authoritative phase. */
+  async recoverAttempt(input: TakeoverHandoffInput & { expectedFence: number }): Promise<LockHandle> {
+    await this.assertActive();
+    validateActor(input.owner);
+    if (input.owner.pid !== this.recoveryRecord.owner.pid || input.owner.processCreatedAt !== this.recoveryRecord.owner.processCreatedAt || input.owner.bootIdentity !== this.recoveryRecord.owner.bootIdentity)
+      throw new LockFailure("actor boot/process identity does not own recovery lock");
+    await verifyLocalActor(input.owner, this.provider);
+    const snapshot = await this.journal.readSnapshot();
+    if (snapshot.attemptId !== input.owner.attemptId || snapshot.fence !== input.expectedFence || !snapshot.owner || !snapshot.phase)
+      throw new LockFailure("recovery attempt/fence does not match");
+    if (!snapshot.owner.handoffIdentityHash || !sameDigest(snapshot.owner.handoffIdentityHash, hashCapability(input.handoffIdentity)))
+      throw new LockFailure("recovery identity does not match");
+    if (snapshot.pending?.action === "replace-owner") return this.takeoverHandoff(input);
+    const lockPath = path.join(this.root, OWNER_LOCK);
+    const bytes = await this.fs.readFile(lockPath);
+    const current = decode(bytes, "owner");
+    const prior = snapshot.records.at(-1)!.context;
+    if (!recordMatchesContext(current, prior)) throw new LockFailure("owner lock does not match journal");
+    await this.verifyOldOwnerStopped(snapshot, current);
+    const next: AttemptContext = { ...structuredClone(prior), fence: snapshot.fence + 1, owner: journalOwner(input.owner) };
+    // Retain the authentication identity across retries/restarts.
+    next.owner.handoffIdentityHash = snapshot.owner.handoffIdentityHash;
+    const intent = await this.journal.appendIntent({ attemptId: snapshot.attemptId!, fence: snapshot.fence, action: "replace-owner", phase: snapshot.phase, payload: { nextContext: next } as unknown as JsonValue });
+    await this.finishOwnerReplacement(snapshot.attemptId!, snapshot.fence, intent.id, next, bytes);
+    return new LockHandle(this.root, this.fs, decode(await this.fs.readFile(lockPath), "owner"));
   }
 
   private async finishOwnerReplacement(
@@ -539,9 +598,13 @@ export class RecoveryLockHandle {
 
   async release(): Promise<void> {
     if (this.released) return;
-    await this.assertActive();
-    await this.fs.unlink(path.join(this.root, RECOVERY_LOCK));
-    this.released = true;
+    try {
+      await this.assertActive();
+      await this.fs.unlink(path.join(this.root, RECOVERY_LOCK));
+    } finally {
+      this.released = true;
+      await this.guard.release();
+    }
   }
 }
 
@@ -635,6 +698,10 @@ export class UpdateLock {
     const journal =
       options.journal ??
       (await AttemptJournal.open(root, { fs, now }));
+    let guard: RecoveryGuard;
+    try { guard = await acquireRecoveryGuard(path.join(root, "update.recovery.guard")); }
+    catch { throw new LockFailure("recovery OS guard is held or unavailable"); }
+    try {
     const snapshot = await journal.readSnapshot();
     const filename = path.join(root, RECOVERY_LOCK);
     const record: LockRecord = {
@@ -719,7 +786,9 @@ export class UpdateLock {
       journal,
       provider,
       record,
+      guard,
       options.servicePort,
     );
+    } catch (error) { await guard.release(); throw error; }
   }
 }

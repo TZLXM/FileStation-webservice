@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -74,7 +76,7 @@ describe("AttemptJournal", () => {
     }
   });
 
-  it("truncates an incomplete tail without rolling back past a dangerous intent", async () => {
+  it("ignores an incomplete tail without rolling back past a dangerous intent", async () => {
     const temp = await createTempRoot();
     try {
       const journal = await makeJournal(temp.path);
@@ -98,8 +100,8 @@ describe("AttemptJournal", () => {
       expect(snapshot.pending?.action).toBe("replace-current");
       expect(snapshot.sequence).toBe(2);
       const raw = await readFile(await journalPath(temp.path), "utf8");
-      expect(raw.endsWith("\n")).toBe(true);
-      expect(raw).not.toContain('"kind":"completion"');
+      expect(raw.endsWith("\n")).toBe(false);
+      expect(raw).toContain('"kind":"completion"');
     } finally {
       await temp.cleanup();
     }
@@ -270,4 +272,33 @@ describe("AttemptJournal", () => {
       await temp.cleanup();
     }
   });
+});
+
+it("does not truncate an active partial append when another instance opens or reads", async () => {
+  const temp = await createTempRoot();
+  try {
+    const journal = await makeJournal(temp.path);
+    await journal.beginAttempt(context());
+    let resume!: () => void; let started!: () => void;
+    const gate = new Promise<void>(resolve => { resume = resolve; });
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const fs = new InjectableDurableFs();
+    fs.append = async (filename, bytes) => {
+      const split = Math.floor(bytes.length / 2);
+      await appendFile(filename, bytes.subarray(0, split)); started(); await gate;
+      await appendFile(filename, bytes.subarray(split));
+    };
+    const writer = await AttemptJournal.open(temp.path, { fs });
+    const writing = writer.appendIntent({ attemptId: "attempt-01", fence: 1, action: "replace-current", phase: "SWITCH_INTENT" });
+    await ready;
+    try {
+      const reader = await AttemptJournal.open(temp.path);
+      expect((await reader.readSnapshot()).sequence).toBe(1);
+      const script = `require(${JSON.stringify(path.resolve(__dirname, "attempt-journal.ts"))}).AttemptJournal.open(${JSON.stringify(temp.path)}).then(async journal => process.stdout.write(String((await journal.readSnapshot()).sequence))).catch(error => { console.error(error); process.exitCode = 1; });`;
+      const result = await promisify(execFile)(process.execPath, ["-r", require.resolve("ts-node/register"), "-e", script], { windowsHide: true, env: { ...process.env, TS_NODE_TRANSPILE_ONLY: "true", TS_NODE_PROJECT: path.resolve(__dirname, "../../tsconfig.json") } });
+      expect(result.stdout).toBe("1");
+    } finally { resume(); }
+    await writing;
+    expect((await journal.readSnapshot()).pending?.action).toBe("replace-current");
+  } finally { await temp.cleanup(); }
 });

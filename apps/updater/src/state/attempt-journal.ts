@@ -1,3 +1,4 @@
+import type { RecoveryLockHandle } from "./update-lock";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import {
@@ -358,11 +359,11 @@ function summarizeAttempt(records: JournalRecord[]): AttemptJournalSnapshot {
     }
   }
   const open = [...intents.values()].filter((entry) => !entry.completed);
-  if (open.length > 1)
+  if (open.length > 2 || (open.length === 2 && open.at(-1)?.record.action !== "replace-owner"))
     throw new JournalCorruptError("journal has more than one open intent");
   const last = records[records.length - 1];
   const context = last.context;
-  const pendingRecord = open[0]?.record;
+  const pendingRecord = open.at(-1)?.record;
   return {
     initialized: true,
     attemptId: context.attemptId,
@@ -515,7 +516,7 @@ export class AttemptJournal {
     if (raw.length && raw[raw.length - 1] !== 0x0a) {
       const boundary = raw.lastIndexOf(0x0a);
       retained = boundary < 0 ? Buffer.alloc(0) : raw.subarray(0, boundary + 1);
-      await this.fs.truncate(this.filename, retained.length);
+
     }
     const text = retained.toString("utf8");
     if (!Buffer.from(text, "utf8").equals(retained))
@@ -531,6 +532,9 @@ export class AttemptJournal {
   ): Promise<JournalRecord> {
     const complete = makeRecord(record);
     const bytes = Buffer.from(`${JSON.stringify(complete)}\n`, "utf8");
+    const existing = await this.fs.exists(this.filename) ? await this.fs.readFile(this.filename) : Buffer.alloc(0);
+    if (existing.length && existing.at(-1) !== 0x0a)
+      throw new JournalCorruptError("partial tail requires exclusive recovery repair");
     await this.fs.append(this.filename, bytes, { mode: 0o600, create: true });
     return complete;
   }
@@ -568,10 +572,12 @@ export class AttemptJournal {
     return this.withWrite(async () => {
       const snapshot = await this.readSnapshot();
       this.assertWrite(snapshot, input.attemptId, input.fence);
-      if (snapshot.pending)
+      if (snapshot.pending && (input.action !== "replace-owner" || snapshot.pending.action === "replace-owner"))
         throw new JournalError(
           `pending intent ${snapshot.pending.intentId} must be completed first`,
         );
+      if (snapshot.phase === "COMMITTED" && input.phase !== "COMMITTED")
+        throw new JournalError("COMMITTED cannot transition to rollback");
       if (!PHASES.has(input.phase))
         throw new JournalError("invalid attempt phase");
       if (!/^[a-z][a-z0-9-]{1,63}$/.test(input.action))
@@ -601,6 +607,7 @@ export class AttemptJournal {
   ): Promise<JournalRecord> {
     return this.withWrite(async () => {
       const snapshot = await this.readSnapshot();
+      this.assertWrite(snapshot, input.attemptId, input.fence);
       if (
         snapshot.initialized &&
         snapshot.attemptId === input.attemptId &&
@@ -617,6 +624,8 @@ export class AttemptJournal {
       this.assertWrite(snapshot, input.attemptId, input.fence);
       if (!snapshot.pending || snapshot.pending.intentId !== input.intentId)
         throw new JournalError("completion does not match the pending intent");
+      if (snapshot.phase === "COMMITTED" && input.phase !== "COMMITTED")
+        throw new JournalError("COMMITTED cannot transition to rollback");
       assertJson(input.result, "journal result");
       const context = input.nextContext
         ? structuredClone(input.nextContext)
@@ -627,7 +636,8 @@ export class AttemptJournal {
           throw new JournalFenceError("owner replacement changes the attempt id");
         const allowed =
           snapshot.pending.action === "replace-owner" &&
-          input.nextContext.fence === input.fence + 1;
+          input.nextContext.fence === input.fence + 1 &&
+          input.nextContext.phase === snapshot.phase && input.phase === snapshot.phase;
         if (!allowed)
           throw new JournalFenceError(
             "context replacement is only valid for owner fencing",
@@ -665,6 +675,19 @@ export class AttemptJournal {
       throw new JournalFenceError(
         `stale fence ${fence}; current fence is ${snapshot.fence}`,
       );
+  }
+
+  async repairTail(ownership: RecoveryLockHandle): Promise<void> {
+    await this.withWrite(async () => {
+      await ownership.assertJournalRepairAllowed();
+      await this.loadAndRepair();
+      if (!(await this.fs.exists(this.filename))) return;
+      const raw = await this.fs.readFile(this.filename);
+      if (raw.length && raw.at(-1) !== 0x0a) {
+        await ownership.assertJournalRepairAllowed();
+        await this.fs.truncate(this.filename, raw.lastIndexOf(0x0a) + 1);
+      }
+    });
   }
 
   async readSnapshot(): Promise<AttemptJournalSnapshot> {

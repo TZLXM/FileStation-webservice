@@ -92,13 +92,14 @@ export class InjectableDurableFs extends NodeDurableFileSystem {
       if (timing === "after")
         throw new Error("injected append failure after write");
     }
-    if (
-      this.failAfterWriteOperation ===
-      `append:${path.basename(filename)}`
-    ) {
+  }
+
+  protected override async flushFile(filename: string, flush: () => Promise<void>): Promise<void> {
+    if (this.failAfterWriteOperation === `append:${path.basename(filename)}`) {
       this.failAfterWriteOperation = undefined;
-      throw new Error("injected append flush failure after write");
+      throw new Error("injected append flush failure at native flush boundary");
     }
+    await super.flushFile(filename, flush);
   }
 
   override async rename(

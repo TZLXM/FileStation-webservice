@@ -144,6 +144,10 @@ async function firstExistingAncestor(candidate: string): Promise<string> {
   }
 }
 
+export function windowsVolumeIdentity(candidate: string, api: { volumePath(filename: string): string; volumeGuid(mount: string): string }): string {
+  return `win32:${api.volumeGuid(api.volumePath(candidate)).toLowerCase()}`;
+}
+
 export async function probeActualVolume(
   candidate: string,
 ): Promise<ActualVolume> {
@@ -153,10 +157,9 @@ export async function probeActualVolume(
   const space = await durable.statfs(existing);
   if (process.platform === "win32") {
     const api = createWindowsNativeApi();
-    const mount = api.volumePath(existing);
-    const serial = api.volumeSerial(mount);
+
     return {
-      volumeId: `win32:${serial.toString(16).padStart(8, "0")}:${mount.toUpperCase()}`,
+      volumeId: windowsVolumeIdentity(existing, api),
       ...space,
     };
   }

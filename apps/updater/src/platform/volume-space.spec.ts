@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   planRequiredSpace,
+  windowsVolumeIdentity,
   probeActualVolume,
   recheckRequiredSpace,
   type VolumePathSet,
@@ -261,5 +262,28 @@ describe("volume planning", () => {
     } finally {
       await temp.cleanup();
     }
+  });
+});
+
+describe("review volume regressions", () => {
+  it("combines mount aliases by volume GUID and separates distinct GUIDs", async () => {
+    const api = { volumeSerial: () => 12345, volumePath: (candidate: string) => (candidate.includes("vdb") || candidate.startsWith("D:")) ? "D:\\alias\\" : "C:\\", volumeGuid: (_mount: string) => "\\\\?\\Volume{same}\\" };
+    expect(windowsVolumeIdentity("C:\\", api)).toBe(windowsVolumeIdentity("D:\\alias\\", api));
+    const plan = await planRequiredSpace(pathsFor(role => role === "db" ? "db" : "other"),
+      { database_migration: false, migration_workspace_multiplier: 0, migration_workspace_min_bytes: 0, artifacts: [{ archive_size: 100, unpacked_size: 100 }] },
+      { pageCount: 0, pageSize: 4096, dbFileBytes: 100, walBytes: 0, shmBytes: 0, snapshotBytes: 0 }, {
+      resolveVolumeId: async candidate => windowsVolumeIdentity(candidate, api), readAvailableBytes: async () => 250,
+      retainedReleaseBytes: 0, minimumSafetyMarginBytes: 0,
+    });
+    expect(plan).toHaveLength(1); expect(plan[0].sufficient).toBe(false);
+    expect(windowsVolumeIdentity("C:\\", { ...api, volumeGuid: () => "volume-other" })).not.toBe(plan[0].volumeId);
+  });
+  it.each(["db", "logical", "snapshot"])("uses the large %s migration base without minimum masking", async winner => {
+    const large = 512 * MiB;
+    const fixture = { ...metrics, dbFileBytes: winner === "db" ? large : 100, snapshotBytes: winner === "snapshot" ? large : 100, pageCount: winner === "logical" ? large / 4096 : 1, pageSize: 4096 };
+    const [plan] = await planRequiredSpace(pathsFor(() => "same"), manifest, fixture, { resolveVolumeId: async () => "same", readAvailableBytes: async () => 10 * 1024 * MiB });
+    expect(plan.components.find(c => c.name === "migration-workspace")?.bytes).toBe(large * 2);
+    const sum = plan.components.reduce((n, c) => n + c.bytes, 0);
+    expect(plan.requiredBytes).toBe(sum + Math.ceil(sum * .1));
   });
 });

@@ -31,6 +31,8 @@ export interface PlatformBootIdentityOptions {
   kill?: (pid: number, signal?: number | NodeJS.Signals) => boolean;
 }
 
+class ProcessAbsentError extends Error {}
+
 export class BootIdentityError extends Error {
   constructor(message: string) {
     super(message);
@@ -151,19 +153,21 @@ export class PlatformBootIdentityProvider implements ProcessIdentityProvider {
           pid,
         );
       } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new ProcessAbsentError("process absent");
         if (error instanceof BootIdentityError) throw error;
         throw new BootIdentityError(`Linux process ${pid} is unavailable`);
       }
     }
     if (this.platform === "win32") {
       const script = [
-        `$value = (Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=${pid}").CreationDate`,
+        `$ErrorActionPreference = 'Stop'; $value = (Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=${pid}").CreationDate`,
         "if ($null -eq $value) { exit 3 }",
         "$value.ToUniversalTime().ToString('O', [Globalization.CultureInfo]::InvariantCulture)",
       ].join("; ");
       try {
         return `win32:${canonicalWindowsCimTimestamp(await this.powershell(script))}`;
       } catch (error) {
+        if ((error as { code?: number }).code === 3) throw new ProcessAbsentError("process absent");
         if (error instanceof BootIdentityError) throw error;
         throw new BootIdentityError(
           `Windows process ${pid} creation identity is unavailable`,
@@ -183,7 +187,7 @@ export class PlatformBootIdentityProvider implements ProcessIdentityProvider {
     try {
       actual = await this.processCreatedAt(pid);
     } catch (error) {
-      if (error instanceof BootIdentityError) return false;
+      if (error instanceof ProcessAbsentError) return false;
       throw error;
     }
     if (actual !== processCreatedAt) return false;
@@ -198,7 +202,8 @@ export class PlatformBootIdentityProvider implements ProcessIdentityProvider {
         (error as { code?: string }).code === "EPERM"
       )
         return true;
-      return false;
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+      throw new BootIdentityError("Process liveness probe is unavailable");
     }
   }
 

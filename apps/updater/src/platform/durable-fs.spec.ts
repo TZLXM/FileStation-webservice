@@ -79,20 +79,14 @@ describe("DurableFileSystem", () => {
         expect(fs.diagnostics.aclProtections).toBeGreaterThanOrEqual(2);
         expect(await readFile(file, "utf8")).toBe("private");
         for (const protectedPath of [dir, file]) {
-          const { stdout } = await execFileAsync(
-            "icacls.exe",
-            [protectedPath],
-            { windowsHide: true },
-          );
-          expect(stdout).not.toContain("(I)");
-          const explicitRules = stdout
-            .split(/\r?\n/)
-            .filter(
-              (line) =>
-                line.includes(":") &&
-                !line.toLocaleLowerCase().includes("processed"),
-            );
-          expect(explicitRules.length).toBeGreaterThanOrEqual(3);
+          await execFileAsync("icacls.exe", [protectedPath, "/grant", "*S-1-1-0:F", "*S-1-5-32-545:R"], { windowsHide: true });
+          await fs.protect(protectedPath, protectedPath === dir);
+          const script = `$acl = [System.IO.${protectedPath === dir ? 'Directory' : 'File'}]::GetAccessControl('${protectedPath.replace(/'/g, "''")}'); [pscustomobject]@{ Protected=$acl.AreAccessRulesProtected; User=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; Rules=@($acl.Access | ForEach-Object { [pscustomobject]@{ SID=$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value; Inherited=$_.IsInherited } }) } | ConvertTo-Json -Depth 5 -Compress`;
+          const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { windowsHide: true });
+          const acl = JSON.parse(stdout);
+          expect(acl.Protected).toBe(true);
+          expect(acl.Rules.map((rule: any) => rule.SID).sort()).toEqual([...new Set([acl.User, "S-1-5-18", "S-1-5-32-544"])].sort());
+          expect(acl.Rules.every((rule: any) => !rule.Inherited)).toBe(true);
         }
       } finally {
         await temp.cleanup();
