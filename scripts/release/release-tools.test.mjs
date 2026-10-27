@@ -127,18 +127,19 @@ function workspaceManifests(version = "0.2.0") {
       "apps/server/package.json",
       "apps/web/package.json",
       "packages/shared/package.json",
+      "packages/update-core/package.json",
     ].map((file) => [file, { name: file, version }]),
   );
 }
 
-test("version validation requires the tag and all four product manifests to agree", () => {
-  assert.equal(
+test("version validation requires the tag and all five product manifests to agree", () => {
+  assert.deepEqual(
     validateVersion({
       tag: "v0.2.0",
       manifests: workspaceManifests(),
       breakingChanges: false,
-    }).version,
-    "0.2.0",
+    }),
+    { version: "0.2.0", tag: "v0.2.0", productManifestCount: 5 },
   );
 
   assert.throws(
@@ -161,6 +162,34 @@ test("version validation requires the tag and all four product manifests to agre
         breakingChanges: false,
       }),
     /apps\/web\/package\.json|workspace/i,
+  );
+});
+
+test("version validation rejects a missing update-core manifest", () => {
+  const manifests = workspaceManifests();
+  delete manifests["packages/update-core/package.json"];
+  assert.throws(
+    () => validateVersion({ tag: "v0.2.0", manifests, breakingChanges: false }),
+    /workspace manifest is missing: packages\/update-core\/package\.json/,
+  );
+});
+
+test("version validation rejects a mismatched update-core product version", () => {
+  const manifests = workspaceManifests();
+  manifests["packages/update-core/package.json"].version = "9.9.9";
+  assert.throws(
+    () => validateVersion({ tag: "v0.2.0", manifests, breakingChanges: false }),
+    /packages\/update-core\/package\.json version "9\.9\.9" does not match tag v0\.2\.0/,
+  );
+});
+
+test("version validation excludes third-party tooling and does not require a future updater", () => {
+  const manifests = workspaceManifests();
+  manifests["packages/release-tool/package.json"] = { name: "third-party-tool", version: "9.9.9" };
+  manifests["node_modules/canonicalize/package.json"] = { name: "canonicalize", version: "2.1.0" };
+  assert.equal(
+    validateVersion({ tag: "v0.2.0", manifests, breakingChanges: false }).productManifestCount,
+    5,
   );
 });
 

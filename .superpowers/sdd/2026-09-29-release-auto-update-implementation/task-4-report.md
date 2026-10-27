@@ -220,3 +220,81 @@ Self-review addressed actual reproduced BOM, calendar-validation, duplicate-root
 ## Final checkpoint
 
 `git diff --check` after intent-to-add: **exit 0**, no whitespace errors. Git emitted only the configured LF→CRLF working-copy conversion warnings. All six mandated checks have been executed; root typecheck/build passed after the authorized integration repair. Commit command: `git commit -m "feat(updater): verify signed update manifests"`.
+
+## Task 4 fix round 1/5 — Important 1: product version gate
+
+Base: `c60eb1bc253617fcce906f1b1263370b44a148d6`. The review correctly identified that the release validator still enumerated only root/server/web/shared and therefore accepted a missing or `9.9.9` update-core manifest while returning `productManifestCount: 4`.
+
+Minimal authorized cross-task repair: add `packages/update-core/package.json` to the existing explicit `PRODUCT_MANIFESTS` list. Both in-memory validation and the CLI's manifest reader share this list. Existing missing-manifest and exact tag-version checks now cover update-core, returning count **5**. Third-party tools remain outside the explicit product set. The updater package does not exist yet and is not required now; a nearby comment records the obligation for Task 5 to add it when introduced. Product version stays `0.2.0`; no lockfile, dependency, trust-root, archive implementation, release workflow or publisher format changes.
+
+Updated the release tests' workspace fixture and count assertion, plus three regression cases: missing update-core, mismatched update-core `9.9.9`, and unrelated tool manifests with independent versions while no future updater is present. Tests call real validation, not a mocked validator. The unchanged core publisher fixtures invoke the publisher module that imports this validator's SemVer helper; both archive formats passed, so they require no source changes for the constant addition.
+
+Exact RED command (before the validator edit):
+
+```text
+node --test scripts/release/release-tools.test.mjs
+not ok 1 - version validation requires the tag and all five product manifests to agree
+# actual productManifestCount: 4; expected: 5
+not ok 2 - version validation rejects a missing update-core manifest
+# Missing expected exception.
+not ok 3 - version validation rejects a mismatched update-core product version
+# Missing expected exception.
+not ok 4 - version validation excludes third-party tooling and does not require a future updater
+# 4 !== 5
+1..43
+# tests 43
+# suites 0
+# pass 39
+# fail 4
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 608.8702
+exit 1
+```
+
+Exact GREEN command (after the two-line validator change):
+
+```text
+node --test scripts/release/release-tools.test.mjs
+ok 1 - version validation requires the tag and all five product manifests to agree
+ok 2 - version validation rejects a missing update-core manifest
+ok 3 - version validation rejects a mismatched update-core product version
+ok 4 - version validation excludes third-party tooling and does not require a future updater
+1..43
+# tests 43
+# suites 0
+# pass 43
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 601.1158
+exit 0
+
+npm.cmd test --workspace=@filestation/update-core -- --runInBand
+> jest --config jest.config.json --runInBand
+PASS src/archive-policy.spec.ts
+PASS src/publisher-archive.spec.ts
+PASS src/manifest.spec.ts
+PASS src/download-policy.spec.ts
+PASS src/release-source.spec.ts
+PASS src/platform-file.spec.ts
+Test Suites: 6 passed, 6 total
+Tests:       1 skipped, 92 passed, 93 total
+Snapshots:   0 total
+Time:        2.175 s, estimated 3 s
+Ran all test suites.
+exit 0
+
+npm.cmd run typecheck --workspace=@filestation/update-core
+> @filestation/update-core@0.2.0 typecheck
+> tsc --noEmit
+exit 0
+```
+
+Outputs were captured with `2>&1 | Tee-Object -FilePath (Join-Path $env:TEMP 'filestation-task4-round1-<red|green|core|typecheck>.log')`; each shell block preserves `$LASTEXITCODE`. No external calls, agents, push/tag/Release, unchanged server/Web suite reruns or root rebuilds. The existing Windows file-symlink skip remains explicitly disclosed; this round does not expand platform coverage.
+
+Changed paths this round: `scripts/release/validate-version.mjs`, `scripts/release/release-tools.test.mjs`, `docs/CURRENT-STATE.md`, and this report. Self-review: the explicit product list is intentionally maintained rather than broad directory discovery, preserving third-party exclusion; Task 5 must append the updater workspace. Archive/manifest core remains otherwise approved and unchanged. Final whitespace result is appended after execution.
+
+Round 1 final check: `git diff --check` exited **0**, with only LF→CRLF conversion warnings and no whitespace errors. Commit command: `git commit -m "fix(ci): enforce update-core release version"`.

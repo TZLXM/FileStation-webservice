@@ -19,6 +19,7 @@ FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 
 
 ## Task 4: Node-only 更新核心（2026-10-27）
 
+- **Task 4 fix round 1/5（Important 1）**：release version gate 的显式产品清单已包含 `packages/update-core/package.json`，当前 root/server/web/shared/update-core 共 5 个 manifest 必须与 tag 一致，缺失或版本错配均拒绝；第三方工具不纳入产品版本，尚不存在的 updater 不提前要求，Task 5 新增后必须加入清单。本轮 RED 为 release tools 39 passed / 4 failed；GREEN 43/43；update-core 6 suites / 92 passed / 1 skipped（沿用 Windows 文件 symlink 权限边界），包含实际 publisher ZIP/tar.gz 兼容回归，package typecheck 退出 0。本轮仅执行受影响的 focused 检查，未重跑未变更的 server/Web 重型套件。
 - 产品版本继续为 `0.2.0`。新增 `packages/update-core`，直接声明 `canonicalize`、`semver` 和 Win32 FFI 适配依赖 `koffi`；根 build/typecheck 显式按 shared → update-core → server → web 执行，typecheck 在 shared 检查后生成其声明供依赖包使用。Web/shared 源码没有导入该 Node-only 包。
 - Manifest 使用 RFC 8785 字节一致性与 Ed25519 签名；仅接受显式受信任公钥 `KeyObject`，严格拒绝未知字段/协议、不安全数字、非 stable SemVer、非法 Unicode/日期、签名篡改与不一致的制品 URL/平台/格式。迁移工作区有迁移时 multiplier 2–64、min bytes 至少 256 MiB；无迁移时两者必须为零。选版只接受更高 stable，并给出平台/Node/updater/bootstrap 边界。共享生产公钥仍为 `UNCONFIGURED`，未增加生产信任根。
 - Release source 默认只查询 `TZLXM/FileStation-webservice` 的 latest stable Release；使用 publisher 实际的 `update-manifest.json` 和 `update-manifest.json.sig`，限制 HTTPS、重定向主机/次数、超时和读取字节。全部新增 fetch 测试均为注入的离线 Response，没有调用 GitHub/API 或外部系统。

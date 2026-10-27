@@ -10,11 +10,13 @@ const REPOSITORY_ROOT = path.resolve(
 const STABLE_SEMVER_PATTERN = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const TAG_PATTERN = /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
+// Keep this explicit product list in sync; Task 5 must add its updater workspace.
 const PRODUCT_MANIFESTS = [
   "package.json",
   "apps/server/package.json",
   "apps/web/package.json",
   "packages/shared/package.json",
+  "packages/update-core/package.json",
 ];
 const CANDIDATE_TO_TAG_ALLOWLIST = new Set([
   "docs/CURRENT-STATE.md",
