@@ -41,12 +41,14 @@ jobs:
         id: source
         shell: bash
         env:
+          RUN_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
           REQUESTED_VERSION: ${{ inputs.version || '0.2.0' }}
         run: |
           set -euo pipefail
           node scripts/release/validate-version.mjs --version "$REQUESTED_VERSION" --tag "v$REQUESTED_VERSION"
           source_commit="$(git rev-parse HEAD)"
           test "${#source_commit}" = "40"
+          test "$source_commit" = "$RUN_SOURCE"
           echo "commit=$source_commit" >> "$GITHUB_OUTPUT"
           echo "version=$REQUESTED_VERSION" >> "$GITHUB_OUTPUT"
 

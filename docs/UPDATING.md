@@ -18,6 +18,17 @@ evidence/status portion of `docs/CURRENT-STATE.md`. The tag workflow compares
 that commit with the recorded candidate source and rejects changes to any
 artifact input.
 
+Candidate dispatch must select the exact source ref (an optional source SHA must
+match that ref). Before signing, the release tool uses the job token with
+`actions:read` to authenticate the recorded run through GitHub, requires the
+expected repository and `release-candidate.yml`, a completed successful run,
+and the exact source SHA. Same-repository candidate sources are required;
+fork candidates cannot be promoted directly. It downloads that run's provenance
+record and both archives, hashes their actual bytes, and reconciles provenance,
+committed evidence, archive metadata and rebuilt bytes. Missing, expired,
+unrelated or failed runs/artifacts stop signing. These hosted checks remain
+pending until a real run exists; local fixtures do not supply release evidence.
+
 ## Publisher signing key prerequisite
 
 The repository intentionally ships with an explicit unconfigured public-key
@@ -35,7 +46,13 @@ To enable signing after review:
    reviewers and restrict who can deploy to it.
 4. Provision only the base64 SPKI public key in
    `packages/shared/src/update-public-key.ts`, change its status to
-   `configured`, and review that change before tagging.
+   `configured`, and review that change before building the acceptance candidate.
+   Key provisioning changes artifact inputs, so it requires a fresh candidate.
+
+CI accepts either the explicit `unconfigured` / `UNCONFIGURED` pair or a
+`configured` status with a valid Ed25519 base64 SPKI. Contradictory states,
+malformed keys and other algorithms fail. Sentinel tests use temporary fixtures;
+provisioning a reviewed real public key does not require changing the tests.
 
 The release job checks that the private key derives exactly the checked-in SPKI
 public key. Applications and the updater must use that fixed module as their
@@ -54,9 +71,11 @@ created it:
    through `.github/workflows/release-platform.yml`.
 4. Extracts each archive at a fresh absolute temporary path, verifies native
    SQLite/bcrypt loading, starts the server from the artifact root with an
-   initialized credential-free smoke database, and requests
-   `/api/v1/settings/public`.
-5. Compares both rebuilt SHA-256 values with the candidate evidence.
+   initialized credential-free smoke database using the extracted artifact's own
+   smoke script and portable launcher, and requests `/api/v1/settings/public`,
+   `/`, and a JS/CSS asset referenced by the returned HTML.
+5. Authenticates the recorded candidate run and compares both downloaded and
+   rebuilt SHA-256 values with its provenance and committed candidate evidence.
 6. Renders the reviewed bilingual notes and signs the RFC 8785 canonical
    manifest only in the protected `release-signing` job.
 7. Creates the GitHub Release only after all earlier checks succeed.
@@ -64,3 +83,11 @@ created it:
 Until the publisher key and the pending human evidence are complete, the
 intended outcome is failure before Release creation. Local tests and successful
 non-signing CI do not replace hosted Windows/Linux acceptance or human review.
+
+## Packaged startup
+
+From the extracted artifact root, `npm start` invokes the shipped Node launcher
+with static serving enabled and host `0.0.0.0`; `npm run start:bynginx` invokes
+the same launcher with static serving disabled and host `127.0.0.1`, matching
+the source scripts. Both work without `cross-env` or shell-specific assignments.
+The launcher imports the server in the same process so stopping it stops the server.

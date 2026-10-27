@@ -162,6 +162,7 @@ jobs:
       - name: Build and sign canonical manifest
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_SIGNING_PRIVATE_KEY_BASE64: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY_BASE64 }}
         run: |
           set -euo pipefail

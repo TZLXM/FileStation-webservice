@@ -44,8 +44,10 @@ jobs:
         include:
           - platform: linux-x64
             runner: ubuntu-latest
+            archive: linux-x64.tar.gz
           - platform: windows-x64
             runner: windows-latest
+            archive: win-x64.zip
 
     steps:
       - name: Check out exact source commit
@@ -88,6 +90,10 @@ jobs:
           --install-production
           --release-url "https://github.com/${{ github.repository }}/releases/tag/v${{ inputs.version }}"
 
+      - name: Assert archive exists
+        shell: bash
+        run: test -f "release-artifacts/filestation-v${{ inputs.version }}-${{ matrix.archive }}"
+
       - name: Extract Linux artifact into a fresh absolute temporary path
         if: runner.os == 'Linux'
         shell: bash
@@ -97,7 +103,7 @@ jobs:
           tar -xzf "release-artifacts/filestation-v${{ inputs.version }}-linux-x64.tar.gz" -C "$artifact_root"
           smoke_root="$(find "$artifact_root" -mindepth 1 -maxdepth 1 -type d -print -quit)"
           test -n "$smoke_root"
-          node scripts/release/smoke-artifact.mjs --artifact-root "$smoke_root"
+          node "$smoke_root/scripts/release/smoke-artifact.mjs" --artifact-root "$smoke_root"
 
       - name: Extract Windows artifact into a fresh absolute temporary path
         if: runner.os == 'Windows'
@@ -108,14 +114,14 @@ jobs:
           Expand-Archive -LiteralPath "release-artifacts\filestation-v${{ inputs.version }}-win-x64.zip" -DestinationPath $artifactRoot
           $smokeRoot = Get-ChildItem -LiteralPath $artifactRoot -Directory | Select-Object -First 1
           if ($null -eq $smokeRoot) { throw "Artifact root was not found" }
-          node scripts/release/smoke-artifact.mjs --artifact-root $smokeRoot.FullName
+          node (Join-Path $smokeRoot.FullName "scripts/release/smoke-artifact.mjs") --artifact-root $smokeRoot.FullName
 
       - name: Upload unsigned platform artifact
         uses: actions/upload-artifact@v4
         with:
           name: filestation-v${{ inputs.version }}-${{ matrix.platform }}
           path: |
-            release-artifacts/filestation-v${{ inputs.version }}-${{ matrix.platform }}*
+            release-artifacts/filestation-v${{ inputs.version }}-${{ matrix.archive }}
             release-artifacts/artifact-metadata-${{ matrix.platform }}.json
           if-no-files-found: error
           retention-days: 30
@@ -123,8 +129,7 @@ jobs:
       - name: Attest unsigned platform artifact provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: |
-            release-artifacts/filestation-v${{ inputs.version }}-${{ matrix.platform }}*
+          subject-path: release-artifacts/filestation-v${{ inputs.version }}-${{ matrix.archive }}
 
   summarize:
     name: Summarize artifact provenance

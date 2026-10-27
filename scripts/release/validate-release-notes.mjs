@@ -84,6 +84,9 @@ function validateSummary(summary, language) {
           `release_summaries.${language}.${category}[${index}].text must be non-empty`,
         );
       }
+      if (/\[(?:Review|待审阅)\]/iu.test(item.text)) {
+        fail("unresolved draft review marker: Review / 待审阅");
+      }
       seen.add(item.id);
     }
     idsByCategory.set(category, items.map((item) => item.id));
@@ -131,6 +134,9 @@ export function validateReleaseNotes(notes) {
   }
   if (version.patch > 0 && notes.breaking_changes) {
     fail("patch releases cannot declare breaking changes");
+  }
+  if (!notes.breaking_changes && Object.values(notes.release_summaries ?? {}).some(summary => summary?.breaking?.length > 0)) {
+    fail("breaking category contradicts breaking_changes=false");
   }
   if (notes.breaking_changes) {
     const hasBreaking = Object.hasOwn(notes.release_summaries ?? {}, "zh-CN") &&

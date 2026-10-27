@@ -116,7 +116,7 @@ export function draftReleaseNotes({
   return {
     version: targetVersion,
     database_migration: databaseMigration,
-    breaking_changes: false,
+    breaking_changes: Boolean(summaries.en.breaking?.length),
     minimum_node: "20.17.0",
     requires_manual_bootstrap:
       previousTag === null || targetVersion === "0.2.5",

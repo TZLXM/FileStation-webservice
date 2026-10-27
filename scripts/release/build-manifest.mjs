@@ -9,6 +9,7 @@ import {
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { githubCandidateProvider, verifyAuthenticatedCandidate } from "./verify-candidate.mjs";
 import { validateReleaseNotes } from "./validate-release-notes.mjs";
 import {
   parseStableSemver,
@@ -64,6 +65,15 @@ function assertExactObject(value, expectedKeys, field) {
 }
 
 function canonicalString(value) {
+  for (let i = 0; i < value.length; i++) {
+    const unit = value.charCodeAt(i);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(++i);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) fail("invalid Unicode surrogate sequence");
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      fail("invalid Unicode surrogate sequence");
+    }
+  }
   return JSON.stringify(value);
 }
 
@@ -341,14 +351,14 @@ export async function loadFixedPublicKey(sourcePath = PUBLIC_KEY_SOURCE) {
     /export const UPDATE_PUBLIC_KEY_SPKI_BASE64[^=]*=\s*["']([^"']*)["']/u.exec(
       source,
     );
-  if (statusMatch?.[1] === "unconfigured" || keyMatch?.[1] === "UNCONFIGURED") {
+  if (statusMatch?.[1] === "unconfigured" && keyMatch?.[1] === "UNCONFIGURED") {
     return {
       status: "unconfigured",
       publicKeyBase64: null,
       fingerprintSha256: null,
     };
   }
-  if (statusMatch?.[1] !== "configured" || !keyMatch?.[1]) {
+  if (statusMatch?.[1] !== "configured" || !keyMatch?.[1] || keyMatch[1] === "UNCONFIGURED") {
     fail("fixed publisher public-key module is malformed");
   }
   const publicKey = parseEd25519PublicKey(keyMatch[1]);
@@ -478,6 +488,13 @@ export async function main() {
       artifactDirectory: path.resolve(options["artifact-dir"]),
       version: options.version,
       releaseUrl: options["release-url"],
+    });
+    await verifyAuthenticatedCandidate({
+      repository: process.env.GITHUB_REPOSITORY,
+      version: options.version,
+      evidence,
+      rebuiltArtifacts: artifacts,
+      provider: githubCandidateProvider({ repository: process.env.GITHUB_REPOSITORY, runId: evidence.candidate.runId }),
     });
     const publishedAt =
       process.env.RELEASE_PUBLISHED_AT ?? new Date().toISOString();

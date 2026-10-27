@@ -38,6 +38,7 @@ function safeChildEnvironment({ port, databasePath, storagePath, tempPath }) {
     ) {
       continue;
     }
+    if (key.toUpperCase() === "FILESTATION_SERVE_STATIC" || key.toUpperCase() === "FILESTATION_HOST") continue;
     inherited[key] = value;
   }
   return {
@@ -45,11 +46,9 @@ function safeChildEnvironment({ port, databasePath, storagePath, tempPath }) {
     NODE_ENV: "production",
     JWT_SECRET: randomBytes(32).toString("hex"),
     FILESTATION_PORT: String(port),
-    FILESTATION_HOST: "127.0.0.1",
     FILESTATION_DB_PATH: databasePath,
     FILESTATION_STORAGE_PATH: storagePath,
     FILESTATION_TEMP_PATH: tempPath,
-    FILESTATION_SERVE_STATIC: "true",
   };
 }
 
@@ -203,7 +202,7 @@ export async function smokeArtifact({
     });
 
     const port = await choosePort();
-    child = spawn(process.execPath, ["apps/server/dist/main.js"], {
+    child = spawn(process.execPath, ["scripts/release/start-artifact.mjs"], {
       cwd: resolvedArtifact,
       env: safeChildEnvironment({
         port,
@@ -216,6 +215,14 @@ export async function smokeArtifact({
     });
     getOutput = captureChild(child);
     await waitForHealth(port, child, getOutput);
+    const base = "http://127.0.0.1:" + port;
+    const page = await fetch(base + "/");
+    const html = await page.text();
+    if (!page.ok || !page.headers.get("content-type")?.includes("text/html")) fail("shipped startup did not serve index HTML");
+    const assetPath = /(?:src|href)=["'](\/[^"']+\.(?:js|css))["']/u.exec(html)?.[1];
+    if (!assetPath) fail("index HTML has no referenced JS/CSS asset");
+    const asset = await fetch(base + assetPath);
+    if (!asset.ok || !/javascript|css/u.test(asset.headers.get("content-type") ?? "") || (await asset.arrayBuffer()).byteLength === 0) fail("referenced static asset failed");
     const output = getOutput();
     if (
       /(?:JWT_SECRET|PASSWORD|TOKEN|SECRET|PRIVATE_KEY)\s*[:=]\s*[^\s]+/iu.test(
@@ -228,6 +235,9 @@ export async function smokeArtifact({
       version,
       nativeVersions,
       publicSettings: "ok",
+      staticIndex: "ok",
+      referencedAsset: "ok",
+      startupEntrypoint: "scripts/release/start-artifact.mjs",
       databaseInitializedWithoutAccount: true,
     };
   } catch (error) {

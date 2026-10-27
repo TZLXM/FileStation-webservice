@@ -48,6 +48,8 @@ const REQUIRED_ARTIFACT_FILES = [
   "packages/shared/dist/index.js",
   "scripts/release/smoke-artifact.mjs",
   "scripts/release/create-smoke-db.mjs",
+  "scripts/release/validate-version.mjs",
+  "scripts/release/start-artifact.mjs",
 ];
 const OPTIONAL_ROOT_FILES = ["CHANGELOG.md", "LICENSE", "README.md"];
 const BANNED_SEGMENTS = new Set([
@@ -232,6 +234,8 @@ export async function prepareArtifactDirectory({
     `release-notes/v${normalizedVersion}.json`,
     "scripts/release/smoke-artifact.mjs",
     "scripts/release/create-smoke-db.mjs",
+    "scripts/release/validate-version.mjs",
+    "scripts/release/start-artifact.mjs",
   ]) {
     await copyRequiredFile(resolvedRepository, resolvedDestination, file);
   }
@@ -255,8 +259,8 @@ export async function prepareArtifactDirectory({
   }
   rootManifest.scripts = {
     ...(rootManifest.scripts ?? {}),
-    start: "node apps/server/dist/main.js",
-    "start:bynginx": "node apps/server/dist/main.js",
+    start: "node scripts/release/start-artifact.mjs",
+    "start:bynginx": "node scripts/release/start-artifact.mjs --bynginx",
     "smoke:artifact": "node scripts/release/smoke-artifact.mjs",
   };
   await writeFile(

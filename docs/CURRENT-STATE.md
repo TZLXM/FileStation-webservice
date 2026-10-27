@@ -11,10 +11,10 @@ FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 
 | 设计文档 | v2.3 as-built 更新；Phase 1 实施计划迭代至 v1.7（经两轮外部评审） |
 | 项目管理 | AGENTS.md 已建立 |
 | 代码实现 | Phase 1 MVP 完成；Phase 2 TOTP 两步认证、恢复码、API Token、审计、MCP 与断点续传已实现；Task 2 已落地 `0.2.0` 版本同步、双语发布说明、RFC 8785/Ed25519 manifest、可重定位原生制品、候选/签名/tag workflow 与固定公钥 fail-closed 占位 |
-| 自动化 | Task 2 release-tool Node tests 31/31；Task 1 release-gate 47/47；server unit 25 suites / 172 passed / 20 todo；full server E2E 10 suites / 85 passed；Web `npx vitest run --no-cache` 16 files / 137 passed；root typecheck/build 通过。本地从全新临时目录完成 Windows x64 生产制品 smoke。Lint 不可用；根 `npm test` 仍因 shared 缺少 `test` script 非零退出 |
+| 自动化 | Task 2 round 1 release-tool Node tests 40/40；Task 1 release-gate 47/47；server unit 25 suites / 172 passed / 20 todo；full server E2E 10 suites / 85 passed；Web `npx vitest run --no-cache` 16 files / 137 passed；root typecheck/build 通过。本地从全新临时目录完成 Windows x64 生产制品自身 smoke/启动器（public settings、`/` HTML 与引用的静态 asset），Node 22.14.0；与 hosted Node 20.17.0 Windows/Linux 验证分开记录。Lint 不可用；根 `npm test` 仍因 shared 缺少 `test` script 非零退出 |
 | 用户手动验收 | **Partial**：真实 MCP 客户端已通过 `server_info`、上传、列表、分享、浏览器下载/读回、审计查询及 Token 吊销；直接 MCP `download_file` 工具当前不存在。375px 小屏、TOTP/恢复码真实流程及页面刷新后的断点续传仍 Pending |
 | 发布安全门 | **Critical/High gate cleared；最终独立复审 APPROVED（`7a5ba50`）**：按最近一次成功快照，full/prod audit 均为 0 Critical、0 High；仍有 Moderate/Low，`npm audit` 因此仍 exit 1。整体发布仍因真实客户端/小屏/认证/续传手动验收 pending；续作时 registry audit 刷新被 EACCES/权限审查阻止，残余 advisories 与升级建议见下文和 security-gate report |
-| 发布自动门 | **Task 1/2 本地实现完成，stable tag 仍禁止**：版本、双语 notes、canonical manifest、平台制品、candidate evidence、tag 重建 digest 匹配和 protected signing workflow 已落地。真实 candidate Actions、hosted Windows/Linux smoke、三项人工验收与 tag/Release 仍 pending；固定公钥持续 `UNCONFIGURED`，签名按设计 fail closed。证据见 [release-evidence/v0.2.0.json](../release-evidence/v0.2.0.json) 与 [UPDATING.md](UPDATING.md) |
+| 发布自动门 | **Task 1/2 本地实现完成，stable tag 仍禁止**：版本、双语 notes、canonical manifest、平台制品、candidate evidence、tag 重建 digest 匹配和 protected signing workflow 已落地。round 1 增加签名前认证 GitHub candidate run/repository/workflow/source/provenance 和下载/重建 digest 对账（本地仅 fixture 验证）；真实 candidate Actions、hosted Windows/Linux smoke、三项人工验收与 tag/Release 仍 pending；固定公钥持续 `UNCONFIGURED`，签名按设计 fail closed。证据见 [release-evidence/v0.2.0.json](../release-evidence/v0.2.0.json) 与 [UPDATING.md](UPDATING.md) |
 | 部署 | 单进程模式（默认）与 Nginx 反代模式均可用；已推送至 GitHub |
 
 ## 设计决策摘要

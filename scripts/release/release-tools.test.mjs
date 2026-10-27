@@ -277,7 +277,7 @@ test("draft notes assign matching stable IDs to both languages and omit empty ca
   assert.equal(zh.features[0].id, `feat:${"a".repeat(40)}`);
   assert.match(zh.features[0].text, /待审阅/);
   assert.match(en.features[0].text, /Review/);
-  assert.doesNotThrow(() => validateReleaseNotes(draft));
+  assert.throws(() => validateReleaseNotes(draft), /review|待审阅/i);
 });
 
 test("draft notes consume conventional PR metadata with stable paired IDs", () => {
@@ -534,8 +534,10 @@ test("manifest building and Ed25519 signatures reject tampering and non-64-byte 
   );
 });
 
-test("the checked-in public-key module is an explicit fail-closed sentinel", async () => {
-  const fixed = await loadFixedPublicKey();
+test("an unconfigured public-key fixture fails closed", async () => {
+  const file = path.join(fixtureRoot, "unconfigured-key.ts");
+  await writeFile(file, 'export const UPDATE_PUBLIC_KEY_STATUS = "unconfigured";\nexport const UPDATE_PUBLIC_KEY_SPKI_BASE64 = "UNCONFIGURED";');
+  const fixed = await loadFixedPublicKey(file);
   assert.equal(fixed.status, "unconfigured");
   assert.equal(fixed.publicKeyBase64, null);
   assert.throws(
@@ -667,6 +669,8 @@ async function createRepositoryFixture() {
     "packages/shared/dist/index.js",
     "scripts/release/smoke-artifact.mjs",
     "scripts/release/create-smoke-db.mjs",
+    "scripts/release/validate-version.mjs",
+    "scripts/release/start-artifact.mjs",
     "release-notes/v0.2.0.json",
   ]) {
     await writeFixtureFile(root, required, `fixture:${required}\n`);
@@ -945,4 +949,104 @@ test("release workflows isolate candidate builds from protected signing and publ
   assert.match(release, /gh release create/);
   assert.match(release, /actions: read/);
   assert.match(platform, /ref:\s*\$\{\{\s*inputs\.source_commit\s*\}\}/);
+});
+
+test("canonical JSON rejects lone surrogates in values and keys", () => {
+  for (const text of ["\ud800", "\udfff", "x\ud800y", "\udc00\ud800"]) {
+    assert.throws(() => canonicalizeJson(text), /surrogate|Unicode/i);
+    assert.throws(() => canonicalizeJson({ [text]: 1 }), /surrogate|Unicode/i);
+  }
+  assert.equal(canonicalizeJson({ "😀": "𐀀" }), '{"😀":"𐀀"}');
+});
+test("reviewed notes cannot hide breaking categories behind a false flag", () => {
+  const notes = validNotes("0.2.1");
+  for (const language of ["zh-CN", "en"]) notes.release_summaries[language].breaking = [{ id: "breaking-one", text: "Changed contract." }];
+  assert.throws(() => validateReleaseNotes(notes), /breaking/i);
+});
+test("draft breaking facts remain explicit even for an invalid patch target", () => {
+  const notes = draftReleaseNotes({ targetVersion: "0.2.1", previousTag: "v0.2.0", commits: [{ sha: sourceCommit, subject: "feat!: change contract" }] });
+  assert.equal(notes.breaking_changes, true);
+  assert.throws(() => validateReleaseNotes(notes), /patch.*breaking/i);
+});
+test("unresolved bilingual draft markers cannot validate", () => {
+  for (const marker of ["[Review]", "[待审阅]"]) {
+    const notes = validNotes();
+    notes.release_summaries.en.features[0].text = marker + " feature";
+    assert.throws(() => validateReleaseNotes(notes), /review|待审阅/i);
+  }
+});
+test("fixed public-key states accept reviewed provisioning and reject contradictions", async () => {
+  const file = path.join(fixtureRoot, "provisioned-key.ts");
+  const { publicKey } = generateKeyPairSync("ed25519");
+  const key = publicKey.export({ format: "der", type: "spki" }).toString("base64");
+  await writeFile(file, 'export const UPDATE_PUBLIC_KEY_STATUS = "configured";\nexport const UPDATE_PUBLIC_KEY_SPKI_BASE64 = "' + key + '";');
+  assert.equal(requireConfiguredPublicKey(await loadFixedPublicKey(file)), key);
+  await writeFile(file, 'export const UPDATE_PUBLIC_KEY_STATUS = "configured";\nexport const UPDATE_PUBLIC_KEY_SPKI_BASE64 = "UNCONFIGURED";');
+  await assert.rejects(loadFixedPublicKey(file), /malformed|contradict/i);
+  const production = await loadFixedPublicKey();
+  if (production.status === "configured") assert.ok(requireConfiguredPublicKey(production));
+  else assert.equal(production.publicKeyBase64, null);
+});
+test("packaged entrypoint and own smoke include their complete module closure", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  for (const file of ["validate-version.mjs", "start-artifact.mjs"]) {
+    await writeFixtureFile(repositoryRoot, "scripts/release/" + file, await readFile(new URL("./" + file, import.meta.url)));
+  }
+  const destination = path.join(fixtureRoot, "closure-stage");
+  await prepareArtifactDirectory({ repositoryRoot, destination, version: "0.2.0", platform: "windows-x64" });
+  for (const file of ["validate-version.mjs", "start-artifact.mjs"]) {
+    assert.ok((await stat(path.join(destination, "scripts/release", file))).isFile());
+  }
+  const pkg = JSON.parse(await readFile(path.join(destination, "package.json")));
+  assert.equal(pkg.scripts.start, "node scripts/release/start-artifact.mjs");
+  assert.equal(pkg.scripts["start:bynginx"], "node scripts/release/start-artifact.mjs --bynginx");
+});
+test("platform workflows assert and upload/attest the exact archive and use shipped smoke", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/release-platform.yml", import.meta.url), "utf8");
+  assert.match(workflow, /archive:\s*win-x64\.zip/);
+  assert.match(workflow, /archive:\s*linux-x64\.tar\.gz/);
+  assert.match(workflow, /name: Assert archive exists/);
+  assert.match(workflow, /subject-path: release-artifacts\/filestation-v.*matrix\.archive/);
+  assert.match(workflow, /node "\$smoke_root\/scripts\/release\/smoke-artifact.mjs"/);
+  assert.match(workflow, /Join-Path \$smokeRoot.FullName "scripts\/release\/smoke-artifact.mjs"/);
+});
+test("shipped launcher provides portable standalone and nginx defaults", async () => {
+  const { startupEnvironment } = await import("./start-artifact.mjs");
+  assert.deepEqual(startupEnvironment({}, false), { FILESTATION_SERVE_STATIC: "true", FILESTATION_HOST: "0.0.0.0" });
+  assert.deepEqual(startupEnvironment({}, true), { FILESTATION_SERVE_STATIC: "false", FILESTATION_HOST: "127.0.0.1" });
+});
+test("candidate identity and downloaded bytes reconcile with authenticated run and rebuild", async () => {
+  const { verifyAuthenticatedCandidate } = await import("./verify-candidate.mjs");
+  const repo = "example/FileStation";
+  const artifacts = ["linux-x64", "windows-x64"].map(artifact);
+  const buffers = { "linux-x64": Buffer.from("linux archive"), "windows-x64": Buffer.from("windows archive") };
+  for (const item of artifacts) {
+    item.sha256 = createHash("sha256").update(buffers[item.platform]).digest("hex");
+    item.archive_size = buffers[item.platform].length;
+  }
+  const evidence = { candidate: { sourceCommit, runId: "123", platformDigests: Object.fromEntries(artifacts.map(a => [a.platform, "sha256:" + a.sha256])) } };
+  const record = { schemaVersion: 1, version: "0.2.0", candidate: evidence.candidate, status: "unsigned-candidate-pending-human-acceptance" };
+  const run = { id: 123, repository: { full_name: repo }, head_repository: { full_name: repo }, path: ".github/workflows/release-candidate.yml", status: "completed", conclusion: "success", head_sha: sourceCommit, event: "workflow_dispatch" };
+  const provider = {
+    getRun: async () => structuredClone(run),
+    getArtifact: async (name) => {
+      if (name.endsWith("-candidate-evidence")) return { "release-candidate.json": Buffer.from(JSON.stringify(record)) };
+      const item = artifacts.find(a => name.endsWith("-" + a.platform));
+      return { [item.filename]: buffers[item.platform], ["artifact-metadata-" + item.platform + ".json"]: Buffer.from(JSON.stringify(item)) };
+    },
+  };
+  const verify = (override = {}) => verifyAuthenticatedCandidate({ repository: repo, version: "0.2.0", evidence, rebuiltArtifacts: artifacts, provider, ...override });
+  await verify();
+  for (const mutation of [{ conclusion: "failure" }, { status: "in_progress" }, { id: 124 }, { repository: { full_name: "evil/repo" } }, { head_repository: { full_name: "evil/repo" } }, { path: ".github/workflows/ci.yml" }, { head_sha: tagCommit }, { event: "push" }]) {
+    await assert.rejects(verify({ provider: { ...provider, getRun: async () => ({ ...run, ...mutation }) } }), /candidate|run|source|repository|workflow/i);
+  }
+  await assert.rejects(verify({ provider: { ...provider, getRun: async () => { throw Error("run not found"); } } }), /not found/);
+  await assert.rejects(verify({ provider: { ...provider, getArtifact: async () => ({}) } }), /provenance|missing/i);
+  const badRecord = { ...record, candidate: { ...record.candidate, runId: "999" } };
+  await assert.rejects(verify({ provider: { ...provider, getArtifact: async (name) => name.endsWith("-candidate-evidence") ? { "release-candidate.json": Buffer.from(JSON.stringify(badRecord)) } : provider.getArtifact(name) } }), /provenance/i);
+  await assert.rejects(verify({ rebuiltArtifacts: artifacts.map(a => ({ ...a, sha256: "f".repeat(64) })) }), /digest|metadata/i);
+  const original = buffers["windows-x64"];
+  buffers["windows-x64"] = Buffer.from("tampered");
+  await assert.rejects(verify(), /digest|size/i);
+  buffers["windows-x64"] = original;
 });
