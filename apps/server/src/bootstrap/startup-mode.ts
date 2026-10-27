@@ -21,15 +21,36 @@ async function exists(filename: string): Promise<boolean> {
   }
 }
 
-function ancestorCandidates(candidate: string): string[] {
-  const result: string[] = [];
-  let cursor = path.resolve(candidate);
-  for (;;) {
-    result.push(cursor);
-    const parent = path.dirname(cursor);
-    if (parent === cursor) return result;
-    cursor = parent;
+function componentIs(candidate: string, expected: string): boolean {
+  const component = path.basename(candidate);
+  return process.platform === "win32"
+    ? component.toLowerCase() === expected
+    : component === expected;
+}
+
+function executableRoots(executable: string): {
+  deploymentRoot?: string;
+  managedRoot?: string;
+} {
+  const directory = path.dirname(path.resolve(executable));
+  if (!componentIs(directory, "dist")) return {};
+  const workspace = path.dirname(directory);
+  const parent = path.dirname(workspace);
+  // The standalone updater lives at <installRoot>/updater/dist/cli.js.
+  if (componentIs(workspace, "updater") && componentIs(executable, "cli.js")) {
+    return { managedRoot: parent };
   }
+  if (!componentIs(workspace, "server") || !componentIs(parent, "apps")) {
+    return {};
+  }
+  const deploymentRoot = path.dirname(parent);
+  const container = path.dirname(deploymentRoot);
+  // Bootstrap publishes releases/<version>-<fingerprint>/apps/server/dist.
+  // Current may also be supplied lexically; real server entry resolves its link.
+  const managedRoot = componentIs(container, "releases")
+    ? path.dirname(container)
+    : componentIs(deploymentRoot, "current") ? container : undefined;
+  return { deploymentRoot, managedRoot };
 }
 
 export async function detectStartupMode(
@@ -45,27 +66,30 @@ export async function detectStartupMode(
     return { mode: "managed", root };
   }
 
-  const seen = new Set<string>();
-  for (const candidate of [
-    ...ancestorCandidates(input.executableRealpath),
-    ...ancestorCandidates(input.cwd),
-  ]) {
-    const root = path.resolve(candidate);
-    const key =
-      process.platform === "win32" ? root.toLowerCase() : root;
-    if (seen.has(key)) continue;
-    seen.add(key);
+  const { deploymentRoot, managedRoot } = executableRoots(input.executableRealpath);
+  if (managedRoot) {
+    if (!(await exists(path.join(managedRoot, "managed-install.json")))) {
+      throw new Error(`managed-install.json is missing for managed layout at ${managedRoot}`);
+    }
+    return { mode: "managed", root: managedRoot };
+  }
+
+  // Only inspect the actual deployment and cwd. Generic children of an ancestor
+  // (updater/releases/current) can belong to an unrelated neighboring project.
+  const candidates = new Set([deploymentRoot, path.resolve(input.cwd)]);
+  for (const root of candidates) {
+    if (!root) continue;
     if (await exists(path.join(root, "managed-install.json"))) {
       return { mode: "managed", root };
     }
-  }
-
-  // A managed layout or durable marker cannot silently fall back to legacy.
-  for (const candidate of seen) {
-    for (const marker of ["current", "releases", "updater", ".bootstrap-in-progress.json", "update-attempt.journal", "update.lock", "update.recovery.lock"]) {
-      if (marker === "updater" && path.basename(candidate).toLowerCase() === "apps") continue;
-      if (await exists(path.join(candidate, marker)))
-        throw new Error(`managed-install.json is missing for managed layout at ${candidate}`);
+    const markers = [".bootstrap-in-progress.json", "update-attempt.journal", "update.lock", "update.recovery.lock"];
+    // Preserve fail-closed owned layout detection without inspecting siblings of
+    // the deployment (or generic entries in an unrelated cwd).
+    if (root === deploymentRoot) markers.push("current", "releases", "updater");
+    for (const marker of markers) {
+      if (await exists(path.join(root, marker))) {
+        throw new Error(`managed-install.json is missing for managed layout at ${root}`);
+      }
     }
   }
 
