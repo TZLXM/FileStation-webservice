@@ -124,6 +124,7 @@ function workspaceManifests(version = "0.2.0") {
   return Object.fromEntries(
     [
       "package.json",
+      "apps/updater/package.json",
       "apps/server/package.json",
       "apps/web/package.json",
       "packages/shared/package.json",
@@ -132,14 +133,14 @@ function workspaceManifests(version = "0.2.0") {
   );
 }
 
-test("version validation requires the tag and all five product manifests to agree", () => {
+test("version validation requires the tag and all six product manifests to agree", () => {
   assert.deepEqual(
     validateVersion({
       tag: "v0.2.0",
       manifests: workspaceManifests(),
       breakingChanges: false,
     }),
-    { version: "0.2.0", tag: "v0.2.0", productManifestCount: 5 },
+    { version: "0.2.0", tag: "v0.2.0", productManifestCount: 6 },
   );
 
   assert.throws(
@@ -174,6 +175,15 @@ test("version validation rejects a missing update-core manifest", () => {
   );
 });
 
+test("version validation rejects a missing updater manifest", () => {
+  const manifests = workspaceManifests();
+  delete manifests["apps/updater/package.json"];
+  assert.throws(
+    () => validateVersion({ tag: "v0.2.0", manifests, breakingChanges: false }),
+    /workspace manifest is missing: apps\/updater\/package\.json/,
+  );
+});
+
 test("version validation rejects a mismatched update-core product version", () => {
   const manifests = workspaceManifests();
   manifests["packages/update-core/package.json"].version = "9.9.9";
@@ -183,13 +193,22 @@ test("version validation rejects a mismatched update-core product version", () =
   );
 });
 
-test("version validation excludes third-party tooling and does not require a future updater", () => {
+test("version validation rejects a mismatched updater product version", () => {
+  const manifests = workspaceManifests();
+  manifests["apps/updater/package.json"].version = "9.9.9";
+  assert.throws(
+    () => validateVersion({ tag: "v0.2.0", manifests, breakingChanges: false }),
+    /apps\/updater\/package\.json version "9\.9\.9" does not match tag v0\.2\.0/,
+  );
+});
+
+test("version validation excludes third-party tooling but includes all product workspaces", () => {
   const manifests = workspaceManifests();
   manifests["packages/release-tool/package.json"] = { name: "third-party-tool", version: "9.9.9" };
   manifests["node_modules/canonicalize/package.json"] = { name: "canonicalize", version: "2.1.0" };
   assert.equal(
     validateVersion({ tag: "v0.2.0", manifests, breakingChanges: false }).productManifestCount,
-    5,
+    6,
   );
 });
 
@@ -682,9 +701,11 @@ async function createRepositoryFixture() {
     JSON.stringify({ lockfileVersion: 3, packages: {} }, null, 2),
   );
   for (const workspace of [
+    "apps/updater/package.json",
     "apps/server/package.json",
     "apps/web/package.json",
     "packages/shared/package.json",
+    "packages/update-core/package.json",
   ]) {
     await writeFixtureFile(
       root,

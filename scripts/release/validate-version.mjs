@@ -13,6 +13,7 @@ const SHA_PATTERN = /^[0-9a-f]{40}$/;
 // Keep this explicit product list in sync; Task 5 must add its updater workspace.
 const PRODUCT_MANIFESTS = [
   "package.json",
+  "apps/updater/package.json",
   "apps/server/package.json",
   "apps/web/package.json",
   "packages/shared/package.json",
