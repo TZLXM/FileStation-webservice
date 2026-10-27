@@ -95,3 +95,45 @@ describe('Vite canonical base configuration', () => {
     expect(existsSync(resolve(webRoot, 'public', 'favicon.svg'))).toBe(true);
   });
 });
+
+describe('Nginx root and subpath API examples (static configuration)', () => {
+  // Enable the documented example for inspection; this does not run Nginx.
+  const config = readFileSync(resolve(webRoot, '../../deploy/nginx/filestation.conf'), 'utf8')
+    .replace(/^([ \t]*)# ?/gm, '$1');
+  const locations = [...config.matchAll(/location\s+(=\s+)?(\/\S*)\s*\{([^}]+)\}/g)]
+    .map((match) => ({ exact: Boolean(match[1]), path: match[2], body: match[3] }));
+
+  it.each([
+    ['/api/', '/api/v1/settings', '/api/v1/settings'],
+    ['/api/', '/api/v1/mcp', '/api/v1/mcp'],
+    ['/api/', '/api/v1/downloads/ticket-1', '/api/v1/downloads/ticket-1'],
+    ['/fs/api/', '/fs/api/v1/settings', '/api/v1/settings'],
+    ['/fs/api/', '/fs/api/v1/mcp', '/api/v1/mcp'],
+    ['/fs/api/', '/fs/api/v1/downloads/ticket-1', '/api/v1/downloads/ticket-1'],
+  ])('preserves the API prefix when %s proxies %s', (prefix, requestPath, expected) => {
+    const location = locations.find((entry) => !entry.exact && entry.path === prefix);
+    expect(location).toBeDefined();
+    const proxyPass = location!.body.match(/proxy_pass\s+http:\/\/filestation([^;]*);/);
+    expect(proxyPass).not.toBeNull();
+    // For these prefix locations, a proxy_pass URI replaces the location prefix;
+    // without a URI, Nginx preserves the request path.
+    const upstreamUri = proxyPass![1];
+    const forwardedPath = upstreamUri
+      ? upstreamUri + requestPath.slice(prefix.length)
+      : requestPath;
+    expect(forwardedPath).toBe(expected);
+  });
+
+  it.each(['/api/v1/auth/init', '/fs/api/v1/auth/init'])(
+    'keeps exact loopback-only initialization at %s', (path) => {
+      const location = locations.find((entry) => entry.exact && entry.path === path);
+      expect(location).toBeDefined();
+      expect(location!.body).toMatch(/allow\s+127\.0\.0\.1;/);
+      expect(location!.body).toMatch(/allow\s+::1;/);
+      expect(location!.body).toMatch(/deny\s+all;/);
+      expect(location!.body).toContain(path.startsWith('/fs/')
+        ? 'proxy_pass http://filestation/api/v1/auth/init;'
+        : 'proxy_pass http://filestation;');
+    },
+  );
+});

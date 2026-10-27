@@ -35,5 +35,5 @@ npx cross-env FILESTATION_BASE=/fs/ npm run build --workspace=@filestation/web
 canonical `/api/v1/...` 路径。根路径与 `/fs/` 初始化端点都保留仅允许回环
 地址的 `allow/deny`。该配置不增加 CORS 或 trust-proxy 设置。
 
-刷新 Cookie 未显式设置 `Path`，浏览器默认作用域为 `/`，同时覆盖根路径和
-`/fs/`；不要为子路径另设不兼容的 Cookie Path。
+刷新 Cookie 的调用未显式设置 `Path`，Express `res.cookie` 默认设置 `Path=/`，同时覆盖根路径和
+`/fs/`。若响应未包含 `Path` 属性，浏览器会按请求路径计算默认路径，并非始终为 `/`；不要为子路径另设不兼容的 Cookie Path。
