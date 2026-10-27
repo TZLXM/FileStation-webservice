@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { posix, resolve } from 'node:path';
+import { createRequire } from 'node:module';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadConfigFromFile } from 'vite';
 import {
@@ -100,8 +101,8 @@ describe('Nginx root and subpath API examples (static configuration)', () => {
   // Enable the documented example for inspection; this does not run Nginx.
   const config = readFileSync(resolve(webRoot, '../../deploy/nginx/filestation.conf'), 'utf8')
     .replace(/^([ \t]*)# ?/gm, '$1');
-  const locations = [...config.matchAll(/location\s+(=\s+)?(\/\S*)\s*\{([^}]+)\}/g)]
-    .map((match) => ({ exact: Boolean(match[1]), path: match[2], body: match[3] }));
+  const locations = [...config.matchAll(/location\s+(?:(=|~\*)\s+)?(\S+)\s*\{([^}]+)\}/g)]
+    .map((match) => ({ exact: match[1] === '=', regex: match[1] === '~*', path: match[2], body: match[3] }));
 
   it.each([
     ['/api/', '/api/v1/settings', '/api/v1/settings'],
@@ -125,7 +126,7 @@ describe('Nginx root and subpath API examples (static configuration)', () => {
   });
 
   it.each(['/api/v1/auth/init', '/fs/api/v1/auth/init'])(
-    'keeps exact loopback-only initialization at %s', (path) => {
+    'retains canonical exact initialization with loopback-only access at %s', (path) => {
       const location = locations.find((entry) => entry.exact && entry.path === path);
       expect(location).toBeDefined();
       expect(location!.body).toMatch(/allow\s+127\.0\.0\.1;/);
@@ -136,4 +137,88 @@ describe('Nginx root and subpath API examples (static configuration)', () => {
         : 'proxy_pass http://filestation;');
     },
   );
+});
+
+
+describe('Nginx initialization guard versus installed Express matcher', () => {
+  const config = readFileSync(resolve(webRoot, '../../deploy/nginx/filestation.conf'), 'utf8')
+    .replace(/^([ \t]*)# ?/gm, '$1');
+  const locations = [...config.matchAll(/location\s+(?:(=|~\*)\s+)?(\S+)\s*\{([^}]+)\}/g)]
+    .map((match) => ({ modifier: match[1], path: match[2], body: match[3] }));
+  const serverRequire = createRequire(resolve(webRoot, '../server/package.json'));
+  // Use the server-resolved installed Express Router, including its real Layer.match.
+  const express = serverRequire('express') as typeof import('express');
+  const router = express.Router();
+  router.post('/api/v1/auth/init', (_req, res) => res.end());
+  const initLayer = router.stack[0];
+
+  function selectedLocation(uri: string) {
+    // Static model of Nginx normalized URI and exact/regex/prefix precedence.
+    // This is not a Nginx parser or a live proxy acceptance test.
+    const normalized = posix.normalize(decodeURIComponent(uri.split('?')[0]).replace(/\/+/g, '/'));
+    return locations.find((entry) => entry.modifier === '=' && entry.path === normalized)
+      ?? locations.find((entry) => entry.modifier === '~*' && new RegExp(entry.path, 'i').test(normalized))
+      ?? locations.filter((entry) => !entry.modifier && normalized.startsWith(entry.path))
+        .sort((a, b) => b.path.length - a.path.length)[0];
+  }
+
+  it.each(['', '/fs'])('guards all case/trailing-slash init variants under %j', (prefix) => {
+    // Exhaust all letter case combinations in the entire public path, including /fs.
+    const canonical = `${prefix}/api/v1/auth/init`;
+    let variants = [''];
+    for (const character of canonical) {
+      variants = variants.flatMap((value) => /[a-z]/.test(character)
+        ? [value + character, value + character.toUpperCase()]
+        : [value + character]);
+    }
+    const unguarded: string[] = [];
+    for (const variant of variants) {
+      for (const suffix of ['', '/']) {
+        const uri = variant + suffix;
+        const backendPath = prefix ? uri.slice(prefix.length) : uri;
+        expect(initLayer.match(backendPath)).toBe(true);
+        const location = selectedLocation(uri);
+        const canonicalGuard = location?.modifier === '='
+          && /allow\s+127\.0\.0\.1;/.test(location.body)
+          && /allow\s+::1;/.test(location.body) && /deny\s+all;/.test(location.body);
+        const rejected = /return\s+403;/.test(location?.body ?? '');
+        if (!canonicalGuard && !rejected) unguarded.push(uri);
+      }
+    }
+    expect(unguarded.slice(0, 8)).toEqual([]);
+    expect(unguarded).toHaveLength(0);
+  });
+
+  it.each([
+    '/api/v1/auth/%69nit', '/api/v1/auth/%49NIT%2f',
+    '/%41PI/V1/AUTH/INIT/', '/api//v1/auth/./init/',
+    '/api/v1/auth/other/../INIT',
+    '/fs/api/v1/auth/%69nit', '/fs/api/v1/auth/%49NIT%2f',
+    '/%66s/%41PI/V1/AUTH/INIT/', '/fs//api/v1/auth/./init/',
+    '/fs/api/v1/auth/other/../INIT',
+  ])('guards normalized URI fixture %s', (uri) => {
+    const normalized = posix.normalize(decodeURIComponent(uri).replace(/\/+/g, '/'));
+    const backendPath = normalized.replace(/^\/fs/i, '');
+    expect(initLayer.match(backendPath)).toBe(true);
+    const location = selectedLocation(uri);
+    expect(location).toBeDefined();
+    if (location?.modifier === '=') {
+      expect(location.body).toMatch(/allow\s+127\.0\.0\.1;/);
+      expect(location.body).toMatch(/allow\s+::1;/);
+      expect(location.body).toMatch(/deny\s+all;/);
+    } else {
+      expect(location?.body).toMatch(/return\s+403;/);
+    }
+  });
+
+  it.each(['/api/v1/settings', '/api/v1/mcp', '/api/v1/downloads/ticket-1',
+    '/fs/api/v1/settings', '/fs/api/v1/mcp', '/fs/api/v1/downloads/ticket-1',
+    '/api/v1/auth/init-status', '/fs/api/v1/auth/init-status',
+  ])('keeps unrelated API path %s on the API proxy', (uri) => {
+    expect(initLayer.match(uri.replace(/^\/fs/, ''))).toBe(false);
+    const location = selectedLocation(uri);
+    expect(location?.path).toBe(uri.startsWith('/fs/') ? '/fs/api/' : '/api/');
+    expect(location?.body).toContain('proxy_pass http://filestation');
+    expect(location?.body).not.toMatch(/return\s+403;/);
+  });
 });
