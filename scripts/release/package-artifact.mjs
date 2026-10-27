@@ -42,14 +42,23 @@ const REQUIRED_ARTIFACT_FILES = [
   "package-lock.json",
   "apps/server/package.json",
   "apps/web/package.json",
+  "apps/updater/package.json",
   "packages/shared/package.json",
+  "packages/update-core/package.json",
   "apps/server/dist/main.js",
+  "apps/updater/dist/cli.js",
+  "apps/updater/dist/launcher.js",
   "apps/web/dist/index.html",
   "packages/shared/dist/index.js",
+  "packages/update-core/dist/index.js",
   "scripts/release/smoke-artifact.mjs",
   "scripts/release/create-smoke-db.mjs",
   "scripts/release/validate-version.mjs",
   "scripts/release/start-artifact.mjs",
+  "scripts/bootstrap-update.ps1",
+  "scripts/bootstrap-update.sh",
+  "scripts/start-filestation.ps1",
+  "scripts/start-filestation.sh",
 ];
 const OPTIONAL_ROOT_FILES = ["CHANGELOG.md", "LICENSE", "README.md"];
 const BANNED_SEGMENTS = new Set([
@@ -230,19 +239,27 @@ export async function prepareArtifactDirectory({
     "package-lock.json",
     "apps/server/package.json",
     "apps/web/package.json",
+    "apps/updater/package.json",
     "packages/shared/package.json",
+    "packages/update-core/package.json",
     `release-notes/v${normalizedVersion}.json`,
     "scripts/release/smoke-artifact.mjs",
     "scripts/release/create-smoke-db.mjs",
     "scripts/release/validate-version.mjs",
     "scripts/release/start-artifact.mjs",
+    "scripts/bootstrap-update.ps1",
+    "scripts/bootstrap-update.sh",
+    "scripts/start-filestation.ps1",
+    "scripts/start-filestation.sh",
   ]) {
     await copyRequiredFile(resolvedRepository, resolvedDestination, file);
   }
   for (const directory of [
     "apps/server/dist",
+    "apps/updater/dist",
     "apps/web/dist",
     "packages/shared/dist",
+    "packages/update-core/dist",
   ]) {
     await copyDirectory(resolvedRepository, resolvedDestination, directory);
   }

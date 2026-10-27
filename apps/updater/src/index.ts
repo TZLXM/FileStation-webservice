@@ -5,3 +5,6 @@ export * from "./platform/current-link";
 export * from "./platform/durable-fs";
 export * from "./platform/volume-space";
 export * from "./platform/recovery-guard";
+export * from "./bootstrap/path-plan";
+export * from "./bootstrap/bootstrap-command";
+export * from "./launcher";

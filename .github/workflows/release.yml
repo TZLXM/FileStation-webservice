@@ -71,8 +71,11 @@ jobs:
       - name: Release tool tests
         run: node --test scripts/release/release-tools.test.mjs
 
-      - name: Build shared workspace
-        run: npm run build:shared
+      - name: Build server updater prerequisites
+        run: |
+          npm run build:shared
+          npm run build --workspace=@filestation/update-core
+          npm run build --workspace=@filestation/updater
 
       - name: Server unit tests
         run: npm test --workspace=@filestation/server -- --runInBand

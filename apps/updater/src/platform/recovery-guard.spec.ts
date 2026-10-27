@@ -6,10 +6,11 @@ import { createTempRoot } from "../test-support";
 
 it.each(["exit", "kill"])("retains real OS exclusion and releases on child %s", async mode => {
   const temp = await createTempRoot();
+  const updaterRoot = path.resolve(__dirname, "../..");
   const filename = path.join(temp.path, "permanent.guard");
   const source = path.resolve(__dirname, "recovery-guard.ts");
   const script = `require(${JSON.stringify(source)}).acquireRecoveryGuard(${JSON.stringify(filename)}).then(() => { process.stdout.write('ready'); process.stdin.resume(); process.stdin.on('data', () => process.exit(0)); });`;
-  const child = spawn(process.execPath, ["-r", require.resolve("ts-node/register"), "-e", script], { env: { ...process.env, TS_NODE_TRANSPILE_ONLY: "true" }, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(process.execPath, ["-r", require.resolve("ts-node/register"), "-e", script], { cwd: updaterRoot, env: { ...process.env, TS_NODE_PROJECT: path.join(updaterRoot, "tsconfig.json"), TS_NODE_TRANSPILE_ONLY: "true" }, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
   const exited = new Promise<void>(resolve => child.once("exit", () => resolve()));
   try {
     await new Promise<void>((resolve, reject) => { child.stdout.once("data", () => resolve()); child.once("error", reject); child.once("exit", () => reject(new Error("child exited before ready"))); });

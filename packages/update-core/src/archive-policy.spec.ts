@@ -33,8 +33,17 @@ type Entry = {
 const root = "filestation-v0.2.5-";
 const files = [
   "apps/server/dist/main.js",
+  "apps/updater/dist/cli.js",
+  "apps/updater/dist/launcher.js",
   "apps/web/dist/index.html",
   "packages/shared/dist/index.js",
+  "packages/update-core/dist/index.js",
+  "packages/update-core/package.json",
+  "apps/updater/package.json",
+  "scripts/bootstrap-update.ps1",
+  "scripts/bootstrap-update.sh",
+  "scripts/start-filestation.ps1",
+  "scripts/start-filestation.sh",
   "node_modules/lib/index.js",
 ];
 export const zip = (entries: Entry[]) => {
@@ -101,8 +110,8 @@ const limits = (format = "zip") => ({
   format: format as "zip" | "tar.gz",
   version: "0.2.5",
   platform: format === "zip" ? "windows-x64" : "linux-x64",
-  unpackedSize: 8,
-  maxEntries: 20,
+  unpackedSize: 26,
+  maxEntries: 32,
   maxFileBytes: 1024,
   maxTotalBytes: 4096,
   maxRatio: 200,
@@ -116,7 +125,7 @@ describe("actual archive bytes, handle binding and controlled extraction", () =>
     ]);
     const h = await open(b);
     try {
-      const p = await inspectArchive(h, { ...limits(), unpackedSize: 10 });
+      const p = await inspectArchive(h, { ...limits(), unpackedSize: 28 });
       await mkdir(path.join(dir, "unrelated"));
       await writeFile(path.join(dir, "unrelated", "keep"), "keep");
       await expect(

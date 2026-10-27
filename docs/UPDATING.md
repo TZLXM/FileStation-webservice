@@ -91,3 +91,76 @@ with static serving enabled and host `0.0.0.0`; `npm run start:bynginx` invokes
 the same launcher with static serving disabled and host `127.0.0.1`, matching
 the source scripts. Both work without `cross-env` or shell-specific assignments.
 The launcher imports the server in the same process so stopping it stops the server.
+
+## Task 6 managed bootstrap fixtures and source command
+
+Task 6 adds the bootstrap, stable launcher, and pre-write validation needed for
+the managed layout. This is implementation evidence for the update program; it
+does not complete the v0.2.5 candidate, hosted Linux checks, or manual release
+acceptance.
+
+Capture the old process identity before stopping it. The bootstrap command
+never signals or stops that process, and it fails if the supplied old identity
+is still alive on the current boot.
+
+On Windows:
+
+```powershell
+$boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString("O")
+$created = (Get-CimInstance Win32_Process -Filter "ProcessId=<old-pid>").CreationDate.ToUniversalTime().ToString("O")
+.\scripts\bootstrap-update.ps1 `
+  -Root C:\FileStation `
+  -SourceRoot C:\FileStation-source `
+  -OldPid <old-pid> `
+  -OldBootIdentity "win32:$boot" `
+  -OldProcessCreatedAt "win32:$created" `
+  -RelativePathPolicy preserve
+```
+
+On Linux:
+
+```bash
+old_pid=<old-pid>
+boot="linux:$(cat /proc/sys/kernel/random/boot_id)"
+created="linux-starttime:$(awk '{print $22}' "/proc/$old_pid/stat")"
+scripts/bootstrap-update.sh \
+  --root /srv/filestation \
+  --source-root /srv/filestation-source \
+  --old-pid "$old_pid" \
+  --old-boot-identity "$boot" \
+  --old-process-created-at "$created" \
+  --relative-path-policy preserve
+```
+
+Use `preserve` for default relative paths so the existing database, storage and
+temp remain at their canonical absolute locations. Bootstrap does not copy the
+storage tree. Any reviewed absolute path override must be an existing canonical
+path and also requires `--accept-path-change`; prepare and validate data at the
+new location separately before starting the managed service.
+
+Start from the installation root so the root `.env` is loaded before server
+modules. Variables already present in the calling process take precedence:
+
+```powershell
+.\scripts\start-filestation.ps1 -Root C:\FileStation
+```
+
+```bash
+scripts/start-filestation.sh --root /srv/filestation
+```
+
+Use `--dry-run` on `bootstrap` or `launch` to inspect validation without
+creating directories or opening the database. `filestation-updater status
+--root <root>` reads the existing journal contract. Active update
+recovery returns a fail-closed instruction until the authenticated Task 9
+orchestrator is installed; do not edit or truncate journal files by hand.
+
+Each bootstrap creates `backups/<id>/MANIFEST.json`, a verified SQLite snapshot,
+the recoverable `legacy-source` tree, and a separate `env/legacy.env` copy.
+Restore by stopping the managed process, reviewing that manifest, placing the
+legacy tree and env file at a separate exact path, and starting the old command
+from the original legacy root. Never run old and new versions against the same
+database or storage.
+
+Nginx configuration is intentionally untouched. Review `proxy_pass` and the
+manual root or `/fs/` configuration, run `nginx -t`, and reload Nginx yourself.

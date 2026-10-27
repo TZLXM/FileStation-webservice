@@ -1,17 +1,75 @@
-import { NestFactory } from '@nestjs/core';
-import { ValidationPipe, Logger } from '@nestjs/common';
-import { AppModule } from './app.module';
-import { ConfigService } from '@nestjs/config';
-import { AuthService } from './auth/auth.service';
-import { StorageService } from './files/storage.service';
-import { RangeNotSatisfiableFilter } from './common/http/range-not-satisfiable.filter';
-import cookieParser from 'cookie-parser';
-import * as fs from 'fs/promises';
-import { dirname } from 'path';
-import { installNonMcpBodyParsers } from './common/http/body-parsers';
-import { setupSwagger } from './common/swagger/setup-swagger';
+import { realpath } from 'fs/promises';
+import {
+  loadInstallEnvironment,
+  loadManagedInstallMetadata,
+  validateManagedLaunch,
+} from './bootstrap/managed-preflight';
+import { detectStartupMode } from './bootstrap/startup-mode';
+
+interface PreparedStartup {
+  mode: 'legacy' | 'managed';
+  root: string;
+  releaseRealpath?: string;
+}
+
+function applyEnvironment(values: Readonly<Record<string, string>>): void {
+  for (const [key, value] of Object.entries(values)) {
+    process.env[key] = value;
+  }
+}
+
+async function prepareStartup(): Promise<PreparedStartup> {
+  const cwdRealpath = await realpath(process.cwd());
+  const executableRealpath = await realpath(__filename);
+  const startup = await detectStartupMode({
+    cwd: cwdRealpath,
+    executableRealpath,
+  });
+  const environment = await loadInstallEnvironment(startup.root);
+  applyEnvironment(environment.values);
+  if (startup.mode === 'legacy') {
+    return { mode: 'legacy', root: startup.root };
+  }
+
+  const metadata = await loadManagedInstallMetadata(startup.root);
+  const currentRealpath = await realpath(metadata.currentPath);
+  const plan = validateManagedLaunch({
+    cwd: cwdRealpath,
+    executableRealpath,
+    installMetadata: metadata,
+    currentRealpath,
+    configuredPaths: {
+      database: environment.values.FILESTATION_DB_PATH,
+      storage: environment.values.FILESTATION_STORAGE_PATH,
+      temp: environment.values.FILESTATION_TEMP_PATH,
+    },
+  });
+  applyEnvironment(plan.environment);
+  return {
+    mode: 'managed',
+    root: startup.root,
+    releaseRealpath: plan.releaseRealpath,
+  };
+}
 
 async function bootstrap() {
+  const prepared = await prepareStartup();
+  const { NestFactory } = await import('@nestjs/core');
+  const { ValidationPipe, Logger } = await import('@nestjs/common');
+  const { AppModule } = await import('./app.module');
+  const { ConfigService } = await import('@nestjs/config');
+  const { AuthService } = await import('./auth/auth.service');
+  const { StorageService } = await import('./files/storage.service');
+  const { RangeNotSatisfiableFilter } = await import(
+    './common/http/range-not-satisfiable.filter'
+  );
+  const cookieParser = (await import('cookie-parser')).default;
+  const fs = await import('fs/promises');
+  const { dirname } = await import('path');
+  const { installNonMcpBodyParsers } = await import(
+    './common/http/body-parsers'
+  );
+  const { setupSwagger } = await import('./common/swagger/setup-swagger');
   const logger = new Logger('Bootstrap');
 
   // ========== 阶段 0：端口预检（防 EADDRINUSE 时 init token 未激活的混淆） ==========
@@ -46,6 +104,7 @@ async function bootstrap() {
 
   // ========== 阶段 2：创建应用（migrationsRun 在此触发） ==========
   const app = await NestFactory.create(AppModule, { bodyParser: false });
+  app.enableShutdownHooks();
   const configService = app.get(ConfigService);
 
   // Ordinary routes retain the default 100KB parser limit. MCP is parsed only
@@ -86,6 +145,11 @@ async function bootstrap() {
   const displayHost = host === '0.0.0.0' ? 'localhost' : host;
   logger.log(`FileStation server running on http://${displayHost}:${port}`);
   logger.log(`Environment: ${configService.get<string>('app.nodeEnv')}`);
+  if (prepared.mode === 'managed') {
+    logger.log(
+      `Managed startup: install=${prepared.root}, release=${prepared.releaseRealpath}`,
+    );
+  }
   if (serveStatic) {
     logger.log(`部署模式：单进程（无 Nginx）—— 前端静态文件由本进程托管于 http://${displayHost}:${port}`);
   } else if (host === '127.0.0.1') {
@@ -114,4 +178,9 @@ async function bootstrap() {
   }
 }
 
-bootstrap();
+void bootstrap().catch((error) => {
+  const message =
+    error instanceof Error ? error.message : 'FileStation startup failed';
+  process.stderr.write(`FileStation startup failed: ${message}\n`);
+  process.exitCode = 1;
+});

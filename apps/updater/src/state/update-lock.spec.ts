@@ -507,6 +507,7 @@ describe("UpdateLock", () => {
   it("uses a real cross-process O_EXCL race when ts-node is available", async () => {
     const temp = await createTempRoot();
     try {
+        const updaterRoot = path.resolve(__dirname, "../..");
       const source = path.resolve(__dirname, "update-lock.ts");
       const register = require.resolve("ts-node/register");
       const script = `
@@ -540,10 +541,18 @@ describe("UpdateLock", () => {
         execFileAsync(
           process.execPath,
           ["-r", register, "-e", script],
-          { env: { ...process.env, TS_NODE_TRANSPILE_ONLY: "true" } },
+          {
+            cwd: updaterRoot,
+            env: {
+              ...process.env,
+              TS_NODE_PROJECT: path.join(updaterRoot, "tsconfig.json"),
+              TS_NODE_TRANSPILE_ONLY: "true",
+            },
+          },
         ).then(
           () => "owner",
-          (error) => String(error.stdout || "lost"),
+          (error) =>
+            `lost:${String(error.stdout ?? "")}${String(error.stderr ?? "")}`,
         ),
       );
       const results = await Promise.all(children);

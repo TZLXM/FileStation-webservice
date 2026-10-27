@@ -4,6 +4,9 @@
   "private": true,
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "filestation-updater": "dist/cli.js"
+  },
   "browser": false,
   "engines": {
     "node": ">=20.17.0"

@@ -47,18 +47,27 @@ test.each(["windows-x64", "linux-x64"])(
       const source = path.join(dir, "source");
       for (const name of [
         "apps/server/dist/main.js",
+        "apps/updater/dist/cli.js",
+        "apps/updater/dist/launcher.js",
         "apps/web/dist/index.html",
         "packages/shared/dist/index.js",
+        "packages/update-core/dist/index.js",
         "node_modules/example/index.js",
         "package.json",
         "package-lock.json",
         "apps/server/package.json",
+        "apps/updater/package.json",
         "apps/web/package.json",
         "packages/shared/package.json",
+        "packages/update-core/package.json",
         "scripts/release/smoke-artifact.mjs",
         "scripts/release/create-smoke-db.mjs",
         "scripts/release/validate-version.mjs",
         "scripts/release/start-artifact.mjs",
+        "scripts/bootstrap-update.ps1",
+        "scripts/bootstrap-update.sh",
+        "scripts/start-filestation.ps1",
+        "scripts/start-filestation.sh",
       ]) {
         await mkdir(path.dirname(path.join(source, name)), { recursive: true });
         await writeFile(path.join(source, name), "ok");

@@ -715,12 +715,19 @@ async function createRepositoryFixture() {
   }
   for (const required of [
     "apps/server/dist/main.js",
+    "apps/updater/dist/cli.js",
+    "apps/updater/dist/launcher.js",
     "apps/web/dist/index.html",
     "packages/shared/dist/index.js",
+    "packages/update-core/dist/index.js",
     "scripts/release/smoke-artifact.mjs",
     "scripts/release/create-smoke-db.mjs",
     "scripts/release/validate-version.mjs",
     "scripts/release/start-artifact.mjs",
+    "scripts/bootstrap-update.ps1",
+    "scripts/bootstrap-update.sh",
+    "scripts/start-filestation.ps1",
+    "scripts/start-filestation.sh",
     "release-notes/v0.2.0.json",
   ]) {
     await writeFixtureFile(root, required, `fixture:${required}\n`);
@@ -802,6 +809,32 @@ test("artifact staging includes production tree and excludes data, env, logs, an
     "server.log",
   ]) {
     await assert.rejects(stat(path.join(destination, excluded)), { code: "ENOENT" });
+  }
+});
+
+test("artifact staging includes the built updater and stable launcher scripts", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  const destination = path.join(fixtureRoot, `stage-${crypto.randomUUID()}`);
+  await prepareArtifactDirectory({
+    repositoryRoot,
+    destination,
+    version: "0.2.0",
+    platform: "linux-x64",
+    productionNodeModulesDirectory: path.join(repositoryRoot, "node_modules"),
+  });
+
+  for (const required of [
+    "apps/updater/package.json",
+    "apps/updater/dist/cli.js",
+    "apps/updater/dist/launcher.js",
+    "packages/update-core/package.json",
+    "packages/update-core/dist/index.js",
+    "scripts/bootstrap-update.ps1",
+    "scripts/bootstrap-update.sh",
+    "scripts/start-filestation.ps1",
+    "scripts/start-filestation.sh",
+  ]) {
+    await stat(path.join(destination, required));
   }
 });
 
@@ -963,6 +996,38 @@ test("shared protocol exports and CI release-tool test wiring are present", asyn
     workflow,
     /^        run: node --test scripts\/release\/release-tools\.test\.mjs\r?$/m,
   );
+});
+
+test("CI and release verification build updater dependencies before server tests", async () => {
+  for (const workflowPath of [
+    "../../.github/workflows/ci.yml",
+    "../../.github/workflows/release.yml",
+  ]) {
+    const workflow = await readFile(new URL(workflowPath, import.meta.url), "utf8");
+    const verifySection =
+      path.basename(workflowPath) === "release.yml"
+        ? workflow.slice(
+            workflow.indexOf("  verify:"),
+            workflow.indexOf("  publish:"),
+          )
+        : workflow;
+    const commands = [
+      "npm run build:shared",
+      "npm run build --workspace=@filestation/update-core",
+      "npm run build --workspace=@filestation/updater",
+      "npm test --workspace=@filestation/server",
+    ];
+    const positions = commands.map((command) => verifySection.indexOf(command));
+    assert.ok(
+      positions.every((position) => position >= 0),
+      `${path.basename(workflowPath)} is missing an updater prerequisite`,
+    );
+    assert.deepEqual(
+      [...positions].sort((left, right) => left - right),
+      positions,
+      `${path.basename(workflowPath)} server tests run before updater dependencies`,
+    );
+  }
 });
 
 test("release workflows isolate candidate builds from protected signing and publication", async () => {
