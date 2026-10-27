@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,6 +20,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
@@ -30,14 +32,34 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build shared workspace
+        run: npm run build:shared
+
+      - name: Server unit tests
+        run: npm test --workspace=@filestation/server -- --runInBand
+
+      - name: Server E2E tests
+        run: npm run test:e2e --workspace=@filestation/server
+
+      - name: Web unit tests
+        working-directory: apps/web
+        run: npx --no-install vitest run --no-cache
+
       - name: Type check
         run: npm run typecheck
 
-      - name: Lint
-        run: npm run lint
-
-      - name: Test
-        run: npm test
-
       - name: Build
         run: npm run build
+
+      - name: Check diff whitespace
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${PR_BASE_SHA}" ]]; then
+            merge_base="$(git merge-base "${PR_BASE_SHA}" HEAD)"
+            git diff --check "${merge_base}...HEAD"
+          else
+            git diff --check
+          fi

@@ -1,6 +1,6 @@
 # Current State
 
-Updated: 2026-09-26
+Updated: 2026-10-27
 
 FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 2 实现/自动化验证已完成；security fix commit `7a5ba50` 经最终独立复审 APPROVED。最近一次成功 registry audit 快照中依赖 Critical/High 已清零，但 Phase 2 发布验收仍 pending。** 代码测试通过不能替代用户手动验收；该快照仍有 Moderate/Low advisories，续作时的 registry 刷新未获网络权限。
 
@@ -11,9 +11,10 @@ FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 
 | 设计文档 | v2.3 as-built 更新；Phase 1 实施计划迭代至 v1.7（经两轮外部评审） |
 | 项目管理 | AGENTS.md 已建立 |
 | 代码实现 | Phase 1 MVP 完成；Phase 2 TOTP 两步登录与设置页管理、恢复码前后端、API Token、审计日志、MCP 服务及对应 Web 页面已实现；Task 10 第三轮复审修复、Task 11 最终复审、Task 12 断点续传 UI 与 Task 13 并发/压力测试修复均已获独立审阅批准；Task 15 修复 LAN HTTP 下 Web 分块 SHA-256 |
-| 自动化 | security-gate round 后：server unit 25 suites / 172 passed / 20 todo；full server E2E 10 suites / 85 passed；Task 15 focused Web 2 files / 32 passed、Web full `npx vitest run --no-cache` 16 files / 137 passed；Task 15 root typecheck/build/diff-check 通过；临时副本 `npm ci --ignore-scripts` 与 `npm ls --all` 通过。Lint 不可用；根 `npm test` 因 shared 缺少 `test` script 会非零退出 |
+| 自动化 | Task 1 release-gate 14/14；server unit 25 suites / 172 passed / 20 todo；full server E2E 10 suites / 85 passed；Web `npx vitest run --no-cache` 16 files / 137 passed；root typecheck/build/diff-check 通过。CI 在 server 测试前构建 shared workspace。Lint 不可用；根 `npm test` 因 shared 缺少 `test` script 会非零退出 |
 | 用户手动验收 | **Partial**：真实 MCP 客户端已通过 `server_info`、上传、列表、分享、浏览器下载/读回、审计查询及 Token 吊销；直接 MCP `download_file` 工具当前不存在。375px 小屏、TOTP/恢复码真实流程及页面刷新后的断点续传仍 Pending |
 | 发布安全门 | **Critical/High gate cleared；最终独立复审 APPROVED（`7a5ba50`）**：按最近一次成功快照，full/prod audit 均为 0 Critical、0 High；仍有 Moderate/Low，`npm audit` 因此仍 exit 1。整体发布仍因真实客户端/小屏/认证/续传手动验收 pending；续作时 registry audit 刷新被 EACCES/权限审查阻止，残余 advisories 与升级建议见下文和 security-gate report |
+| 发布自动门 | **Task 1 已实现，stable tag 仍禁止**：PR/master CI 使用显式六项命令；`npm run verify:release-gate -- --version <semver>` 只读取并严格校验结构化证据。`v0.2.0` candidate provenance/digest 与三项 Phase 2 人工记录仍 pending，因此命令按设计 exit 1；证据见 [release-evidence/v0.2.0.json](../release-evidence/v0.2.0.json) |
 | 部署 | 单进程模式（默认）与 Nginx 反代模式均可用；已推送至 GitHub |
 
 ## 设计决策摘要
@@ -138,6 +139,7 @@ FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 
 
 ### 自动化验证边界
 
+- **Task 1 release CI gate（2026-10-27）：** `scripts/ci/verify-release-gate.test.mjs` 先观察到模块缺失 RED，最终 14/14 passed；覆盖 candidate source/run/platform digest、375px/TOTP-恢复码/刷新续传、`v0.2.5` Linux/Windows 更新项、未知版本/schema/字段 fail closed，以及仅按结构化状态判断、不扫描自由文本。PR/master workflow 监听 `master`，使用完整 fetch depth，先构建 shared，再按 server unit、server E2E、Web no-cache、typecheck、build、diff-check 顺序运行。`v0.2.0` 结构化文件中的 candidate 和人工项保持 pending，未将其转为自动化通过或 stable release。
 - security-gate round 显式运行 server unit：25 suites / 172 passed / 20 todo；完整 server E2E：10 suites / 85 passed；Web `npx vitest run --no-cache`：15 files / 131 passed；并发/恢复/文件夹聚焦回归 3 轮各 3 suites / 18 passed；root `npm run typecheck`、`npm run build`、`git diff --check` 通过。
 - 根 `CI=true npm test` 已实际运行：server 25 suites / 172 passed / 20 todo、Web 15 files / 131 passed，随后因 `packages/shared/package.json` 没有 `test` script 以 exit 1 结束；显式 shared workspace 同样返回 `Missing script: "test"`。不能把根聚合报告成全绿；server/Web 显式 no-cache 命令均独立 exit 0。
 - Lint 复核：server 与 Web 的 `npm run lint` 都因找不到 `eslint` 可执行文件退出 1；shared 没有 `lint` script。Lint 状态是不可用，不是通过。
@@ -175,7 +177,7 @@ High-severity 发布门已清零，但剩余 Moderate/Low 仍是已知安全风�
 
 ### Phase 2 后续
 
-- 发布 security gate：Critical/High gate 已清零；后续需计划剩余 Moderate/Low advisories 的 major 迁移或风险接受。Phase 2 整体发布仍待下列用户手动验收。
+- 发布门：Task 1 的可执行 CI/release gate 已完成；需在真实 candidate CI 与 375px、TOTP/恢复码、刷新续传人工验收完成后更新 `release-evidence/v0.2.0.json`，否则 stable tag 必须保持禁止。Critical/High gate 已清零；后续仍需计划剩余 Moderate/Low advisories 的 major 迁移或风险接受。
 - 用户手动验收：375px 小屏/设备；TOTP 与恢复码流程；刷新页面后的上传续传。真实 MCP 客户端上述用例已通过；直接 MCP `download_file` 工具尚未实现。
 
 ### 待设计（Phase 3+）
@@ -228,6 +230,7 @@ High-severity 发布门已清零，但剩余 Moderate/Low 仍是已知安全风�
 - **2026-09-26**: Task14 第二轮独立复审修正 ADR-0005 中 MCP 拒绝请求体的有界排空说明并获 APPROVED；随后 Phase2 security-gate 独立修复轮以 `df26fc5` 为基线升级 sqlite3/bcrypt/Vite/Vitest，修复 production tar Critical、Vitest Critical 与可兼容 High。最近一次成功的 registry audit 快照从全量 46（2C/19H/19M/6L）、生产 28（1C/13H/11M/3L）降至全量 25（0C/0H/23M/2L）、生产 17（0C/0H/16M/1L）；Moderate/Low 仍使 audit exit 1。续作期间再次 audit 因 registry 网络 EACCES 且权限提升请求被拒，未产生新快照；`npm ls --all`、临时副本 `npm ci --ignore-scripts`、server unit 25/172、E2E 10/85、Web 15/131、focused 并发/恢复/文件夹 3 轮各 18、root typecheck/build 和 diff-check 均通过。Lint 不可用；真实 MCP/375px/TOTP/恢复码/刷新续传手动验收仍 pending。
 - **2026-09-26**: Phase2 security fix commit `7a5ba50` 获最终独立 security review **APPROVED**（无 Critical/P1/P2）。Reviewer 实际重跑 server unit 25/172、full E2E 10/85、Web no-cache 15/131、root typecheck/build、ServeStatic focused E2E 2/2 与 diff-check；并核对 clean npm dependency tree、native SQLite binding、bcrypt6 hash 与 dependency placement。非阻断残余：registry audit refresh 因 EACCES 继续使用最后成功快照；隔离 `npm ci --ignore-scripts` 跳过 install scripts，不作为 clean-room 原生安装证据；scoped overrides 升级需重审；Moderate/Low 与用户手动验收仍 pending，不代表 Phase2 发布批准。
 - **2026-09-26**: Task 15 修复 LAN HTTP Web 上传在首次分块前失败的问题：`FileUpload` 通过共享 `uploadChunks` helper 优先使用 SubtleCrypto，缺失或拒绝时回退到显式依赖 `@noble/hashes@1.8.0`，仍发送准确的 SHA-256 `X-Part-Checksum`；总计算失败显示专用错误并保留待续传状态，继续操作提示重新选择原文件。TDD RED 观察到首个 PUT 为 0、通用上传中断文案及续传说明缺失；focused GREEN 2 files / 32 passed，完整 Web 16 files / 137 passed，root typecheck/build/diff-check 通过。用户实际 MCP 客户端验收记录为通过：`server_info`、上传、列表、分享、浏览器下载/读回、审计查询及 Token 吊销；直接 MCP `download_file` 不存在。375px、TOTP/恢复码和刷新续传手动验收仍 pending；Lint 未运行，仓库已知缺少 ESLint。
+- **2026-10-27**: Task 1 修复发布 CI 并落地版本化 release gate：workflow 改为在 `master` 的 push/PR 运行，先构建 shared，再执行 server unit、server E2E、Web no-cache、typecheck、build 与 PR merge-base/本地 diff-check；移除不可用 lint 与根 `npm test`。新增严格结构化证据校验脚本、14 项 Node tests 与 `verify:release-gate` script，支持 `v0.2.0` Phase 2 人工项及 `v0.2.5` Linux/Windows 更新项，未知版本/schema/字段和非 passed 状态 fail closed。`v0.2.0` candidate provenance/digest 与三项真实人工验收保持 pending，命令按设计 exit 1；未创建 tag/release。验证：server unit 25/172（20 todo）、server E2E 10/85、Web 16 files/137、root typecheck/build 通过。
 
 ---
 
