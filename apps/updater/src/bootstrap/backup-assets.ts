@@ -23,7 +23,7 @@ export async function syncRecoveryTree(root: string, fs: DurableFileSystem): Pro
 
 export async function verifyExistingBootstrap(
   metadata: ManagedInstallMetadata, planned: ManagedInstallPaths,
-  release: string, current: string, fs: DurableFileSystem,
+  release: string, current: string, fs: DurableFileSystem, previous: ManagedInstallPaths,
 ): Promise<void> {
   for (const key of ["database", "storage", "temp"] as const) {
     if (!sameCanonicalPath(metadata.paths[key], planned[key]))
@@ -35,6 +35,8 @@ export async function verifyExistingBootstrap(
   if (manifest.schemaVersion !== 1 || manifest.kind !== "bootstrap-backup" ||
       manifest.backupId !== metadata.bootstrapBackupId || manifest.installId !== metadata.installId ||
       JSON.stringify(manifest.canonicalPaths) !== JSON.stringify(planned) ||
+      JSON.stringify(manifest.originalCanonicalPaths) !== JSON.stringify(previous) ||
+      !sameCanonicalPath(manifest.snapshot?.database ?? "", previous.database) ||
       manifest.snapshotReceipt?.sourceIntegrity !== "ok" || manifest.snapshotReceipt?.snapshotIntegrity !== "ok" ||
       manifest.snapshotReceipt?.sourceForeignKeys !== 0 || manifest.snapshotReceipt?.snapshotForeignKeys !== 0)
     throw new Error("bootstrap backup manifest or integrity receipt is inconsistent");
@@ -45,6 +47,13 @@ export async function verifyExistingBootstrap(
   };
   if (manifest.snapshot?.storedPath !== "database.sqlite") throw new Error("invalid bootstrap snapshot manifest");
   await verifyFile(path.join(backup, "database.sqlite"), manifest.snapshot.sha256, manifest.snapshot.bytes);
+  if (!sameCanonicalPath(previous.database, planned.database)) {
+    const target = manifest.targetSnapshot;
+    if (target?.storedPath !== "target-database.sqlite" || !sameCanonicalPath(target.database, planned.database) ||
+        target.receipt?.sourceIntegrity !== "ok" || target.receipt?.snapshotIntegrity !== "ok" || target.receipt?.sourceForeignKeys !== 0 || target.receipt?.snapshotForeignKeys !== 0)
+      throw new Error("relocated target verification manifest is inconsistent");
+    await verifyFile(path.join(backup, target.storedPath), target.sha256, target.bytes);
+  }
   if (manifest.env?.storedPath) {
     if (manifest.env.storedPath !== "env/legacy.env") throw new Error("invalid env backup path");
     await verifyFile(path.join(backup, "env/legacy.env"), manifest.env.sha256, manifest.env.size);

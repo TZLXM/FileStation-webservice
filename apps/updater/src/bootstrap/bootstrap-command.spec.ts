@@ -1,3 +1,4 @@
+import { parse as parseDotenv } from "dotenv";
 import { createHash } from "node:crypto";
 import {
   cp,
@@ -115,6 +116,7 @@ async function sourceFixture(): Promise<SourceFixture> {
   await writeFile(
     envPath,
     [
+      "NODE_ENV=test",
       "FILESTATION_DB_PATH=./data/filestation.db",
       "FILESTATION_STORAGE_PATH=./data/storage",
       "FILESTATION_TEMP_PATH=./data/temp",
@@ -284,8 +286,8 @@ describe("managed bootstrap", () => {
       path.join(result.installRoot, ".env"),
       "utf8",
     );
-    expect(managedEnv).toContain(
-      `FILESTATION_DB_PATH=${path.join(fixture.legacyRoot, "data/filestation.db")}`,
+    expect(parseDotenv(managedEnv).FILESTATION_DB_PATH).toBe(
+      path.join(fixture.legacyRoot, "data/filestation.db"),
     );
     expect(managedEnv).toContain("JWT_SECRET=fixture-only-secret");
   });
@@ -599,6 +601,78 @@ describe("managed bootstrap", () => {
     await expect(bootstrapManagedInstall({ ...commonOptions(fixture), identityProvider: provider,
       oldBootIdentity: "win32:2026-10-28T00:00:00.000Z", oldProcessCreatedAt: "win32:2026-10-28T00:01:00.0000000Z" })).rejects.toThrow(/alive|identity/i);
     await expect(lstat(fixture.installRoot)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("C46-1 excludes both runtime generations and snapshots the original DB separately", async () => {
+    fixture = await sourceFixture();
+    const old = path.join(fixture.legacyRoot, "custom-runtime"); const relocated = path.join(fixture.root, "relocated");
+    for (const base of [old, relocated]) {
+      await mkdir(path.join(base, "storage"), { recursive: true }); await mkdir(path.join(base, "temp"));
+      await writeFile(path.join(base, "db.sqlite"), base === old ? "original verified database" : "migrated target database");
+      await writeFile(path.join(base, "db.sqlite-wal"), "private wal"); await writeFile(path.join(base, "db.sqlite-shm"), "private shm");
+      await writeFile(path.join(base, "storage/private.bin"), "never copy storage"); await writeFile(path.join(base, "temp/upload.part"), "never copy temp");
+    }
+    await symlink(path.join(old,"storage"),path.join(fixture.legacyRoot,"storage-alias"),process.platform === "win32" ? "junction" : "dir");
+    const previous = { database:path.join(old,"db.sqlite"),storage:path.join(old,"storage"),temp:path.join(old,"temp") };
+    const proposed = { database:path.join(relocated,"db.sqlite"),storage:path.join(relocated,"storage"),temp:path.join(relocated,"temp") };
+    const result = await bootstrapManagedInstall({ ...commonOptions(fixture), configuredPaths:previous, overrides:proposed, acceptPathChange:true });
+    const backup = path.join(result.installRoot,"backups",result.backupId);
+    for(const tree of [result.releaseRealpath,path.join(backup,"legacy-source")]) {
+      for(const relative of ["custom-runtime/db.sqlite","custom-runtime/db.sqlite-wal","custom-runtime/db.sqlite-shm","custom-runtime/storage/private.bin","custom-runtime/temp/upload.part","storage-alias"]) {
+        await expect(lstat(path.join(tree,relative))).rejects.toMatchObject({code:"ENOENT"});
+      }
+    }
+    await expect(readFile(path.join(backup,"database.sqlite"),"utf8")).resolves.toBe("original verified database");
+    await expect(readFile(path.join(backup,"target-database.sqlite"),"utf8")).resolves.toBe("migrated target database");
+    const manifest=JSON.parse(await readFile(path.join(backup,"MANIFEST.json"),"utf8"));
+    expect(manifest.originalCanonicalPaths).toEqual(previous); expect(manifest.canonicalPaths).toEqual(proposed);
+    expect(manifest.snapshot.database).toBe(previous.database); expect(manifest.targetSnapshot.database).toBe(proposed.database);
+  });
+
+  it("C46-2 rejects missing required production variables before lock or directory creation", async () => {
+    fixture=await sourceFixture(); await writeFile(fixture.envPath,"NODE_ENV=production\n");
+    const fs=new NodeDurableFileSystem(); const create=jest.spyOn(fs,"createExclusive");
+    await expect(bootstrapManagedInstall({...commonOptions(fixture), fs})).rejects.toThrow(/JWT_SECRET.*required/i);
+    expect(create).not.toHaveBeenCalled(); await expect(lstat(fixture.installRoot)).rejects.toMatchObject({code:"ENOENT"});
+  });
+
+  it("C46-2 requires secure resolution of process-only vars without persisting or printing values", async () => {
+    fixture=await sourceFixture(); await writeFile(fixture.envPath,"");
+    const options={...commonOptions(fixture),environment:{NODE_ENV:"production",JWT_SECRET:"fixture-process-only-secret"}};
+    await expect(bootstrapManagedInstall(options)).rejects.toThrow(/NODE_ENV.*JWT_SECRET.*secure|secure.*NODE_ENV.*JWT_SECRET/i);
+    await expect(lstat(fixture.installRoot)).rejects.toMatchObject({code:"ENOENT"});
+    const result=await bootstrapManagedInstall({...options,productionEnvironmentResolution:"service"} as BootstrapManagedInstallOptions);
+    const env=await readFile(path.join(result.installRoot,".env"),"utf8");
+    expect(env).not.toContain("fixture-process-only-secret"); expect(env).not.toContain("NODE_ENV=production");
+    expect(JSON.stringify(result)).not.toContain("fixture-process-only-secret");
+    const metadata=JSON.parse(await readFile(path.join(result.installRoot,"managed-install.json"),"utf8"));
+    expect(metadata.productionEnvironment).toEqual({nodeEnv:"production",required:["NODE_ENV","JWT_SECRET"],source:"service"});
+  });
+
+  it("C46-3 publishes hash/whitespace paths that exactly round-trip through dotenv", async () => {
+    fixture=await sourceFixture(); const custom=path.join(fixture.root,"archive # fixture ' quoted"); await mkdir(custom);
+    const paths={database:path.join(custom,"db.sqlite"),storage:path.join(custom,"storage # kept"),temp:path.join(custom,"temp ' kept")};
+    await writeFile(paths.database,"target db");
+    const result=await bootstrapManagedInstall({...commonOptions(fixture),overrides:paths,acceptPathChange:true});
+    const parsed=parseDotenv(await readFile(path.join(result.installRoot,".env")));
+    expect(parsed.FILESTATION_DB_PATH).toBe(paths.database); expect(parsed.FILESTATION_STORAGE_PATH).toBe(paths.storage); expect(parsed.FILESTATION_TEMP_PATH).toBe(paths.temp);
+  });
+
+  it.each(["metadata-only","metadata-current-marker-lock","marker-only","lock-only"])("C46-4 rejects interrupted publication without removing owner markers: %s", async (stage) => {
+    fixture=await sourceFixture(); const options=commonOptions(fixture); const result=await bootstrapManagedInstall(options);
+    const marker=path.join(result.installRoot,".bootstrap-in-progress.json"); const lock=path.join(fixture.root,".managed.bootstrap.lock");
+    if(stage!=="lock-only") await writeFile(marker,"fixture owner marker");
+    if(stage!=="marker-only") await writeFile(lock,"fixture owner lock");
+    if(stage==="metadata-only") await unlink(path.join(result.installRoot,"current"));
+    await expect(bootstrapManagedInstall(options)).rejects.toThrow(/bootstrap.*recovery.*required/i);
+    if(stage!=="lock-only") await expect(readFile(marker,"utf8")).resolves.toBe("fixture owner marker");
+    if(stage!=="marker-only") await expect(readFile(lock,"utf8")).resolves.toBe("fixture owner lock");
+  });
+
+  it("C46-2 refuses to infer development when the old launch mode is unavailable",async()=>{
+    fixture=await sourceFixture();await writeFile(fixture.envPath,"");
+    await expect(bootstrapManagedInstall({...commonOptions(fixture),environment:{}})).rejects.toThrow(/NODE_ENV.*required|original.*mode/i);
+    await expect(lstat(fixture.installRoot)).rejects.toMatchObject({code:"ENOENT"});
   });
 
 });

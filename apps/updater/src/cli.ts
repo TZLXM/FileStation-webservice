@@ -30,6 +30,7 @@ Usage:
     --relative-path-policy preserve|managed [--database <absolute-path>]
     [--storage <absolute-path>] [--temp <absolute-path>] [--accept-path-change]
     [--service-port <port>] [--release-version <version>] [--dry-run]
+    [--production-env-resolution dotenv|service]
 
   filestation-updater launch --root <managed-root> [--dry-run]
   filestation-updater status --root <managed-root>
@@ -45,6 +46,11 @@ Manual operation:
      backups/<id>/legacy-source plus backups/<id>/env/legacy.env with the old
      launch command from the original legacy root.
 
+Bootstrap requires the original NODE_ENV explicitly (production/development/test).
+Run it with the original deployment environment; do not infer a missing mode.
+Production requires NODE_ENV and JWT_SECRET. If they are process-only, securely
+configure the same values in restricted .env or the new service environment, then
+acknowledge --production-env-resolution service. Shell secrets are never persisted.
 The CLI never prints .env values. Active update recovery is fail closed until the
 authenticated update orchestrator is available.
 `;
@@ -160,6 +166,7 @@ export async function main(
       temp: { type: "string" },
       "relative-path-policy": { type: "string" },
       "accept-path-change": { type: "boolean" },
+      "production-env-resolution": { type: "string" },
       "old-pid": { type: "string" },
       "old-boot-identity": { type: "string" },
       "old-process-created-at": { type: "string" },
@@ -183,7 +190,12 @@ export async function main(
       throw new Error("--relative-path-policy must be preserve or managed");
     }
     const environment = await loadInstallEnvironment(sourceRoot);
+    const resolution = values["production-env-resolution"];
+    if (resolution !== undefined && resolution !== "dotenv" && resolution !== "service")
+      throw new Error("--production-env-resolution must be dotenv or service");
     const result = await bootstrapManagedInstall({
+      environment: process.env,
+      productionEnvironmentResolution: resolution,
       legacyRoot: sourceRoot,
       installRoot,
       configuredPaths: {
@@ -250,6 +262,8 @@ export async function main(
       executableRealpath,
       currentRealpath,
       installMetadata: metadata,
+      environment: environment.values,
+      processEnvironment: process.env,
       configuredPaths: {
         database: environment.values.FILESTATION_DB_PATH,
         storage: environment.values.FILESTATION_STORAGE_PATH,

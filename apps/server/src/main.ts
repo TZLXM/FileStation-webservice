@@ -25,7 +25,8 @@ async function prepareStartup(): Promise<PreparedStartup> {
     cwd: cwdRealpath,
     executableRealpath,
   });
-  const environment = await loadInstallEnvironment(startup.root);
+  const invocationEnvironment = { ...process.env };
+  const environment = await loadInstallEnvironment(startup.root, { processEnvironment: invocationEnvironment });
   applyEnvironment(environment.values);
   if (startup.mode === 'legacy') {
     return { mode: 'legacy', root: startup.root };
@@ -37,6 +38,8 @@ async function prepareStartup(): Promise<PreparedStartup> {
     cwd: cwdRealpath,
     executableRealpath,
     installMetadata: metadata,
+    environment: environment.values,
+    processEnvironment: invocationEnvironment,
     currentRealpath,
     configuredPaths: {
       database: environment.values.FILESTATION_DB_PATH,

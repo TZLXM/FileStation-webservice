@@ -29,6 +29,7 @@ export async function assertLaunchRecoverySafe(root: string, release: string, fs
 
 /** Inspect actual Task 5 staging names without creating or protecting anything. */
 export async function unresolvedRecoveryMarker(root: string, fs: DurableFileSystem): Promise<string | undefined> {
+  if (await fs.exists(path.join(path.dirname(root), `.${path.basename(root)}.bootstrap.lock`))) return "bootstrap owner lock";
   for (const marker of [".bootstrap-in-progress.json", "update.lock", "update.recovery.lock"]) {
     if (await fs.exists(path.join(root, marker))) return marker;
   }

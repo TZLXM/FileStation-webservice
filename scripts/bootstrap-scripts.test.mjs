@@ -46,6 +46,7 @@ async function makeFixture() {
   await writeFile(
     path.join(legacy, ".env"),
     [
+      "NODE_ENV=test",
       "FILESTATION_DB_PATH=./data/filestation.db",
       "FILESTATION_STORAGE_PATH=./data/storage",
       "FILESTATION_TEMP_PATH=./data/temp",
@@ -268,7 +269,7 @@ test("compiled CLI bootstrap uses dotenv-only custom paths and non-dry launch lo
   const env = fixtureEnvironment();
   try {
     await writeFile(path.join(fixture.legacy, "custom.db"), "fixture custom database");
-    await writeFile(path.join(fixture.legacy, ".env"), "FILESTATION_DB_PATH=./custom.db\nFILESTATION_STORAGE_PATH=./custom-storage\nFILESTATION_TEMP_PATH=./custom-temp\nFILESTATION_SERVE_STATIC=fixture-static\nFIXTURE_PRECEDENCE=dotenv\n");
+    await writeFile(path.join(fixture.legacy, ".env"), "NODE_ENV=test\nFILESTATION_DB_PATH=./custom.db\nFILESTATION_STORAGE_PATH=./custom-storage\nFILESTATION_TEMP_PATH=./custom-temp\nFILESTATION_SERVE_STATIC=fixture-static\nFIXTURE_PRECEDENCE=dotenv\n");
     // This helper and main never import Nest, connect to a service or open user data.
     await mkdir(path.join(fixture.legacy, "apps/server/dist/bootstrap"), { recursive: true });
     await writeFile(path.join(fixture.legacy, "apps/server/dist/bootstrap/bootstrap-snapshot.js"), `const fs = require('node:fs'); const a = process.argv; fs.copyFileSync(a[a.indexOf('--db')+1], a[a.indexOf('--out')+1]); console.log(JSON.stringify({sourceIntegrity:'ok',sourceForeignKeys:0,snapshotIntegrity:'ok',snapshotForeignKeys:0}));`);
@@ -285,10 +286,21 @@ test("compiled CLI bootstrap uses dotenv-only custom paths and non-dry launch lo
     const launch = spawnSync(process.execPath, [cli, "launch", "--root", fixture.install], { env: { ...env, FIXTURE_PRECEDENCE: "process" }, cwd: fixture.install, encoding: "utf8", windowsHide: true });
     assert.equal(launch.status, 0, launch.stderr);
     assert.match(launch.stdout, /FIXTURE_LOADED/);
+    const production = { ...fixture, install: `${fixture.install}-production` };
+    const secret = "fixture-production-service-secret";
+    const productionBoot = spawnSync(process.execPath,[cli,"bootstrap",...bootstrapArgs(production,identity),"--production-env-resolution","service"],{env:{...env,NODE_ENV:"production",JWT_SECRET:secret},cwd:fixture.root,encoding:"utf8",windowsHide:true});
+    assert.equal(productionBoot.status,0,productionBoot.stderr);
+    assert.doesNotMatch(productionBoot.stdout,new RegExp(secret));
+    assert.ok(!(await readFile(path.join(production.install,".env"),"utf8")).includes(secret));
+    const missingService = spawnSync(process.execPath,[cli,"launch","--root",production.install],{env:{...env,NODE_ENV:"production"},cwd:production.install,encoding:"utf8",windowsHide:true});
+    assert.notEqual(missingService.status,0);assert.match(missingService.stderr,/JWT_SECRET/);assert.doesNotMatch(missingService.stdout,/FIXTURE_LOADED/);
+    const serviceLaunch = spawnSync(process.execPath,[cli,"launch","--root",production.install],{env:{...env,NODE_ENV:"production",JWT_SECRET:secret,FIXTURE_PRECEDENCE:"process"},cwd:production.install,encoding:"utf8",windowsHide:true});
+    assert.equal(serviceLaunch.status,0,serviceLaunch.stderr);assert.match(serviceLaunch.stdout,/FIXTURE_LOADED/);
     for (const name of ["custom-storage", "custom-temp"]) await assert.rejects(access(path.join(fixture.legacy, name)), { code: "ENOENT" });
   } finally {
     assert.ok(fixture.root.startsWith(tmpdir() + path.sep) && path.basename(fixture.root).startsWith("filestation-task6-script-"));
     await unlink(path.join(fixture.install, "current")).catch(e => { if (e.code !== "ENOENT") throw e; });
+    await unlink(path.join(`${fixture.install}-production`, "current")).catch(e => { if (e.code !== "ENOENT") throw e; });
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
@@ -314,4 +326,15 @@ test("Linux shell scripts perform fixture bootstrap and launch dry runs", async 
     await unlink(path.join(fixture.install,"current")).catch(e=>{if(e.code!=="ENOENT")throw e;});
     await rm(fixture.root,{recursive:true,force:true});
   }
+});
+
+
+test("C46-6 documentation and helper help advertise explicit bash invocation",async()=>{
+ const updating=await readFile(path.join(repositoryRoot,"docs/UPDATING.md"),"utf8");
+ for(const name of ["bootstrap-update","start-filestation"]) {
+  assert.match(updating,new RegExp(`^bash scripts/${name}\\.sh `,"m"));
+  const source=await readFile(path.join(repositoryRoot,`scripts/${name}.sh`),"utf8");
+  assert.match(source,new RegExp(`  bash scripts/${name}\\.sh `));
+  assert.doesNotMatch(source,new RegExp(`^  scripts/${name}\\.sh `,"m"));
+ }
 });

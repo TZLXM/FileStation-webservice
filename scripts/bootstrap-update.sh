@@ -12,10 +12,15 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 FileStation manual bootstrap
 
 Prepare the old process identity before stopping it:
-  scripts/bootstrap-update.sh --root /srv/filestation --source-root /srv/old \
+  bash scripts/bootstrap-update.sh --root /srv/filestation --source-root /srv/old \
     --old-pid 1234 --old-boot-identity <boot-id> \
     --old-process-created-at <process-creation-id> \
     --relative-path-policy preserve
+
+Bootstrap requires the original NODE_ENV explicitly (production/development/test).
+Production requires NODE_ENV/JWT_SECRET. Securely migrate process-only values to
+restricted .env or the new service environment; acknowledge the latter with
+--production-env-resolution service. Shell secret values are never persisted.
 
 The helper only probes the old identity; it never signals that process. Nginx
 files and services are not modified or reloaded by this command.

@@ -1,3 +1,4 @@
+import { planProductionEnvironment, ProductionEnvironmentResolution, ProductionEnvironmentRequirements, renderManagedEnv } from "./environment";
 import { syncRecoveryTree, verifyExistingBootstrap } from "./backup-assets";
 import { createHash } from "node:crypto";
 import {
@@ -36,6 +37,7 @@ import {
   pathWithin,
   planBootstrapPaths,
   sameCanonicalPath,
+  canonicalizePotentialPath,
 } from "./path-plan";
 
 export interface DatabaseSnapshotReceipt {
@@ -58,6 +60,7 @@ export interface BootstrapManagedInstallOptions {
   relativePathPolicy?: RelativePathPolicy;
   acceptPathChange?: boolean;
   environment?: NodeJS.ProcessEnv;
+  productionEnvironmentResolution?: ProductionEnvironmentResolution;
   releaseVersion?: string;
   oldPid: number;
   oldBootIdentity: string;
@@ -94,6 +97,7 @@ export interface BootstrapManagedInstallResult {
     windows: string;
   };
   manualInstructions: string[];
+  productionEnvironment?: ProductionEnvironmentRequirements;
 }
 
 export interface ManagedUpdateInspection {
@@ -224,6 +228,16 @@ function isReleaseExcluded(relative: string): boolean {
   );
 }
 
+function runtimeExclusions(paths: ManagedInstallPaths): string[] {
+  return [paths.database, `${paths.database}-wal`, `${paths.database}-shm`, paths.storage, paths.temp];
+}
+
+async function excludedRuntimePath(source: string, excluded: string[]): Promise<boolean> {
+  if (excluded.some(candidate => pathWithin(candidate, source))) return true;
+  const actual = await canonicalizePotentialPath(source, path.dirname(source));
+  return excluded.some(candidate => pathWithin(candidate, actual));
+}
+
 async function copySafeTree(options: CopyOptions): Promise<CopyEntry[]> {
   if (
     pathWithin(options.sourceRoot, options.destinationRoot) ||
@@ -243,9 +257,7 @@ async function copySafeTree(options: CopyOptions): Promise<CopyEntry[]> {
         (options.releaseOnly
           ? isReleaseExcluded(relative)
           : isExcludedRelative(relative)) ||
-        options.excludedPaths.some((candidate) =>
-          sameCanonicalPath(candidate, source),
-        )
+        (await excludedRuntimePath(source, options.excludedPaths))
       ) {
         continue;
       }
@@ -304,11 +316,12 @@ async function copySafeTree(options: CopyOptions): Promise<CopyEntry[]> {
   return entries;
 }
 
-async function measureTree(root: string): Promise<number> {
+async function measureTree(root: string, excluded: string[]): Promise<number> {
   let total = 0;
   const walk = async (directory: string): Promise<void> => {
     for (const name of await readdir(directory)) {
       const filename = path.join(directory, name);
+      if (isExcludedRelative(path.relative(root, filename)) || await excludedRuntimePath(filename, excluded)) continue;
       const metadata = await lstat(filename);
       if (metadata.isSymbolicLink()) continue;
       if (metadata.isDirectory()) await walk(filename);
@@ -483,31 +496,6 @@ async function assertOldProcessStopped(
   }
 }
 
-function renderManagedEnv(
-  original: string | undefined,
-  paths: ManagedInstallPaths,
-): string {
-  const values: Record<string, string> = {
-    FILESTATION_DB_PATH: paths.database,
-    FILESTATION_STORAGE_PATH: paths.storage,
-    FILESTATION_TEMP_PATH: paths.temp,
-  };
-  const seen = new Set<string>();
-  const lines = (original ?? "").split(/\r?\n/);
-  const output = lines.map((line) => {
-    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line);
-    if (!match || !(match[1] in values)) return line;
-    const key = match[1];
-    if (seen.has(key)) return `${key}=${values[key]}`;
-    seen.add(key);
-    return `${key}=${values[key]}`;
-  });
-  for (const [key, value] of Object.entries(values)) {
-    if (!seen.has(key)) output.push(`${key}=${value}`);
-  }
-  return `${output.filter((line, index) => line !== "" || index < output.length - 1).join("\n")}\n`;
-}
-
 async function exists(filename: string): Promise<boolean> {
   try {
     await lstat(filename);
@@ -575,7 +563,8 @@ function resultFor(
       windows:
         "protected DACL: current running account, SYSTEM and Administrators only",
     },
-    manualInstructions: MANUAL_INSTRUCTIONS,
+    manualInstructions: [...MANUAL_INSTRUCTIONS, "Production service migration: securely provide the same NODE_ENV and JWT_SECRET at every launch; shell secret values are never persisted automatically."],
+    ...(metadata.productionEnvironment ? { productionEnvironment: metadata.productionEnvironment } : {}),
   };
 }
 
@@ -583,7 +572,16 @@ export async function bootstrapManagedInstall(
   options: BootstrapManagedInstallOptions,
 ): Promise<BootstrapManagedInstallResult> {
   const fs = options.fs ?? new BootstrapDurableFileSystem();
-  const environment = options.environment ?? process.env;
+  const legacyRoot = await canonicalizePotentialPath(options.legacyRoot, process.cwd());
+  const envBytes = await readFile(path.join(legacyRoot, ".env")).catch(error => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  });
+  const dotenv = envBytes ? parseDotenv(envBytes) : {};
+  const invocation = options.environment ?? process.env;
+  const environment: NodeJS.ProcessEnv = { ...dotenv };
+  for (const [key,value] of Object.entries(invocation)) if (value !== undefined) environment[key] = value;
+  const productionEnvironment = planProductionEnvironment(dotenv, environment, options.productionEnvironmentResolution);
   const pathPlan = await planBootstrapPaths({
     legacyRoot: options.legacyRoot,
     installRoot: options.installRoot,
@@ -605,6 +603,8 @@ export async function bootstrapManagedInstall(
     );
   }
 
+  const managedEnv = renderManagedEnv(envBytes?.toString("utf8"), pathPlan.proposed);
+  const excludedPaths = [...runtimeExclusions(pathPlan.previous), ...runtimeExclusions(pathPlan.proposed)];
   await assertOldProcessStopped(options);
   const releaseVersion = await readReleaseVersion(
     pathPlan.legacyRoot,
@@ -616,6 +616,7 @@ export async function bootstrapManagedInstall(
         legacyRoot: pathPlan.legacyRoot,
         installRoot: pathPlan.installRoot,
         paths: pathPlan.proposed,
+        productionEnvironment,
         releaseVersion,
       }),
       "utf8",
@@ -638,38 +639,41 @@ export async function bootstrapManagedInstall(
     createdAt,
   );
 
+  if (productionEnvironment) metadata.productionEnvironment = productionEnvironment;
+  const bootstrapLock = path.join(path.dirname(pathPlan.installRoot), `.${path.basename(pathPlan.installRoot)}.bootstrap.lock`);
+  const lockBytes = Buffer.from(`${JSON.stringify({ schemaVersion: 1, pid: process.pid, installId, fingerprint, createdAt })}\n`, "utf8");
+  const publicationMarker = path.join(pathPlan.installRoot, ".bootstrap-in-progress.json");
+  if (await fs.exists(bootstrapLock) || await fs.exists(publicationMarker))
+    throw new Error("Bootstrap recovery required: publication marker or owner lock remains; do not remove a live owner's state. Inspect the original source and bootstrap state manually.");
+
   if (await exists(pathPlan.installRoot)) {
-    const existing = await loadManagedInstallMetadata(pathPlan.installRoot, {
-      fs,
-    }).catch(() => undefined);
-    if (
-      existing &&
-      existing.bootstrapFingerprint === fingerprint &&
-      sameCanonicalPath(existing.installRoot, pathPlan.installRoot)
-    ) {
-      const current = path.join(pathPlan.installRoot, "current");
-      const currentRealpath = await fs.realpath(current);
-      await verifyExistingBootstrap(existing, pathPlan.proposed, releaseRealpath, currentRealpath, fs);
-      return resultFor(
-        "already-bootstrapped",
-        existing,
-        currentRealpath,
-        releaseVersion,
-        pathPlan.changes,
-      );
-    }
-    throw new Error(
-      "managed install root already exists with different or incomplete metadata",
-    );
+    let owned = false;
+    try {
+      if (!options.dryRun) {
+        try { await fs.createExclusive(bootstrapLock, lockBytes, { mode: 0o600 }); owned = true; }
+        catch { throw new Error("Bootstrap recovery required: exclusive bootstrap ownership unavailable"); }
+      }
+      if (await fs.exists(publicationMarker)) throw new Error("Bootstrap recovery required: interrupted publication marker remains");
+      const existing = await loadManagedInstallMetadata(pathPlan.installRoot, { fs });
+      if (existing.bootstrapFingerprint !== fingerprint || !sameCanonicalPath(existing.installRoot, pathPlan.installRoot))
+        throw new Error("Bootstrap recovery required: different or incomplete metadata");
+      const currentRealpath = await fs.realpath(existing.currentPath);
+      await verifyExistingBootstrap(existing, pathPlan.proposed, releaseRealpath, currentRealpath, fs, pathPlan.previous);
+      return resultFor(options.dryRun ? "dry-run" : "already-bootstrapped", existing, currentRealpath, releaseVersion, pathPlan.changes);
+    } catch (error) {
+      throw new Error(`Bootstrap recovery required: ${error instanceof Error ? error.message : "incomplete installation"}`);
+    } finally { if (owned) await fs.unlink(bootstrapLock); }
   }
 
-  const databaseBytes = await pathSize(pathPlan.proposed.database);
+  const targetChanged = !sameCanonicalPath(pathPlan.previous.database, pathPlan.proposed.database);
+  const databaseBytes = await pathSize(pathPlan.previous.database) + await pathSize(`${pathPlan.previous.database}-wal`) + (targetChanged ? await pathSize(pathPlan.proposed.database) + await pathSize(`${pathPlan.proposed.database}-wal`) : 0);
+  await stat(pathPlan.previous.database).catch(() => { throw new Error("original legacy database is missing at its approved canonical path"); });
   await stat(pathPlan.proposed.database).catch(() => {
     throw new Error(
       `legacy database is missing at canonical path ${pathPlan.proposed.database}`,
     );
   });
-  const sourceBytes = await measureTree(pathPlan.legacyRoot);
+  const sourceBytes = await measureTree(pathPlan.legacyRoot, excludedPaths);
   const verifySpace = options.verifySpace ?? defaultVerifySpace;
   const space = await verifySpace({
     paths: pathPlan,
@@ -691,11 +695,6 @@ export async function bootstrapManagedInstall(
     );
   }
 
-  const installParent = path.dirname(pathPlan.installRoot);
-  const bootstrapLock = path.join(
-    installParent,
-    `.${path.basename(pathPlan.installRoot)}.bootstrap.lock`,
-  );
   let created = false;
   let lockHeld = false;
   try {
@@ -736,13 +735,6 @@ export async function bootstrapManagedInstall(
       { mode: 0o600 },
     );
 
-    const excludedPaths = [
-      pathPlan.proposed.database,
-      `${pathPlan.proposed.database}-wal`,
-      `${pathPlan.proposed.database}-shm`,
-      pathPlan.proposed.storage,
-      pathPlan.proposed.temp,
-    ];
     const releaseEntries = await copySafeTree({
       sourceRoot: pathPlan.legacyRoot,
       destinationRoot: releaseRealpath,
@@ -780,20 +772,11 @@ export async function bootstrapManagedInstall(
       });
     }
 
-    const envSourcePath = path.join(pathPlan.legacyRoot, ".env");
-    const envBytes = await readFile(envSourcePath).catch((error) => {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-      throw error;
-    });
     if (envBytes) {
       const envBackup = path.join(backupRoot, "env", "legacy.env");
       await fs.ensurePrivateDirectory(path.dirname(envBackup));
       await fs.writeAtomic(envBackup, envBytes, { mode: 0o600 });
     }
-    const managedEnv = renderManagedEnv(
-      envBytes?.toString("utf8"),
-      pathPlan.proposed,
-    );
     await fs.writeAtomic(
       path.join(pathPlan.installRoot, ".env"),
       Buffer.from(managedEnv, "utf8"),
@@ -803,7 +786,7 @@ export async function bootstrapManagedInstall(
     const snapshotPath = path.join(backupRoot, "database.sqlite");
     await fs.ensurePrivateDirectory(backupRoot);
     const snapshotReceipt = await options.snapshotDatabase({
-      database: pathPlan.proposed.database,
+      database: pathPlan.previous.database,
       output: snapshotPath,
     });
     if (
@@ -815,6 +798,16 @@ export async function bootstrapManagedInstall(
       throw new Error("database snapshot verification did not return an OK receipt");
     }
     await fs.protect(snapshotPath, false);
+    let targetSnapshot;
+    if (targetChanged) {
+      const targetPath = path.join(backupRoot, "target-database.sqlite");
+      const receipt = await options.snapshotDatabase({ database: pathPlan.proposed.database, output: targetPath });
+      if (receipt.sourceIntegrity !== "ok" || receipt.sourceForeignKeys !== 0 || receipt.snapshotIntegrity !== "ok" || receipt.snapshotForeignKeys !== 0)
+        throw new Error("relocated target database snapshot verification failed");
+      await fs.protect(targetPath, false);
+      targetSnapshot = { storedPath: "target-database.sqlite", database: pathPlan.proposed.database, sha256: sha256(await readFile(targetPath)), bytes: (await stat(targetPath)).size, receipt };
+    }
+
 
     const managedMetadataPath = path.join(
       pathPlan.installRoot,
@@ -830,10 +823,13 @@ export async function bootstrapManagedInstall(
       installRoot: pathPlan.installRoot,
       releaseVersion,
       canonicalPaths: pathPlan.proposed,
+      originalCanonicalPaths: pathPlan.previous,
+      productionEnvironment,
       canonicalPathChanges: pathPlan.changes,
       sourceEntries,
       releaseEntries,
       exclusions: [
+        ...excludedPaths,
         ".git",
         "caches",
         "logs",
@@ -851,7 +847,9 @@ export async function bootstrapManagedInstall(
           }
         : { present: false },
       snapshotReceipt,
+      targetSnapshot,
       snapshot: {
+        database: pathPlan.previous.database,
         storedPath: "database.sqlite",
         sha256: sha256(await readFile(snapshotPath)),
         bytes: (await stat(snapshotPath)).size,

@@ -1,3 +1,4 @@
+import { parseProductionEnvironment, ProductionEnvironmentRequirements, requireProductionEnvironment } from "./bootstrap/environment";
 import { readFile as readFileFromDisk, realpath } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -25,6 +26,7 @@ export interface ManagedInstallMetadata {
   bootstrapBackupId: string;
   bootstrapFingerprint: string;
   createdAt: string;
+  productionEnvironment?: ProductionEnvironmentRequirements;
 }
 
 export interface LaunchEnvironment {
@@ -43,6 +45,8 @@ export interface ManagedLaunchValidationInput {
   executableRealpath: string;
   installMetadata: ManagedInstallMetadata;
   currentRealpath: string;
+  environment?: Readonly<NodeJS.ProcessEnv>;
+  processEnvironment?: Readonly<NodeJS.ProcessEnv>;
   configuredPaths?: Partial<
     Record<keyof ManagedInstallPaths, string | undefined>
   >;
@@ -157,6 +161,7 @@ export function parseManagedInstallMetadata(
     bootstrapBackupId: value.bootstrapBackupId,
     bootstrapFingerprint: value.bootstrapFingerprint,
     createdAt: value.createdAt,
+    ...(value.productionEnvironment !== undefined ? { productionEnvironment: parseProductionEnvironment(value.productionEnvironment) } : {}),
   };
 }
 
@@ -278,6 +283,7 @@ export async function validateManagedLaunchOnDisk(
   fs: DurableFileSystem = new NodeDurableFileSystem(),
 ): Promise<ManagedLaunchPlan> {
   const plan = validateManagedLaunch(input);
+  requireProductionEnvironment(input.environment ?? {}, input.installMetadata.productionEnvironment, input.processEnvironment);
   for (const key of ["database", "storage", "temp"] as const) {
     const actual = await canonicalizePotentialPath(plan.paths[key], plan.installRoot);
     if (!sameCanonicalPath(actual, plan.paths[key]))
@@ -316,6 +322,8 @@ export async function launchManagedInstall(
     installMetadata: metadata,
     currentRealpath,
     configuredPaths,
+    environment: environment.values,
+    processEnvironment: options.processEnvironment ?? targetEnvironment,
   }, fs);
 
   for (const [key, value] of Object.entries(environment.values)) {

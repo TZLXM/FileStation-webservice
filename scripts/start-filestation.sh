@@ -9,9 +9,9 @@ FORWARD=()
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   cat <<'EOF'
 Usage:
-  scripts/start-filestation.sh --root /srv/filestation
-  scripts/start-filestation.sh --root /srv/filestation --dry-run
-  scripts/start-filestation.sh --root /srv/filestation --bynginx
+  bash scripts/start-filestation.sh --root /srv/filestation
+  bash scripts/start-filestation.sh --root /srv/filestation --dry-run
+  bash scripts/start-filestation.sh --root /srv/filestation --bynginx
 
 Root .env values load before server modules; the calling process environment
 wins. Managed metadata, cwd, current release and canonical paths are validated

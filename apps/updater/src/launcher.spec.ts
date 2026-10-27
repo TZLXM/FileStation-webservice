@@ -360,4 +360,13 @@ describe("managed launcher", () => {
     } finally { await unlink(parent); }
   });
 
+  it.each(["lost-mode","missing-secret","shadowed-secret"])("C46-2 rejects a production launch missing required effective variables: %s",async(missing)=>{
+    const value=await fixture();root=value.root;
+    await writeFile(path.join(value.installRoot,"managed-install.json"),JSON.stringify({...value.metadata,productionEnvironment:{nodeEnv:"production",required:["NODE_ENV","JWT_SECRET"],source:"service"}}));
+    if (missing === "shadowed-secret") await writeFile(path.join(value.installRoot,".env"),"NODE_ENV=production\nJWT_SECRET=fixture-old-dotenv-secret\n");
+    const fs=new CountingReadOnlyFs();const importer=jest.fn();
+    await expect(launchManagedInstall({root:value.installRoot,cwd:value.installRoot,processEnvironment:missing==="lost-mode"?{}:{NODE_ENV:"production"},targetEnvironment:{},fs,importer})).rejects.toThrow(/NODE_ENV|JWT_SECRET/);
+    expect(fs.writeCount).toBe(0);expect(importer).not.toHaveBeenCalled();
+  });
+
 });

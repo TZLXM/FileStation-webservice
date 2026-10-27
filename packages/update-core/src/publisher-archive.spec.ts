@@ -1,9 +1,9 @@
-import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, readFile, stat } from "node:fs/promises";
 import { mkdtempSync, symlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   openVerifiedArchive,
@@ -120,3 +120,55 @@ test.each(["windows-x64", "linux-x64"])(
     }
   },
 );
+
+(process.platform === "linux" ? test : test.skip)("packaged and verified-extracted private helpers execute the advertised bash commands",async()=>{
+ const dir=await mkdtemp(path.join(tmpdir(),"fs-linux-helpers-"));
+ try {
+  const source=path.join(dir,"source");
+  const files=[
+  "apps/server/dist/main.js",
+  "apps/updater/dist/cli.js",
+  "apps/updater/dist/launcher.js",
+  "apps/web/dist/index.html",
+  "packages/shared/dist/index.js",
+  "packages/update-core/dist/index.js",
+  "node_modules/example/index.js",
+  "package.json",
+  "package-lock.json",
+  "apps/server/package.json",
+  "apps/updater/package.json",
+  "apps/web/package.json",
+  "packages/shared/package.json",
+  "packages/update-core/package.json",
+  "scripts/release/smoke-artifact.mjs",
+  "scripts/release/create-smoke-db.mjs",
+  "scripts/release/validate-version.mjs",
+  "scripts/release/start-artifact.mjs",
+  "scripts/bootstrap-update.ps1",
+  "scripts/bootstrap-update.sh",
+  "scripts/start-filestation.ps1",
+  "scripts/start-filestation.sh"
+];
+  for(const name of files) {
+   await mkdir(path.dirname(path.join(source,name)),{recursive:true});
+   await writeFile(path.join(source,name),name.endsWith("package.json")?JSON.stringify({version:"0.2.5",type:"commonjs"}):"fixture");
+  }
+  const repository=path.resolve(__dirname,"../../..");
+  for(const name of ["bootstrap-update","start-filestation"]) await writeFile(path.join(source,`scripts/${name}.sh`),await readFile(path.join(repository,`scripts/${name}.sh`)));
+  // A harmless CLI sentinel proves helper invocation/argument forwarding; real
+  // bootstrap and launch dry runs are covered by bootstrap-scripts.test.mjs.
+  await writeFile(path.join(source,"apps/updater/dist/cli.js"),"if(!process.argv.includes('--dry-run'))process.exit(2); console.log('fixture-'+process.argv[2]);");
+  const publisher=pathToFileURL(path.join(repository,"scripts/release/package-artifact.mjs")).href;
+  const script=`import {packageArtifact} from ${JSON.stringify(publisher)}; console.log(JSON.stringify(await packageArtifact(JSON.parse(process.argv[1]))));`;
+  const artifact=JSON.parse(execFileSync(process.execPath,["--input-type=module","-e",script,JSON.stringify({sourceRoot:source,outputDirectory:dir,version:"0.2.5",platform:"linux-x64",sourceDateEpoch:1750000000})],{encoding:"utf8"}));
+  const handle=await openVerifiedArchive(artifact.archivePath,artifact.sha256); const output=path.join(dir,"out");
+  try { const plan=await inspectArchive(handle,{format:artifact.format,version:"0.2.5",platform:"linux-x64",unpackedSize:artifact.unpackedSize}); await extractVerifiedArchive(handle,plan,output); } finally { await handle.close(); }
+  const docs=await readFile(path.join(repository,"docs/UPDATING.md"),"utf8");
+  for(const [name,command] of [["bootstrap-update","bootstrap"],["start-filestation","launch"]]) {
+   const advertised=docs.match(new RegExp(`^bash (scripts/${name}\\.sh)(?: |$)`,"m")); expect(advertised).not.toBeNull();
+   const filename=path.join(output,advertised![1]);expect((await stat(filename)).mode & 0o777).toBe(0o600);
+   const help=spawnSync("bash",[filename,"--help"],{encoding:"utf8",cwd:output});expect(help.status).toBe(0);expect(help.stdout).toContain(`bash scripts/${name}.sh`);
+   const run=spawnSync("bash",[filename,"--root",output,"--dry-run"],{encoding:"utf8",cwd:output});expect(run.stderr).toBe("");expect(run.status).toBe(0);expect(run.stdout).toContain(`fixture-${command}`);
+  }
+ } finally { if(!path.basename(dir).startsWith("fs-linux-helpers-"))throw new Error("unsafe fixture cleanup");await rm(dir,{recursive:true,force:true}); }
+});

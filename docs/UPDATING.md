@@ -123,7 +123,7 @@ On Linux:
 old_pid=<old-pid>
 boot="linux:$(cat /proc/sys/kernel/random/boot_id)"
 created="linux-starttime:$(awk '{print $22}' "/proc/$old_pid/stat")"
-scripts/bootstrap-update.sh \
+bash scripts/bootstrap-update.sh \
   --root /srv/filestation \
   --source-root /srv/filestation-source \
   --old-pid "$old_pid" \
@@ -132,11 +132,33 @@ scripts/bootstrap-update.sh \
   --relative-path-policy preserve
 ```
 
+Bootstrap requires the original `NODE_ENV` explicitly (`production`, `development`
+or `test`), from source .env or the invocation environment. If the old service
+environment is unavailable, inspect it securely and resolve the mode before
+proceeding; missing mode never silently selects development.
+Before bootstrap writes, it validates effective production `NODE_ENV=production`
+and a nonempty `JWT_SECRET`. Process variables take precedence over the source
+`.env`. If either required value exists only in the old shell, use a trusted
+editor to migrate the same values into the restricted source `.env`, or securely
+configure **both** variables in the new service environment and pass
+`--production-env-resolution service` (`-ProductionEnvResolution service` in
+PowerShell). The acknowledgement records names/source only. Bootstrap never
+copies shell secret values into `.env`, argv or output. Every service-mode launch
+requires both variables from its actual calling environment; an old dotenv secret
+cannot silently replace a missing service secret. Keep the original JWT secret
+stable to preserve existing JWT/TOTP behavior. No service configuration is edited
+by these commands.
+
 Use `preserve` for default relative paths so the existing database, storage and
 temp remain at their canonical absolute locations. Bootstrap does not copy the
 storage tree. Any reviewed absolute path override must be an existing canonical
 path and also requires `--accept-path-change`; prepare and validate data at the
-new location separately before starting the managed service.
+new location separately before starting the managed service. Exclusions include
+both old and new DB/WAL/SHM/storage/temp roots and canonical aliases. Recovery
+`database.sqlite` is a verified snapshot of the **original** database. When a DB
+path changes, `target-database.sqlite` separately validates the administrator's
+prepared target; the manifest records both canonical identities and receipts.
+Neither storage generation is copied into code or source backup trees.
 
 The source checkout helpers below select the installation root as the child
 process cwd. Root `.env` values load before server modules; variables already
@@ -147,7 +169,7 @@ present in the calling process take precedence:
 ```
 
 ```bash
-scripts/start-filestation.sh --root /srv/filestation
+bash scripts/start-filestation.sh --root /srv/filestation
 ```
 
 For the installed standalone updater, use the installation root as cwd:
@@ -161,6 +183,10 @@ node .\updater\dist\cli.js launch --root .
 cd /srv/filestation
 node updater/dist/cli.js launch --root .
 ```
+
+The Linux helper contract is explicit `bash scripts/<helper>.sh ...`, including
+packaged/extracted or source-copied installations whose private files stay 0600.
+Do not rely on an execute bit or change private files to a broader mode.
 
 Direct CLI launch from a different cwd fails before loading the server. A missing
 managed metadata file, changed canonical target (including an ancestor junction),
@@ -193,7 +219,19 @@ publishing managed metadata/current. An idempotent rerun verifies the planned
 paths, expected release, backup manifest, recorded SQLite integrity/FK receipt,
 snapshot/source/env hashes and internal links. A damaged installation is rejected;
 keep the original source intact and investigate instead of treating it as an
-already completed bootstrap.
+already completed bootstrap. Reruns require exclusive bootstrap ownership before
+reporting success. A remaining `.bootstrap-in-progress.json` or same-parent
+bootstrap lock means **bootstrap recovery required**, even when metadata/current
+and backup assets exist; do not remove a live owner's state or edit journals.
+The CLI fails closed and gives manual inspection guidance instead of claiming
+that an interrupted publication completed.
 
 Nginx configuration is intentionally untouched. Review `proxy_pass` and the
 manual root or `/fs/` configuration, run `nginx -t`, and reload Nginx yourself.
+
+Source development commands establish emitted runtime dependencies explicitly:
+`npm run dev:prepare` builds shared → update-core → updater, `npm run dev` runs
+that preparation before starting dev processes, and `npm run typecheck` emits the
+same prerequisites before checking dependents. Neither requires a preceding full
+build. The fresh-prerequisite tests use isolated workspace fixtures without any
+generated dist; they never delete or rename the working checkout's dist.

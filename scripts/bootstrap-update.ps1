@@ -11,6 +11,8 @@ param(
   [string]$Temp = "",
   [string]$ServicePort = "",
   [string]$ReleaseVersion = "",
+  [ValidateSet("dotenv", "service")]
+  [string]$ProductionEnvResolution = "",
   [switch]$AcceptPathChange,
   [switch]$DryRun,
   [Alias("h")]
@@ -30,6 +32,11 @@ Prepare the old process identity before stopping it:
     -OldPid 1234 -OldBootIdentity <boot-id> `
     -OldProcessCreatedAt <process-creation-id> `
     -RelativePathPolicy preserve
+
+Bootstrap requires the original NODE_ENV explicitly (production/development/test).
+Production requires NODE_ENV/JWT_SECRET. Securely migrate process-only values to
+restricted .env or the new service environment; acknowledge the latter with
+-ProductionEnvResolution service. No shell secret values are written or printed.
 
 The trusted helper performs only safety probes; it never stops or signals the
 old process. Nginx files and services are never modified or reloaded.
@@ -85,6 +92,7 @@ if ($Storage) { $cliArguments += @("--storage", $Storage) }
 if ($Temp) { $cliArguments += @("--temp", $Temp) }
 if ($ServicePort) { $cliArguments += @("--service-port", $ServicePort) }
 if ($ReleaseVersion) { $cliArguments += @("--release-version", $ReleaseVersion) }
+if ($ProductionEnvResolution) { $cliArguments += @("--production-env-resolution", $ProductionEnvResolution) }
 if ($AcceptPathChange) { $cliArguments += "--accept-path-change" }
 if ($DryRun) { $cliArguments += "--dry-run" }
 
