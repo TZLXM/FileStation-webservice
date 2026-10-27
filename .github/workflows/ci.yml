@@ -32,6 +32,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Release gate tests
+        run: node --test scripts/ci/verify-release-gate.test.mjs
+
       - name: Build shared workspace
         run: npm run build:shared
 

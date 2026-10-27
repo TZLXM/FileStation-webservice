@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
@@ -145,4 +145,71 @@ test("rejects an invalid source commit or platform digest", async () => {
   evidence.candidate.platformDigests["linux-x64"] = "sha256:not-a-digest";
 
   await assert.rejects(verifyFixture("0.2.0", evidence), /linux-x64/);
+});
+
+// Exercise each version independently so version-specific validation cannot bypass provenance.
+for (const version of ["0.2.0", "0.2.5"]) {
+  for (const field of ["sourceCommit", "runId", "linux-x64", "windows-x64"]) {
+    for (const missingKind of ["omitted", "null"]) {
+      test(`rejects v${version} with ${missingKind} candidate ${field}`, async () => {
+        const evidence = validEvidence(version);
+        const target = field.endsWith("-x64")
+          ? evidence.candidate.platformDigests
+          : evidence.candidate;
+        if (missingKind === "omitted") delete target[field];
+        else target[field] = null;
+
+        await assert.rejects(verifyFixture(version, evidence), (error) => {
+          assert.ok(error.message.includes(field), error.message);
+          return true;
+        });
+      });
+    }
+  }
+
+  for (const [field, value] of [
+    ["sourceCommit", "not-a-commit"],
+    ["runId", "not-a-run"],
+    ["linux-x64", "sha256:not-a-digest"],
+    ["windows-x64", "sha256:not-a-digest"],
+  ]) {
+    test(`rejects v${version} with malformed candidate ${field}`, async () => {
+      const evidence = validEvidence(version);
+      const target = field.endsWith("-x64")
+        ? evidence.candidate.platformDigests
+        : evidence.candidate;
+      target[field] = value;
+
+      await assert.rejects(verifyFixture(version, evidence), (error) => {
+        assert.ok(error.message.includes(field), error.message);
+        return true;
+      });
+    });
+  }
+
+  const checks = [
+    ["manual", "viewport375px"],
+    ["manual", "totpRecovery"],
+    ["manual", "resumeAfterRefresh"],
+    ...(version === "0.2.5"
+      ? [["updateSystem", "linuxX64"], ["updateSystem", "windowsX64"]]
+      : []),
+  ];
+  for (const [group, field] of checks) {
+    test(`rejects v${version} when ${group}.${field} failed`, async () => {
+      const evidence = validEvidence(version);
+      evidence[group][field].status = "failed";
+
+      await assert.rejects(verifyFixture(version, evidence), (error) => {
+        assert.ok(error.message.includes(`${group}.${field} is failed`), error.message);
+        return true;
+      });
+    });
+  }
+}
+
+test("CI runs release-gate tests without treating pending production evidence as passing", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
+  assert.match(workflow, /^        run: node --test scripts\/ci\/verify-release-gate\.test\.mjs\r?$/m);
+  assert.doesNotMatch(workflow, /run:.*(?:npm run verify:release-gate|node scripts\/ci\/verify-release-gate\.mjs)/);
 });
