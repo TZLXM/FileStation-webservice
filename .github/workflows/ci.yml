@@ -35,6 +35,9 @@ jobs:
       - name: Release gate tests
         run: node --test scripts/ci/verify-release-gate.test.mjs
 
+      - name: Release tool tests
+        run: node --test scripts/release/release-tools.test.mjs
+
       - name: Build shared workspace
         run: npm run build:shared
 

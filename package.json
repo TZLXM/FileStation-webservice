@@ -1,6 +1,6 @@
 {
   "name": "filestation-webservice",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Private file transfer station web application",
   "workspaces": [
@@ -12,7 +12,13 @@
     "build": "npm run build:shared && npm run build --workspace=@filestation/server && npm run build --workspace=@filestation/web",
     "dev": "npm run build:shared && cross-env FILESTATION_WEB_URL=http://localhost:5173 concurrently \"npm run dev --workspace=@filestation/server\" \"npm run dev --workspace=@filestation/web\"",
     "test": "npm run test --workspaces",
+    "test:release-tools": "node --test scripts/release/release-tools.test.mjs",
     "verify:release-gate": "node scripts/ci/verify-release-gate.mjs",
+    "release:validate": "node scripts/release/validate-version.mjs",
+    "release:notes": "node scripts/release/render-release-notes.mjs",
+    "release:manifest": "node scripts/release/build-manifest.mjs",
+    "release:package": "node scripts/release/package-artifact.mjs",
+    "release:smoke": "node scripts/release/smoke-artifact.mjs",
     "typecheck": "npm run typecheck --workspaces",
     "lint": "npm run lint --workspaces",
     "start": "cross-env FILESTATION_SERVE_STATIC=true FILESTATION_HOST=0.0.0.0 node apps/server/dist/main.js",

@@ -10,11 +10,11 @@ FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 
 |------|------|
 | 设计文档 | v2.3 as-built 更新；Phase 1 实施计划迭代至 v1.7（经两轮外部评审） |
 | 项目管理 | AGENTS.md 已建立 |
-| 代码实现 | Phase 1 MVP 完成；Phase 2 TOTP 两步登录与设置页管理、恢复码前后端、API Token、审计日志、MCP 服务及对应 Web 页面已实现；Task 10 第三轮复审修复、Task 11 最终复审、Task 12 断点续传 UI 与 Task 13 并发/压力测试修复均已获独立审阅批准；Task 15 修复 LAN HTTP 下 Web 分块 SHA-256 |
-| 自动化 | Task 1 release-gate 47/47；server unit 25 suites / 172 passed / 20 todo；full server E2E 10 suites / 85 passed；Web `npx vitest run --no-cache` 16 files / 137 passed；root typecheck/build/diff-check 通过。CI 在 server 测试前构建 shared workspace。Lint 不可用；根 `npm test` 因 shared 缺少 `test` script 会非零退出 |
+| 代码实现 | Phase 1 MVP 完成；Phase 2 TOTP 两步认证、恢复码、API Token、审计、MCP 与断点续传已实现；Task 2 已落地 `0.2.0` 版本同步、双语发布说明、RFC 8785/Ed25519 manifest、可重定位原生制品、候选/签名/tag workflow 与固定公钥 fail-closed 占位 |
+| 自动化 | Task 2 release-tool Node tests 31/31；Task 1 release-gate 47/47；server unit 25 suites / 172 passed / 20 todo；full server E2E 10 suites / 85 passed；Web `npx vitest run --no-cache` 16 files / 137 passed；root typecheck/build 通过。本地从全新临时目录完成 Windows x64 生产制品 smoke。Lint 不可用；根 `npm test` 仍因 shared 缺少 `test` script 非零退出 |
 | 用户手动验收 | **Partial**：真实 MCP 客户端已通过 `server_info`、上传、列表、分享、浏览器下载/读回、审计查询及 Token 吊销；直接 MCP `download_file` 工具当前不存在。375px 小屏、TOTP/恢复码真实流程及页面刷新后的断点续传仍 Pending |
 | 发布安全门 | **Critical/High gate cleared；最终独立复审 APPROVED（`7a5ba50`）**：按最近一次成功快照，full/prod audit 均为 0 Critical、0 High；仍有 Moderate/Low，`npm audit` 因此仍 exit 1。整体发布仍因真实客户端/小屏/认证/续传手动验收 pending；续作时 registry audit 刷新被 EACCES/权限审查阻止，残余 advisories 与升级建议见下文和 security-gate report |
-| 发布自动门 | **Task 1 已实现，stable tag 仍禁止**：PR/master CI 使用显式六项命令；`npm run verify:release-gate -- --version <semver>` 只读取并严格校验结构化证据。`v0.2.0` candidate provenance/digest 与三项 Phase 2 人工记录仍 pending，因此命令按设计 exit 1；证据见 [release-evidence/v0.2.0.json](../release-evidence/v0.2.0.json) |
+| 发布自动门 | **Task 1/2 本地实现完成，stable tag 仍禁止**：版本、双语 notes、canonical manifest、平台制品、candidate evidence、tag 重建 digest 匹配和 protected signing workflow 已落地。真实 candidate Actions、hosted Windows/Linux smoke、三项人工验收与 tag/Release 仍 pending；固定公钥持续 `UNCONFIGURED`，签名按设计 fail closed。证据见 [release-evidence/v0.2.0.json](../release-evidence/v0.2.0.json) 与 [UPDATING.md](UPDATING.md) |
 | 部署 | 单进程模式（默认）与 Nginx 反代模式均可用；已推送至 GitHub |
 
 ## 设计决策摘要
@@ -139,6 +139,8 @@ FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 
 
 ### 自动化验证边界
 
+- **Task 2 release foundation（2026-10-27，仅本地自动化）：** 根包与 server/web/shared workspace 已统一为 `0.2.0`；新增 `release-notes/v0.2.0.json`、CHANGELOG、更新类型和固定公钥 sentinel。`release-tools.test.mjs` 先观察到模块缺失 RED，后覆盖版本/tag/workspace、分类省略与双语 item ID、patch breaking fail-closed、初始/prior tag migration、非线性/不可达 tag、RFC 8785、Ed25519 篡改/长度/密钥绑定、artifact URL/size/hash、确定性 ZIP/tar.gz、PR metadata 草稿、relative path/目录边界过滤、native smoke 输出脱敏和 workflow 隔离，现为 31/31 passed。生产 Windows x64 在 `SOURCE_DATE_EPOCH=1704067200` 下由 `npm ci --omit=dev` 本地缓存闭包打包，archive 50,770,078 bytes、unpacked 177,055,021 bytes、SHA-256 `9722bad0b5d5fa5d17721fc1dd240fe78aa218e1983f1f567da7e840f5ecc48f`。解压到全新临时绝对路径后，`sqlite3@6.0.1`、`bcrypt@6.0.0`、无账户初始化 DB 与 `/api/v1/settings/public` smoke 通过。该结果不等同于 GitHub hosted Windows/Linux、真实 candidate run 或人工验收。
+- **Task 2 签名与发布边界：** `release-platform.yml` 只执行 workflow-call 构建、smoke 与 SHA-256 输出；`release-candidate.yml` 仅生成无签名 candidate/provenance，不接触签名 secret 或 Release；`release.yml` 只在 `v*` tag 上运行全套门禁，从 evidence 的精确 source commit 复用平台构建，并只允许 candidate→tag 改变 release evidence 与 CURRENT-STATE。`release-signing` protected environment 是唯一读取 base64 PKCS#8 secret 的任务，签名前同时验证私钥与仓库固定 SPKI 公钥绑定。当前 fixed public-key module 明确为 `UNCONFIGURED`，没有 publisher key、fixture production key 或远程/runtime trust root；在 reviewed SPKI 公钥 provision 前 signing 必须失败。部署前置条件记录于 [UPDATING.md](UPDATING.md)。
 - **Task 1 release CI gate（2026-10-27）：** `scripts/ci/verify-release-gate.test.mjs` 先观察到模块缺失 RED，初版 14/14 passed；首轮复审补齐两版本的缺失/null/错误 candidate 与 failed 状态测试，现为 47/47 passed，且 CI 显式执行该 Node suite；覆盖 candidate source/run/platform digest、375px/TOTP-恢复码/刷新续传、`v0.2.5` Linux/Windows 更新项、未知版本/schema/字段 fail closed，以及仅按结构化状态判断、不扫描自由文本。PR/master workflow 监听 `master`，使用完整 fetch depth，先构建 shared，再按 server unit、server E2E、Web no-cache、typecheck、build、diff-check 顺序运行。`v0.2.0` 结构化文件中的 candidate 和人工项保持 pending，未将其转为自动化通过或 stable release。
 - security-gate round 显式运行 server unit：25 suites / 172 passed / 20 todo；完整 server E2E：10 suites / 85 passed；Web `npx vitest run --no-cache`：15 files / 131 passed；并发/恢复/文件夹聚焦回归 3 轮各 3 suites / 18 passed；root `npm run typecheck`、`npm run build`、`git diff --check` 通过。
 - 根 `CI=true npm test` 已实际运行：server 25 suites / 172 passed / 20 todo、Web 15 files / 131 passed，随后因 `packages/shared/package.json` 没有 `test` script 以 exit 1 结束；显式 shared workspace 同样返回 `Missing script: "test"`。不能把根聚合报告成全绿；server/Web 显式 no-cache 命令均独立 exit 0。
@@ -177,7 +179,7 @@ High-severity 发布门已清零，但剩余 Moderate/Low 仍是已知安全风�
 
 ### Phase 2 后续
 
-- 发布门：Task 1 的可执行 CI/release gate 已完成；需在真实 candidate CI 与 375px、TOTP/恢复码、刷新续传人工验收完成后更新 `release-evidence/v0.2.0.json`，否则 stable tag 必须保持禁止。Critical/High gate 已清零；后续仍需计划剩余 Moderate/Low advisories 的 major 迁移或风险接受。
+- 发布门：Task 1/2 的本地可执行门禁已完成；需推送并运行真实 `release-candidate.yml`，记录精确 source commit/run ID/双平台 digest，再以同一制品完成 375px、TOTP/恢复码、刷新续传人工验收并更新 `release-evidence/v0.2.0.json`，否则 stable tag 必须保持禁止。hosted Windows/Linux smoke、reviewed publisher SPKI 公钥和 protected signing environment 亦未完成。Critical/High gate 已清零；后续仍需计划剩余 Moderate/Low advisories 的 major 迁移或风险接受。
 - 用户手动验收：375px 小屏/设备；TOTP 与恢复码流程；刷新页面后的上传续传。真实 MCP 客户端上述用例已通过；直接 MCP `download_file` 工具尚未实现。
 
 ### 待设计（Phase 3+）
@@ -195,6 +197,7 @@ High-severity 发布门已清零，但剩余 Moderate/Low 仍是已知安全风�
 | 大文件上传内存 | 分块合并时内存溢出 | 流式合并 + 临时文件 + fsync |
 | FRP 配置复杂性 | 用户配置困难 | 提供 Nginx 配置生成器（Phase 3） |
 | 无 Nginx 公网暴露 | 初始化端点少一层本机限制 | 一次性 Token 哈希存储 + 短有效期；文档建议公网用 Nginx 模式 |
+| Publisher key 未配置 | tag workflow 无法签名/发布 | 固定公钥 sentinel 与签名 fail closed；按 UPDATING.md 在 protected environment provision reviewed Ed25519 SPKI/PKCS#8 后才可发布 |
 
 ## 变更日志
 
@@ -232,6 +235,7 @@ High-severity 发布门已清零，但剩余 Moderate/Low 仍是已知安全风�
 - **2026-09-26**: Task 15 修复 LAN HTTP Web 上传在首次分块前失败的问题：`FileUpload` 通过共享 `uploadChunks` helper 优先使用 SubtleCrypto，缺失或拒绝时回退到显式依赖 `@noble/hashes@1.8.0`，仍发送准确的 SHA-256 `X-Part-Checksum`；总计算失败显示专用错误并保留待续传状态，继续操作提示重新选择原文件。TDD RED 观察到首个 PUT 为 0、通用上传中断文案及续传说明缺失；focused GREEN 2 files / 32 passed，完整 Web 16 files / 137 passed，root typecheck/build/diff-check 通过。用户实际 MCP 客户端验收记录为通过：`server_info`、上传、列表、分享、浏览器下载/读回、审计查询及 Token 吊销；直接 MCP `download_file` 不存在。375px、TOTP/恢复码和刷新续传手动验收仍 pending；Lint 未运行，仓库已知缺少 ESLint。
 - **2026-10-27**: Task 1 修复发布 CI 并落地版本化 release gate：workflow 改为在 `master` 的 push/PR 运行，先构建 shared，再执行 server unit、server E2E、Web no-cache、typecheck、build 与 PR merge-base/本地 diff-check；移除不可用 lint 与根 `npm test`。新增严格结构化证据校验脚本、14 项 Node tests 与 `verify:release-gate` script，支持 `v0.2.0` Phase 2 人工项及 `v0.2.5` Linux/Windows 更新项，未知版本/schema/字段和非 passed 状态 fail closed。`v0.2.0` candidate provenance/digest 与三项真实人工验收保持 pending，命令按设计 exit 1；未创建 tag/release。验证：server unit 25/172（20 todo）、server E2E 10/85、Web 16 files/137、root typecheck/build 通过。
 - **2026-10-27**: Task 1 首轮复审修复：补齐 v0.2.5（同时覆盖 v0.2.0）sourceCommit/runId/两平台 digest 缺失、null 与格式错误以及 failed 验收状态测试；CI 增加独立 Node gate tests step，未执行 pending production evidence gate。Focused Node tests 47/47、workflow YAML/命令检查与 diff-check 通过；本轮按要求未重跑未变的重型 suites，真实验收仍 pending。
+- **2026-10-27**: Task 2 release foundation 本地实现：统一四处产品版本为 `0.2.0`，新增双语版本化 Release Notes/CHANGELOG、shared update protocol types、固定公钥显式 sentinel、确定性发布工具、双平台可重定位制品与 native smoke、候选 provenance、tag 重建 digest 匹配以及唯一 protected signing job。Task 2 focused Node tests 31/31；server unit 25/172（20 todo）、server E2E 10/85、Web 16/137、typecheck/build 通过。Windows x64 生产闭包制品在全新临时目录完成 SQLite/bcrypt/公共设置 smoke，archive SHA-256 为 `9722bad0b5d5fa5d17721fc1dd240fe78aa218e1983f1f567da7e840f5ecc48f`。未调用 GitHub API、未 push/tag/创建 Release；真实 candidate Actions、hosted Linux、人工验收、publisher SPKI/PKCS#8 provision 与签名发布均保持 pending。
 
 ---
 

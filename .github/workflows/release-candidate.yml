@@ -1,0 +1,109 @@
+name: Release candidate
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact 40-character commit to build; defaults to the selected ref
+        required: false
+        type: string
+      version:
+        description: Stable SemVer without the v prefix
+        required: true
+        default: 0.2.0
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  resolve:
+    name: Resolve exact candidate source
+    runs-on: ubuntu-latest
+    outputs:
+      source-commit: ${{ steps.source.outputs.commit }}
+      version: ${{ steps.source.outputs.version }}
+    steps:
+      - name: Check out candidate source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || inputs.source_commit || github.sha }}
+          fetch-depth: 0
+
+      - name: Verify branch package version
+        id: source
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version || '0.2.0' }}
+        run: |
+          set -euo pipefail
+          node scripts/release/validate-version.mjs --version "$REQUESTED_VERSION" --tag "v$REQUESTED_VERSION"
+          source_commit="$(git rev-parse HEAD)"
+          test "${#source_commit}" = "40"
+          echo "commit=$source_commit" >> "$GITHUB_OUTPUT"
+          echo "version=$REQUESTED_VERSION" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build unsigned candidate
+    needs: resolve
+    uses: ./.github/workflows/release-platform.yml
+    with:
+      source_commit: ${{ needs.resolve.outputs.source-commit }}
+      version: ${{ needs.resolve.outputs.version }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+
+  record:
+    name: Record candidate evidence
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download candidate metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: filestation-v${{ needs.resolve.outputs.version }}-metadata
+          path: candidate
+
+      - name: Write unsigned candidate provenance
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.source-commit }}
+          CANDIDATE_RUN_ID: ${{ github.run_id }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          PLATFORM_DIGESTS: ${{ needs.build.outputs.platform-digests }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg version "$VERSION" \
+            --arg sourceCommit "$SOURCE_COMMIT" \
+            --arg runId "$CANDIDATE_RUN_ID" \
+            --argjson platformDigests "$PLATFORM_DIGESTS" \
+            '{
+              schemaVersion: 1,
+              version: $version,
+              candidate: {
+                sourceCommit: $sourceCommit,
+                runId: $runId,
+                platformDigests: $platformDigests
+              },
+              status: "unsigned-candidate-pending-human-acceptance"
+            }' > candidate/release-candidate.json
+
+      - name: Upload candidate provenance record
+        uses: actions/upload-artifact@v4
+        with:
+          name: filestation-v${{ needs.resolve.outputs.version }}-candidate-evidence
+          path:
+            candidate/release-candidate.json
+          if-no-files-found: error
+          retention-days: 30
