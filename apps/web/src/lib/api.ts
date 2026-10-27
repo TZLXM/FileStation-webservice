@@ -1,6 +1,5 @@
 import { ApiResponse } from '@filestation/shared';
-
-const API_BASE = '/api/v1';
+import { apiPath } from './base-url';
 
 export type UploadApiStatus = 'initiated' | 'uploading' | 'verifying' | 'completed' | 'aborted' | 'expired' | 'failed';
 
@@ -38,7 +37,7 @@ class ApiClient {
     headers: Record<string, string> = {},
     signal?: AbortSignal,
   ): Promise<ApiResponse<T>> {
-    const url = `${API_BASE}${path}`;
+    const url = apiPath(path);
     const requestHeaders: Record<string, string> = { ...headers };
 
     const isRaw = body instanceof Blob || body instanceof ArrayBuffer || body instanceof FormData;
@@ -102,7 +101,7 @@ class ApiClient {
     if (this.accessToken) {
       headers['Authorization'] = `Bearer ${this.accessToken}`;
     }
-    const response = await fetch(`${API_BASE}/files/${fileId}/content`, {
+    const response = await fetch(apiPath(`/files/${fileId}/content`), {
       headers,
       credentials: 'include',
     });

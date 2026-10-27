@@ -9,6 +9,7 @@ import SettingsPage from './pages/SettingsPage';
 import AuditPage from './pages/AuditPage';
 import PageErrorBoundary from './components/PageErrorBoundary';
 import { RecoveryGenerationProvider } from './contexts/RecoveryGenerationContext';
+import { routerBasename } from './lib/base-url';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, checkAuth } = useAuthStore();
@@ -32,7 +33,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 function App() {
   return (
     <RecoveryGenerationProvider>
-      <BrowserRouter>
+      <BrowserRouter basename={routerBasename()}>
         <Routes>
           <Route path="/init" element={<InitPage />} />
           <Route path="/login" element={<LoginPage />} />

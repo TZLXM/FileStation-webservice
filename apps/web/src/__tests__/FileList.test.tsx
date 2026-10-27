@@ -51,6 +51,7 @@ describe('FileList responsive views', () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   it('renders a mobile card alongside the desktop table with all file actions reachable', () => {
@@ -160,6 +161,36 @@ describe('FileList responsive views', () => {
     expect(within(card).queryByText(`${window.location.origin}/s/share-1`)).not.toBeInTheDocument();
     expect(mockedApi.get).toHaveBeenCalledTimes(1);
     expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it('decorates canonical share list URLs with the deployment base', async () => {
+    vi.stubEnv('BASE_URL', '/fs/');
+    mockedApi.get.mockResolvedValue({ data: [{
+      id: 'share-1',
+      share_url: '/s/share-1',
+      protection: 'none',
+      status: 'active',
+      max_downloads: null,
+      used_downloads: 0,
+      expires_at: null,
+    }] } as never);
+    render(<FileList files={[file]} total={1} page={1} onPageChange={vi.fn()} onChanged={vi.fn()} />);
+
+    fireEvent.click(within(screen.getByRole('article', { name: file.filename })).getByRole('button', { name: '分享列表' }));
+
+    expect(await screen.findAllByText(`${window.location.origin}/fs/s/share-1`)).toHaveLength(2);
+  });
+
+  it('copies a newly created canonical share URL with the deployment base', async () => {
+    vi.stubEnv('BASE_URL', '/fs/');
+    mockedApi.post.mockResolvedValue({ data: { share_id: 'share-1', share_url: '/s/share-1' } } as never);
+    render(<FileList files={[file]} total={1} page={1} onPageChange={vi.fn()} onChanged={vi.fn()} />);
+
+    fireEvent.click(within(screen.getByRole('article', { name: file.filename })).getByRole('button', { name: '分享' }));
+    fireEvent.click(screen.getByRole('button', { name: '创建分享' }));
+
+    const input = await screen.findByDisplayValue(`${window.location.origin}/fs/s/share-1`);
+    expect(input).toHaveValue(`${window.location.origin}/fs/s/share-1`);
   });
 
   it('confirms mobile-card deletion before deleting and notifying the page', async () => {

@@ -53,6 +53,21 @@ Nginx 是**可选项**，不是必需的：
 
 **公网部署建议**：经 FRP 暴露到公网时建议使用 Nginx 模式——初始化端点 `/api/v1/auth/init` 可获得 Nginx 层"仅本机可达"的额外防护（无 Nginx 时仅由一次性 Token 保护）。同时生产环境必须设置 `JWT_SECRET` 环境变量。
 
+### 根路径与子路径构建
+
+Web 默认使用根路径。需要在反向代理下部署到 `/fs/` 时，在构建阶段设置
+`FILESTATION_BASE`：
+
+```bash
+npm run build --workspace=@filestation/web
+npx cross-env FILESTATION_BASE=/fs/ npm run build --workspace=@filestation/web
+```
+
+`FILESTATION_BASE` 是构建时配置，不是服务端运行时配置。Vite 会把它规范化后
+写入页面、API、分享链接、下载票据和 MCP 端点；根路径与子路径应分别使用各自
+的构建产物。Nginx 的 `/fs/` 示例会先移除代理路径前缀，后端 API 契约仍保持
+`/api/v1/...`。具体配置见 [deploy/README.md](deploy/README.md)。
+
 ### 环境变量
 
 | 变量 | 默认 | 说明 |
@@ -73,7 +88,8 @@ Nginx 是**可选项**，不是必需的：
 在 Web 设置中启用 MCP 并创建一个只授予所需 scope 的 API Token。Token 明文仅在创建时显示一次；丢失后需吊销并重新签发。MCP 使用无状态 Streamable HTTP `POST`：
 
 ```text
-Endpoint: https://<YOUR_HOST>/api/v1/mcp
+Endpoint (root): https://<YOUR_HOST>/api/v1/mcp
+Endpoint (/fs/): https://<YOUR_HOST>/fs/api/v1/mcp
 Authorization: Bearer <API_TOKEN>
 ```
 

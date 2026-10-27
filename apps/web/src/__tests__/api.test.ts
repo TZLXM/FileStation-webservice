@@ -15,6 +15,7 @@ describe('upload API request headers and failures', () => {
   afterEach(() => {
     api.setAccessToken(null);
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     vi.clearAllMocks();
   });
 
@@ -48,6 +49,16 @@ describe('upload API request headers and failures', () => {
       code: 'INVALID_UPLOAD_STATE',
       currentStatus: 'completed',
     });
+  });
+
+  it('prefixes API requests with the canonical subpath base', async () => {
+    vi.stubEnv('BASE_URL', '/fs/');
+
+    await api.get('/settings');
+
+    expect(fetchMock).toHaveBeenCalledWith('/fs/api/v1/settings', expect.objectContaining({
+      method: 'GET',
+    }));
   });
 
   it.each([

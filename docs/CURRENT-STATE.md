@@ -10,12 +10,12 @@ FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 
 |------|------|
 | 设计文档 | v2.3 as-built 更新；Phase 1 实施计划迭代至 v1.7（经两轮外部评审） |
 | 项目管理 | AGENTS.md 已建立 |
-| 代码实现 | Phase 1 MVP 完成；Phase 2 TOTP 两步认证、恢复码、API Token、审计、MCP 与断点续传已实现；Task 2 已落地 `0.2.0` 版本同步、双语发布说明、RFC 8785/Ed25519 manifest、可重定位原生制品、候选/签名/tag workflow 与固定公钥 fail-closed 占位 |
-| 自动化 | Task 2 round 1 release-tool Node tests 40/40；Task 1 release-gate 47/47；server unit 25 suites / 172 passed / 20 todo；full server E2E 10 suites / 85 passed；Web `npx vitest run --no-cache` 16 files / 137 passed；root typecheck/build 通过。本地从全新临时目录完成 Windows x64 生产制品自身 smoke/启动器（public settings、`/` HTML 与引用的静态 asset），Node 22.14.0；与 hosted Node 20.17.0 Windows/Linux 验证分开记录。Lint 不可用；根 `npm test` 仍因 shared 缺少 `test` script 非零退出 |
+| 代码实现 | Phase 1 MVP 完成；Phase 2 TOTP 两步认证、恢复码、API Token、审计、MCP 与断点续传已实现；Task 2 已落地 `0.2.0` 版本同步、双语发布说明、RFC 8785/Ed25519 manifest、可重定位原生制品、候选/签名/tag workflow 与固定公钥 fail-closed 占位；Task 3 已统一根路径与 `/fs/` 子路径的 Web URL 派生 |
+| 自动化 | Task 3 focused Web 5 files / 45 passed，full Web 17 files / 158 passed；根路径与 `FILESTATION_BASE=/fs/` 构建均通过并核对 favicon/assets 实际前缀；server unit 25 suites / 172 passed / 20 todo；full server E2E 10 suites / 85 passed。Task 2 round 1 release-tool Node tests 40/40；Task 1 release-gate 47/47；root typecheck/build 在最终提交前复核。本地从全新临时目录完成 Windows x64 生产制品自身 smoke/启动器（public settings、`/` HTML 与引用的静态 asset），Node 22.14.0；与 hosted Node 20.17.0 Windows/Linux 验证分开记录。Lint 不可用；根 `npm test` 仍因 shared 缺少 `test` script 非零退出 |
 | 用户手动验收 | **Partial**：真实 MCP 客户端已通过 `server_info`、上传、列表、分享、浏览器下载/读回、审计查询及 Token 吊销；直接 MCP `download_file` 工具当前不存在。375px 小屏、TOTP/恢复码真实流程及页面刷新后的断点续传仍 Pending |
 | 发布安全门 | **Critical/High gate cleared；最终独立复审 APPROVED（`7a5ba50`）**：按最近一次成功快照，full/prod audit 均为 0 Critical、0 High；仍有 Moderate/Low，`npm audit` 因此仍 exit 1。整体发布仍因真实客户端/小屏/认证/续传手动验收 pending；续作时 registry audit 刷新被 EACCES/权限审查阻止，残余 advisories 与升级建议见下文和 security-gate report |
 | 发布自动门 | **Task 1/2 本地实现完成，stable tag 仍禁止**：版本、双语 notes、canonical manifest、平台制品、candidate evidence、tag 重建 digest 匹配和 protected signing workflow 已落地。round 1 增加签名前认证 GitHub candidate run/repository/workflow/source/provenance 和下载/重建 digest 对账（本地仅 fixture 验证）；真实 candidate Actions、hosted Windows/Linux smoke、三项人工验收与 tag/Release 仍 pending；固定公钥持续 `UNCONFIGURED`，签名按设计 fail closed。证据见 [release-evidence/v0.2.0.json](../release-evidence/v0.2.0.json) 与 [UPDATING.md](UPDATING.md) |
-| 部署 | 单进程模式（默认）与 Nginx 反代模式均可用；已推送至 GitHub |
+| 部署 | 单进程模式（默认）与 Nginx 根路径/`/fs/` 子路径反代示例均可用；已推送至 GitHub |
 
 ## 设计决策摘要
 
@@ -236,6 +236,7 @@ High-severity 发布门已清零，但剩余 Moderate/Low 仍是已知安全风�
 - **2026-10-27**: Task 1 修复发布 CI 并落地版本化 release gate：workflow 改为在 `master` 的 push/PR 运行，先构建 shared，再执行 server unit、server E2E、Web no-cache、typecheck、build 与 PR merge-base/本地 diff-check；移除不可用 lint 与根 `npm test`。新增严格结构化证据校验脚本、14 项 Node tests 与 `verify:release-gate` script，支持 `v0.2.0` Phase 2 人工项及 `v0.2.5` Linux/Windows 更新项，未知版本/schema/字段和非 passed 状态 fail closed。`v0.2.0` candidate provenance/digest 与三项真实人工验收保持 pending，命令按设计 exit 1；未创建 tag/release。验证：server unit 25/172（20 todo）、server E2E 10/85、Web 16 files/137、root typecheck/build 通过。
 - **2026-10-27**: Task 1 首轮复审修复：补齐 v0.2.5（同时覆盖 v0.2.0）sourceCommit/runId/两平台 digest 缺失、null 与格式错误以及 failed 验收状态测试；CI 增加独立 Node gate tests step，未执行 pending production evidence gate。Focused Node tests 47/47、workflow YAML/命令检查与 diff-check 通过；本轮按要求未重跑未变的重型 suites，真实验收仍 pending。
 - **2026-10-27**: Task 2 release foundation 本地实现：统一四处产品版本为 `0.2.0`，新增双语版本化 Release Notes/CHANGELOG、shared update protocol types、固定公钥显式 sentinel、确定性发布工具、双平台可重定位制品与 native smoke、候选 provenance、tag 重建 digest 匹配以及唯一 protected signing job。Task 2 focused Node tests 31/31；server unit 25/172（20 todo）、server E2E 10/85、Web 16/137、typecheck/build 通过。Windows x64 生产闭包制品在全新临时目录完成 SQLite/bcrypt/公共设置 smoke，archive SHA-256 为 `9722bad0b5d5fa5d17721fc1dd240fe78aa218e1983f1f567da7e840f5ecc48f`。未调用 GitHub API、未 push/tag/创建 Release；真实 candidate Actions、hosted Linux、人工验收、publisher SPKI/PKCS#8 provision 与签名发布均保持 pending。
+- **2026-10-27**: Task 3 canonical root/subpath URLs：新增 `base-url` helper 与根路径/`/fs/` 回归；所有浏览器 API、BrowserRouter、分享复制/列表、下载票据和 MCP 路径统一从 `import.meta.env.BASE_URL` 派生；`FILESTATION_BASE` 仅映射 Vite `base`，拒绝外部 absolute URL，HTML favicon/assets 使用构建 base；Nginx 文档提供 `/fs/api/` 去前缀代理和两套初始化 allow/deny，refresh Cookie 维持框架默认 `Path=/`。Focused Web 5 files / 45 passed；full Web 17 files / 158 passed；root 与 `/fs/` 构建通过并核对 `/assets/` 与 `/fs/assets/`；server unit 首次发生既有 90 天审计 cutoff 的 1 ms 时序抖动，随后 full rerun 25 suites / 172 passed（20 todo），full E2E 10 suites / 85 passed。版本保持 `0.2.0`；未调用外部服务、未 push/tag/Release。
 
 ---
 
