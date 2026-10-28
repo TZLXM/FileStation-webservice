@@ -47,8 +47,25 @@ function validEvidence(version = "0.2.0") {
 
   if (version === "0.2.5") {
     evidence.updateSystem = {
-      linuxX64: passed("manual/update-linux-x64"),
-      windowsX64: passed("manual/update-windows-x64"),
+      bootstrap: {
+        linuxX64: passed("manual/bootstrap-linux-x64"),
+        windowsX64: passed("manual/bootstrap-windows-x64"),
+      },
+      confirmedUpdate: {
+        linuxX64: passed("manual/update-linux-x64"),
+        windowsX64: passed("manual/update-windows-x64"),
+      },
+      rollbackBeforeCommit: {
+        linuxX64: passed("manual/rollback-linux-x64"),
+        windowsX64: passed("manual/rollback-windows-x64"),
+      },
+      docker: {
+        selfUpdateRefused: passed("manual/docker-self-update-refused"),
+      },
+      nginx: {
+        root: passed("manual/nginx-root"),
+        fsPrefix: passed("manual/nginx-fs-prefix"),
+      },
     };
   }
 
@@ -104,9 +121,12 @@ test("requires v0.2.5 update evidence instead of accepting Phase 2 fields alone"
 
 test("rejects v0.2.5 when a platform update check is pending", async () => {
   const evidence = validEvidence("0.2.5");
-  evidence.updateSystem.windowsX64 = pending();
+  evidence.updateSystem.confirmedUpdate.windowsX64 = pending();
 
-  await assert.rejects(verifyFixture("0.2.5", evidence), /windowsX64/);
+  await assert.rejects(
+    verifyFixture("0.2.5", evidence),
+    /confirmedUpdate\.windowsX64/,
+  );
 });
 
 test("accepts complete v0.2.5 evidence", async () => {
@@ -192,13 +212,28 @@ for (const version of ["0.2.0", "0.2.5"]) {
     ["manual", "totpRecovery"],
     ["manual", "resumeAfterRefresh"],
     ...(version === "0.2.5"
-      ? [["updateSystem", "linuxX64"], ["updateSystem", "windowsX64"]]
+      ? [
+          ["updateSystem", "bootstrap.linuxX64"],
+          ["updateSystem", "bootstrap.windowsX64"],
+          ["updateSystem", "confirmedUpdate.linuxX64"],
+          ["updateSystem", "confirmedUpdate.windowsX64"],
+          ["updateSystem", "rollbackBeforeCommit.linuxX64"],
+          ["updateSystem", "rollbackBeforeCommit.windowsX64"],
+          ["updateSystem", "docker.selfUpdateRefused"],
+          ["updateSystem", "nginx.root"],
+          ["updateSystem", "nginx.fsPrefix"],
+        ]
       : []),
   ];
   for (const [group, field] of checks) {
     test(`rejects v${version} when ${group}.${field} failed`, async () => {
       const evidence = validEvidence(version);
-      evidence[group][field].status = "failed";
+      const pathParts = field.split(".");
+      const target = pathParts.reduce(
+        (value, part) => value[part],
+        evidence[group],
+      );
+      target.status = "failed";
 
       await assert.rejects(verifyFixture(version, evidence), (error) => {
         assert.ok(error.message.includes(`${group}.${field} is failed`), error.message);
@@ -207,6 +242,50 @@ for (const version of ["0.2.0", "0.2.5"]) {
     });
   }
 }
+
+test("v0.2.5 rejects every missing or malformed update-system check", async () => {
+  const checks = [
+    ["bootstrap", "linuxX64"],
+    ["bootstrap", "windowsX64"],
+    ["confirmedUpdate", "linuxX64"],
+    ["confirmedUpdate", "windowsX64"],
+    ["rollbackBeforeCommit", "linuxX64"],
+    ["rollbackBeforeCommit", "windowsX64"],
+    ["docker", "selfUpdateRefused"],
+    ["nginx", "root"],
+    ["nginx", "fsPrefix"],
+  ];
+
+  for (const [group, field] of checks) {
+    const missing = validEvidence("0.2.5");
+    delete missing.updateSystem[group][field];
+    await assert.rejects(
+      verifyFixture("0.2.5", missing),
+      new RegExp(`updateSystem\\.${group}\\.${field}`),
+    );
+
+    const malformed = validEvidence("0.2.5");
+    malformed.updateSystem[group][field] = {
+      status: "passed",
+      reference: "   ",
+    };
+    await assert.rejects(
+      verifyFixture("0.2.5", malformed),
+      new RegExp(`updateSystem\\.${group}\\.${field}`),
+    );
+  }
+});
+
+test("v0.2.0 retains its historical Phase 2 evidence schema", async () => {
+  await assert.doesNotReject(verifyFixture("0.2.0", validEvidence("0.2.0")));
+
+  const evidence = validEvidence("0.2.0");
+  evidence.updateSystem = validEvidence("0.2.5").updateSystem;
+  await assert.rejects(
+    verifyFixture("0.2.0", evidence),
+    /updateSystem/,
+  );
+});
 
 test("CI runs release-gate tests without treating pending production evidence as passing", async () => {
   const workflow = await readFile(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");

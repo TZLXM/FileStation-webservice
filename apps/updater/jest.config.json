@@ -1,6 +1,6 @@
 {
   "testEnvironment": "node",
-  "testMatch": ["**/src/**/*.spec.ts"],
+  "testMatch": ["**/src/**/*.spec.ts", "**/test/**/*.spec.ts"],
   "transform": {
     "^.+\\.ts$": [
       "ts-jest",

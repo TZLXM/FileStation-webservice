@@ -153,6 +153,48 @@ jobs:
           path: release-artifacts
           merge-multiple: true
 
+      - name: Verify rebuilt artifacts match candidate evidence
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const crypto = require("node:crypto");
+            const fs = require("node:fs");
+            const metadata = JSON.parse(
+              fs.readFileSync("release-artifacts/artifact-metadata.json", "utf8"),
+            );
+            const evidence = JSON.parse(
+              fs.readFileSync(
+                `release-evidence/v${process.env.VERSION}.json`,
+                "utf8",
+              ),
+            );
+            if (!Array.isArray(metadata) || metadata.length !== 2) {
+              throw new Error("rebuilt metadata must contain exactly two platforms");
+            }
+            for (const platform of ["linux-x64", "windows-x64"]) {
+              const matches = metadata.filter((item) => item.platform === platform);
+              if (matches.length !== 1) {
+                throw new Error(`rebuilt metadata missing/duplicated ${platform}`);
+              }
+              const item = matches[0];
+              const bytes = fs.readFileSync(
+                `release-artifacts/${item.filename}`,
+              );
+              const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+              if (
+                bytes.length !== item.archive_size ||
+                digest !== item.sha256 ||
+                evidence.candidate.platformDigests?.[platform] !==
+                  `sha256:${digest}`
+              ) {
+                throw new Error(`rebuilt digest mismatch for ${platform}`);
+              }
+            }
+          '
+
       - name: Render reviewed bilingual release body
         shell: bash
         run: |

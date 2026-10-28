@@ -60,6 +60,14 @@ const REQUIRED_ARTIFACT_FILES = [
   "scripts/start-filestation.ps1",
   "scripts/start-filestation.sh",
 ];
+const PRODUCT_VERSION_MANIFESTS = [
+  "package.json",
+  "apps/server/package.json",
+  "apps/web/package.json",
+  "apps/updater/package.json",
+  "packages/shared/package.json",
+  "packages/update-core/package.json",
+];
 const OPTIONAL_ROOT_FILES = ["CHANGELOG.md", "LICENSE", "README.md"];
 const BANNED_SEGMENTS = new Set([
   "logs",
@@ -269,11 +277,18 @@ export async function prepareArtifactDirectory({
     }
   }
 
+  for (const manifestFile of PRODUCT_VERSION_MANIFESTS) {
+    const manifest = JSON.parse(
+      await readFile(path.join(resolvedDestination, manifestFile), "utf8"),
+    );
+    if (manifest.version !== normalizedVersion) {
+      fail(
+        `source ${manifestFile} version does not match the artifact version`,
+      );
+    }
+  }
   const rootManifestPath = path.join(resolvedDestination, "package.json");
   const rootManifest = JSON.parse(await readFile(rootManifestPath, "utf8"));
-  if (rootManifest.version !== normalizedVersion) {
-    fail("source root package version does not match the artifact version");
-  }
   rootManifest.scripts = {
     ...(rootManifest.scripts ?? {}),
     start: "node scripts/release/start-artifact.mjs",

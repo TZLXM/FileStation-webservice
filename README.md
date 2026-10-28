@@ -15,8 +15,9 @@
 - **API Token**：管理员可签发与吊销 Token；exchange 短期 JWT 按数据库 scopes 授权
 - **MCP 服务**：启用设置中的 MCP 开关后，可通过无状态 Streamable HTTP `/api/v1/mcp` 使用 11 个文件、文件夹、上传与分享工具；直接使用 API Token，并按 token scopes 校验权限
 - **审计日志**：管理员可通过 `GET /api/v1/audit-logs` 分页查询关键操作，支持按 action 筛选；IP 匿名化并保留 90 天
+- **Managed 更新**：Windows x64 / Linux x64 独立 updater、管理员二次确认、WAL 安全快照、维护栅栏、失败回滚和重启健康验证
 
-**Phase 2 功能实现和自动化验证已完成，但发布验收尚未完成。** WebAuthn、多 FRP 入口智能选路、直链分享、限速控制、临时码、P2P 传输和统计面板仍属 Phase 3/4 路线图。当前安全门、用户手动验收与已知限制见[当前状态](docs/CURRENT-STATE.md)。
+**v0.2.5 已完成本地候选实现，但 hosted candidate 与真实双平台/bootstrap/Docker/Nginx 验收尚未完成。** WebAuthn、多 FRP 入口智能选路、直链分享、限速控制、临时码、P2P 传输和统计面板仍属 Phase 3/4 路线图。当前安全门、用户手动验收与已知限制见[当前状态](docs/CURRENT-STATE.md)。
 
 ## 技术栈
 
@@ -40,6 +41,18 @@ npm start
 首次启动后，控制台会打印完整的初始化地址和一次性 Token，浏览器打开该地址设置管理员账号即可。
 
 生产环境应预先设置 `JWT_SECRET` 并妥善备份。TOTP 密文加密 key 从该值派生；更换它会导致已保存的 TOTP secret 无法解密。
+
+### v0.2.5 managed 升级
+
+`v0.2.5` 增加 Windows x64 与 Linux x64 managed updater、管理员确认更新、
+维护栅栏、SQLite WAL 快照、失败回滚和独立重启验证。旧式源码部署不能直接
+点击自动安装，必须先停止全部旧进程，再执行一次手动 bootstrap。完整步骤、
+`.env` 优先级与权限、Nginx 根路径/`/fs/`、`updater status/recover`、备份保留、
+源码恢复和 Docker 手动更新见 [升级与恢复权威说明](docs/UPDATING.md)。
+
+Docker 只显示镜像升级说明，不在容器内自更新，也不得挂载 Docker socket。
+当前 `v0.2.5` 候选证据仍是 pending，双平台 bootstrap、确认更新、
+pre-COMMITTED 回滚、Docker 拒绝和 Nginx 验收完成前不得创建稳定 tag。
 
 ### 部署模式
 
@@ -104,11 +117,12 @@ Authorization: Bearer <API_TOKEN>
 
 Web 上传现已在 LAN HTTP 缺少 SubtleCrypto 时使用 SHA-256 回退，并保留 `X-Part-Checksum` 校验；自动化回归验证了首个分块请求和准确校验值。继续续传时，点击“继续”后需要重新选择最初上传的同一个文件。
 
-当前内置浏览器访问本地服务被 `ERR_BLOCKED_BY_CLIENT` 阻断，因此 375px、TOTP/恢复码及刷新后续传的真实设备验收仍待用户环境完成。2026-09-26 security round 的最近成功快照已清零 npm audit Critical/High，但仍有 Moderate/Low advisories（`npm audit` 仍 exit 1）；详情与建议见 [当前状态](docs/CURRENT-STATE.md)。其余手动验收仍 pending，不要将自动化通过等同于发布批准。
+当前内置浏览器访问本地服务被 `ERR_BLOCKED_BY_CLIENT` 阻断，因此 375px、TOTP/恢复码及刷新后续传的真实设备验收仍待用户环境完成。2026-10-28 fresh registry audit 的 full 结果为 4 Critical / 7 High / 25 Moderate / 9 Low，production 为 1 Critical / 5 High / 19 Moderate，两个命令均 exit 1；Task 11 未执行大范围 audit fix 或 major 升级。Critical/High 处置或明确风险接受前发布保持 blocked，详情见 [当前状态](docs/CURRENT-STATE.md)。
 
 ## 文档
 
 - [当前状态](docs/CURRENT-STATE.md) — 实现进度和里程碑
+- [升级与恢复](docs/UPDATING.md) — v0.2.5 bootstrap、更新、回滚与 Docker 操作
 - [设计文档](docs/superpowers/specs/2026-07-28-filestation-design.md) — 详细架构设计
 - [开发手册](AGENTS.md) — Agent 开发指南
 - [架构决策](docs/adr/) — 技术决策记录
@@ -135,4 +149,4 @@ MIT
 
 ---
 
-*项目状态: Phase 1 与 Phase 2 自动化实现已完成；发布安全门和用户手动验收待完成，详见 docs/CURRENT-STATE.md*
+*项目状态: v0.2.5 本地候选；hosted candidate、真实双平台/Docker/Nginx 验收、签名与发布仍待完成，详见 docs/CURRENT-STATE.md*

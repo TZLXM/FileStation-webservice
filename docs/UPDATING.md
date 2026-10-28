@@ -1,22 +1,24 @@
 # FileStation Upgrade and Release Verification
 
-This document covers the v0.2.0 release foundation. Managed layout and the
-Windows/Linux updater begin with v0.2.5; v0.2.0 itself is a source-deployment
-candidate.
+This document is the upgrade and recovery authority for FileStation v0.2.5.
+The managed layout and Windows/Linux updater begin with this release; older
+source deployments require one reviewed bootstrap before automatic updates are
+available.
 
-## Before v0.2.0 can be tagged
+## Before v0.2.5 can be tagged
 
-The versioned release notes, CHANGELOG, root package, and all three workspace
-manifests must agree on `0.2.0`. The exact candidate commit must be built by
+The versioned release notes, CHANGELOG, root package, and all five workspace
+manifests must agree on `0.2.5`. The exact candidate commit must be built by
 `release-candidate.yml`, and its Windows/Linux artifact SHA-256 values must be
-recorded with the Actions run ID in `release-evidence/v0.2.0.json`.
+recorded with the Actions run ID in `release-evidence/v0.2.5.json`.
 
-The same two downloaded artifact byte sets must pass the three Phase 2 manual
-checks required by the repository: 375px layout, TOTP/recovery, and resume
-after refresh. A later commit may change only the release evidence and the
-evidence/status portion of `docs/CURRENT-STATE.md`. The tag workflow compares
-that commit with the recorded candidate source and rejects changes to any
-artifact input.
+The same downloaded artifacts must also pass Windows and Linux bootstrap,
+administrator-confirmed update, pre-COMMITTED rollback, Docker self-update
+refusal, and Nginx root plus `/fs/` acceptance. Phase 2 checks for 375px,
+TOTP/recovery, and resume after refresh remain mandatory. A later commit may
+change only the release evidence and the evidence/status portion of
+`docs/CURRENT-STATE.md`. The tag workflow compares that commit with the recorded
+candidate source and rejects changes to any artifact input.
 
 Candidate dispatch must select the exact source ref (an optional source SHA must
 match that ref). Before signing, the release tool uses the job token with
@@ -277,6 +279,72 @@ manual root or `/fs/` configuration, run `nginx -t`, and reload Nginx yourself.
 The supplied configuration explicitly denies the internal health/promote routes
 at both the root and `/fs/`; this is defense in depth because the inherited
 capability remains the authority even for loopback requests.
+
+## Complete the one-time bootstrap
+
+1. Record the old process PID, boot identity, creation time, service environment
+   source, and canonical database/storage/temp paths.
+2. Stop and verify every old FileStation process has exited. Never leave source
+   and managed versions writing the same SQLite database or storage tree.
+3. Review `.env` precedence and migrate only the required `NODE_ENV=production`
+   and stable `JWT_SECRET` values through the documented trusted path. Keep
+   `.env` and backup directories restricted to the service account
+   (`0600`/`0700` on POSIX; account and administrators only on Windows).
+4. Run the platform bootstrap command above with `relative-path-policy preserve`
+   unless a reviewed absolute path migration has separate target data prepared.
+5. Verify the manifest, SQLite snapshot, legacy source backup, and current link.
+6. Start the managed release from the installation root through
+   `scripts/start-filestation.ps1` or `bash scripts/start-filestation.sh`.
+7. Run `updater status`, verify the UI and database, then perform one manual
+   update and one pre-COMMITTED rollback drill before accepting the release.
+
+Do not delete `update.lock`, `update.recovery.lock`, the journal, current or
+previous releases, snapshots, manifest references, bootstrap recovery trees, or
+failure sidecars to make a blocked startup pass. Use `status`, exact-attempt
+`recover`, or the dedicated cleanup command.
+
+## Backup retention and restore
+
+Keep at least the verified pre-update snapshot and the current plus previous
+release while an attempt is active or non-terminal. Failed rollback diagnostics
+require the exact-ID acknowledgment described above and are retained according
+to the bounded retention policy. `cleanup --bootstrap-backup <id>` removes only
+that backup's environment and legacy-source recovery trees; it leaves the
+verified database snapshot and rollback releases intact. Retention never
+removes an active, uniquely referenced, or latest protected asset.
+
+For a source rollback, stop the managed process, restore the selected
+`legacy-source` and separate `legacy.env` to a new reviewed location, materialize
+workspace links as ordinary directories, restore the verified SQLite snapshot,
+and run the old command from the original canonical data paths. Never copy only
+a live WAL-mode `.db` file.
+
+## Nginx manual changes
+
+Use `<install-root>/current/apps/web/dist` as the managed static root. For the
+root deployment, verify `/`, `/api/v1/...`, and that
+`/api/v1/internal/update/health` and `/promote-ready` return 403 through Nginx.
+For `/fs/`, build Web with `FILESTATION_BASE=/fs/`, enable the `/fs/` locations,
+verify `/fs/`, `/fs/api/v1/...`, `/fs/assets/...`, the two internal-route denials,
+and the canonical initialization restrictions. Run `nginx -t`, reload Nginx
+manually, and record separate root and `/fs/` acceptance evidence.
+
+Do not add `^~` to the API prefixes because it would bypass the case and
+trailing-slash rejection rules. Nginx denial is defense in depth; attempt/fence
+capabilities remain the update authority even for loopback traffic.
+
+## Docker manual update
+
+FileStation does not self-update inside Docker and must not mount the Docker
+socket. Check the stable Release, record the current and target image tag or
+immutable digest, review the bilingual notes, and back up the mounted database
+and storage first. Pull the selected image and run a Compose update manually,
+then verify the UI and database health.
+
+Rollback by selecting the previously recorded image digest and starting the
+same Compose service. Never run old and new containers against the same files
+at the same time. The Docker acceptance gate requires both a visible manual
+update instruction and a direct prepare/install refusal inside the container.
 
 Source development commands establish emitted runtime dependencies explicitly:
 `npm run dev:prepare` builds shared → update-core → updater, `npm run dev` runs

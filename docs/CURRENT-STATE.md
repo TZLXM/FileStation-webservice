@@ -2,7 +2,17 @@
 
 Updated: 2026-10-28
 
-FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 2 实现/自动化验证已完成；security fix commit `7a5ba50` 经最终独立复审 APPROVED。最近一次成功 registry audit 快照中依赖 Critical/High 已清零，但 Phase 2 发布验收仍 pending。** 代码测试通过不能替代用户手动验收；该快照仍有 Moderate/Low advisories，续作时的 registry 刷新未获网络权限。
+FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 2 实现/自动化验证已完成；Task 10 复审 clean，Task 11 正在形成 `v0.2.5` 本地候选。** 发布候选、真实 Windows/Linux bootstrap/update/rollback、Docker/Nginx、hosted workflow 与人工验收仍未完成。代码测试通过不能替代真实部署验收；fresh registry audit 仍有 Critical/High，不得描述为全绿或当前已清零。
+
+## Task 11: v0.2.5 local candidate closure（2026-10-28）
+
+- 根包及 server/web/shared/update-core/updater 六个产品 manifest 与 lockfile 已统一为 **0.2.5**。Release notes/CHANGELOG 使用双语非空分类；证据文件保持 pending，候选 commit/run ID/两平台摘要为 null。
+- `release-candidate.yml` 默认 0.2.5，workflow-dispatch 的显式 `source_commit` 同时参与 checkout 与实际 HEAD 对账。`release-platform.yml` 在两平台构建后运行 controlled updater integration 与 artifact smoke；tag workflow 从记录的候选提交重建，并在签名前核对 metadata、归档 SHA-256 与提交证据。
+- v0.2.5 release gate 强制 Windows/Linux bootstrap、confirmed update、pre-COMMITTED rollback、Docker self-update refusal、Nginx root 与 `/fs/` 九项真实证据；v0.2.0 保留历史 Phase 2 schema。当前 pending evidence 使 release gate 按设计非零，publisher key 保持 **UNCONFIGURED**。
+- Integration fixture 使用真实 SQLite WAL 行与 sidecar、真实旧进程/OS guard、journal fence、`VACUUM INTO`、current link、health/promote 子进程、rollback restore 和独立重启通知；受控 HTTP 业务响应与迁移不代表真实部署验收。Focused GREEN 已覆盖成功更新（含 promote response loss）、live old PID、WAL disk recheck、migration/health failure、rollback-start failure recovery、updater crash 与 stale attempt recovery。
+- UPDATING/README/deploy 文档补充 source→managed bootstrap、canonical 数据路径、`.env` 优先级与权限、Nginx root/`/fs/`、状态/恢复、精确诊断与 bootstrap backup 清理、源码恢复、备份保留和 Docker 手动镜像更新；Nginx 示例静态根改为 `<install-root>/current/apps/web/dist`。
+- Final local verification：server unit **52 suites / 311 passed / 20 todo**；full E2E **16 suites / 117 passed**；Web no-cache **22 files / 235 passed**；update-core **6 suites / 92 passed / 2 skipped**；full updater **19 suites / 249 passed / 2 skipped**（含 7-case real-process/WAL integration 与 host artifact suite）；release/bootstrap/gate scripts **109 passed / 2 skipped**；root typecheck/build 与 diff-check exit 0。Hosted Windows/Linux artifact execution、push/PR/trigger、真实双平台/Docker/Nginx 验收、tag/sign/Release 明确 pending。test runner 中 artifact suite 每次验证 host platform；两个 hosted OS leg 仍需实际执行。
+- Fresh registry audit（2026-10-28，`npm audit --json` 与 `npm audit --omit=dev --json`，两者 exit 1）：full **45 = 4 Critical / 7 High / 25 Moderate / 9 Low**；production **25 = 1 Critical / 5 High / 19 Moderate / 0 Low**。Critical/High 涉及 `@modelcontextprotocol/sdk`、`body-parser`、`concurrently`、`handlebars`、`multer`、`proxy-addr`、`shell-quote`、`source-map-js`、`undici`、`vite`、`zod`。多数 advisory 标记 fix available；`body-parser` 修复路径涉及 `@nestjs/platform-express@12.3.2` major，`zod` 修复需 4.x major。本任务未执行大范围 `audit fix`/major 升级；该快照是当前风险记录，不构成风险接受，发布继续 blocked。
 
 ## Task 9 / Chapter 7–9 fix round 3/5 — I1–I4
 
@@ -38,11 +48,11 @@ FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 
 |------|------|
 | 设计文档 | v2.3 as-built 更新；Phase 1 实施计划迭代至 v1.7（经两轮外部评审） |
 | 项目管理 | AGENTS.md 已建立 |
-| 代码实现 | Phase 1/2 已完成；Task 2–8 已建立可签名发布基础、只读更新核心、durable updater、managed launcher、全局写栅栏/快照、内部验证门和管理员确认更新 API。Task 9 已接入继承匿名管道能力、pre-import startup authority、health/promote 协议、handoff executor、`continue --attempt`、回滚、重启验证、gated retention 与延迟审计对账。Task 10 已接入管理员更新面板、202 尝试轮询、全局维护遮罩与只读 status 轮询、一次性 hashed-asset 恢复，以及 ServeStatic/Nginx index/fallback `no-store` 与 hashed asset immutable 策略。仍有明确 pending：无真实 managed upgrade/断电演练、无 hosted Windows/Linux/Node 20.17 结果、无真实 Nginx/FRP 验收；更新面板/缓存恢复仍需真实浏览器与 375px 人工验收；活跃崩溃状态的人工 `recover` 仍 fail closed |
-| 自动化 | Task 10 fresh 本机结果：focused Web **5 files / 53 passed**；full Web no-cache **20 files / 216 passed**；server unit **52 suites / 311 passed / 20 todo**；ServeStatic focused E2E **4/4**；controller `require_escalated` full server E2E **16 suites / 117 passed**（51.729s）；root typecheck/build、显式根路径 Web build、`FILESTATION_BASE=/fs/` Web build 均 exit 0，产物分别引用 `/assets/` 与 `/fs/assets/`。现有 ts-jest JS-transform 提示、测试预期的 lifecycle AbortError 日志和 MCP 413 日志仍存在。Lint 仍不可用；根 `npm test` 因 shared 无 `test` script 不能作为完整门禁 |
+| 代码实现 | Phase 1/2 已完成；Task 2–8 已建立可签名发布基础、只读更新核心、durable updater、managed launcher、全局写栅栏/快照、内部验证门和管理员确认更新 API。Task 9 已接入继承匿名管道能力、pre-import startup authority、health/promote 协议、handoff executor、`continue --attempt`、回滚、重启验证、gated retention 与延迟审计对账。Task 10 已接入管理员更新面板、202 尝试轮询、全局维护遮罩与只读 status 轮询、一次性 hashed-asset 恢复，以及 ServeStatic/Nginx index/fallback `no-store` 与 hashed asset immutable 策略。Task 11 正在收口 0.2.5 制品、集成测试、发布门、文档与候选工作流。仍有明确 pending：无真实 managed upgrade/断电演练、无 hosted Windows/Linux/Node 20.17 结果、无真实 Nginx/FRP 验收；更新面板/缓存恢复仍需真实浏览器与 375px 人工验收；活跃崩溃状态的人工 `recover` 仍 fail closed |
+| 自动化 | Task 11 fresh serial results：server unit **52 suites / 311 passed / 20 todo**；full E2E **16/117**；Web no-cache **22 files / 235 passed**；update-core **6 suites / 92 passed / 2 skipped**；full updater **19 suites / 249 passed / 2 skipped**（含 7-case integration 与 host artifact suite）；release/bootstrap/gate scripts **109 passed / 2 skipped**；root typecheck/build、expected-node 0.2.5 built-in smoke 与 diff-check 通过。一次并行 artifact+server-unit 运行出现 Win32 journal sharing error，该 case isolated 通过；最终 serial server unit 全绿，因此仅记录为并发负载症状，不宣称单次复跑已证明通用根因。Expected ts-jest/lifecycle/MCP logs、PageErrorBoundary test log 仍存在；root `npm test` 与 lint 仍不可用，未以其代替门禁。 |
 | 用户手动验收 | **Partial**：真实 MCP 客户端已通过 `server_info`、上传、列表、分享、浏览器下载/读回、审计查询及 Token 吊销；直接 MCP `download_file` 工具当前不存在。375px 小屏、TOTP/恢复码真实流程及页面刷新后的断点续传仍 Pending |
-| 发布安全门 | **Critical/High gate cleared；最终独立复审 APPROVED（`7a5ba50`）**：按最近一次成功快照，full/prod audit 均为 0 Critical、0 High；仍有 Moderate/Low，`npm audit` 因此仍 exit 1。整体发布仍因真实客户端/小屏/认证/续传手动验收 pending；续作时 registry audit 刷新被 EACCES/权限审查阻止，残余 advisories 与升级建议见下文和 security-gate report |
-| 发布自动门 | **Task 1/2 本地实现完成，stable tag 仍禁止**：版本、双语 notes、canonical manifest、平台制品、candidate evidence、tag 重建 digest 匹配和 protected signing workflow 已落地。round 1 增加签名前认证 GitHub candidate run/repository/workflow/source/provenance 和下载/重建 digest 对账（本地仅 fixture 验证）；真实 candidate Actions、hosted Windows/Linux smoke、三项人工验收与 tag/Release 仍 pending；固定公钥持续 `UNCONFIGURED`，签名按设计 fail closed。证据见 [release-evidence/v0.2.0.json](../release-evidence/v0.2.0.json) 与 [UPDATING.md](UPDATING.md) |
+| 发布安全门 | **Blocked by fresh audit**：2026-10-28 full **4C/7H/25M/9L**、production **1C/5H/19M/0L**，两条 audit 均 exit 1。此前 `7a5ba50` 的零 Critical/High 是历史快照，不能代表当前依赖图。多数 findings 标记可修复，但 `body-parser` 需 Nest Platform Express 12 major、`zod` 需 4.x major；Task 11 未自行跨 major 修复或接受风险。真实客户端、小屏、认证、续传、双平台/Docker/Nginx 验收也仍 pending |
+| 发布自动门 | **v0.2.5 local candidate；stable tag/release 仍禁止**：版本、双语 notes、canonical manifest、双平台制品、candidate evidence、tag 重建 digest 匹配和 protected signing workflow 已落地。Task 11 gate 要求九项 v0.2.5 更新系统验收并保留 v0.2.0 历史 schema；候选必须匹配精确 commit/run/digest，tag 必须从记录的候选源重建并在签名前核对字节。当前 [v0.2.5 证据](../release-evidence/v0.2.5.json) 全部 pending，未运行 hosted candidate 或真实双平台/Docker/Nginx 验收；公钥 **UNCONFIGURED**，签名 fail closed。 |
 | 部署 | 单进程模式（默认）；已提供 Nginx 根路径/`/fs/` 子路径反代示例。Task 3 round 1 修正子路径 API 代理保留 `/api/` 前缀，chapter P1 修复保留 canonical init 精确回环 allow/deny，并以大小写不敏感 regex 拒绝整条路径大小写/尾斜杠变体；实际配置静态回归对照已安装 Express matcher，覆盖根路径与 `/fs/`、URI 解码/斜杠/点路径规范化及 settings/MCP/ticket 路由；本机未安装 Nginx，`nginx -t` 与真实代理验收仍 pending |
 
 ## Task 4: Node-only 更新核心（2026-10-27）
@@ -235,7 +245,7 @@ Task 9 orchestrator, maintenance snapshots/restoration, global WriteBarrier and 
 
 - **实现 + 自动化验证：** Phase 2 功能已实现；Task 13 独立复审 APPROVED。Task 15 focused FileUpload/SHA-256 测试 2 files / 32 passed，完整 Web Vitest 16 files / 137 passed，root typecheck/build 与 `git diff --check` 均退出 0。Lint 未改且仓库仍缺 ESLint，可用性沿用已知限制。
 - **用户验收：** 用户实际 MCP 客户端已通过 `server_info`、上传、列表、分享、浏览器下载/读回、审计查询及 Token 吊销；直接 MCP `download_file` 工具仍不存在。375px 真实浏览器/设备、TOTP 启用/登录/禁用与恢复码流程、刷新页面后的续传仍需用户验收。当前 Codex 内置浏览器访问 localhost 为 `ERR_BLOCKED_BY_CLIENT`，未重试，像素 QA 仍待办。
-- **依赖安全门：** 最近一次成功的 registry audit 快照中 Critical/High 已清零；Moderate/Low 仍在且 audit 命令 exit 1。整体 Phase 2 发布仍因真实客户端/小屏/认证/续传手动验收 pending，不得称为发布完成。
+- **依赖安全门：** 2026-10-28 fresh registry audit 显示 full **4 Critical / 7 High / 25 Moderate / 9 Low**、production **1 Critical / 5 High / 19 Moderate**，两条命令均 exit 1。该 snapshot 不是风险接受，也不代表发布通过；Critical/High 处置或单独风险接受前 tag/sign/publish 必须保持 blocked。
 
 ### Phase 3: 多入口传输
 
@@ -304,7 +314,7 @@ Task 9 orchestrator, maintenance snapshots/restoration, global WriteBarrier and 
 | 全依赖 | 46（2 / 19 / 19 / 6） | 0 / 0 / 23 / 2 | 25 | 15 / 10 |
 | `--omit=dev` 生产闭包 | 28（1 / 13 / 11 / 3） | 0 / 0 / 16 / 1 | 17 | 12 / 5 |
 
-High-severity 发布门已清零，但剩余 Moderate/Low 仍是已知安全风险；所有包级 direct/transitive、runtime/dev、advisory 与 `fixAvailable` 明细见 [security-gate report](../.superpowers/sdd/security-gate-report.md)。
+以下内容是 **2026-09-26 的历史 audit 快照**，仅用于解释当时完成的依赖修复；它已被本页顶部 2026-10-28 fresh audit 取代。历史快照当时将 Critical/High 清零，但仍保留 Moderate/Low；所有包级 direct/transitive、runtime/dev、advisory 与 `fixAvailable` 明细见 [security-gate report](../.superpowers/sdd/security-gate-report.md)。
 
 - **原生产 Critical `tar` 链已移除：** `sqlite3@6.0.1` 替换 sqlite3 5/node-gyp8 安装链，`bcrypt@6.0.0` 移除旧 `@mapbox/node-pre-gyp` 链；未修改应用上传路径。旧 bcrypt hash 与新登录验证、SQLite/原生安装回归均通过。
 - **原 Vitest Critical 已修复：** Web 升级至 `vitest@4.1.11` + `vite@6.4.3`，符合当前 Node20.17 最低版本；4.1.11 同时覆盖影响 Vitest4.0–4.1.10 的后续 advisory。Vitest4 将一处通用 mock 返回类型收窄为明确登录回调签名，类型检查修正仅在测试文件。
@@ -328,7 +338,7 @@ High-severity 发布门已清零，但剩余 Moderate/Low 仍是已知安全风�
 
 ### Phase 2 后续
 
-- 发布门：Task 1/2 的本地可执行门禁已完成；需推送并运行真实 `release-candidate.yml`，记录精确 source commit/run ID/双平台 digest，再以同一制品完成 375px、TOTP/恢复码、刷新续传人工验收并更新 `release-evidence/v0.2.0.json`，否则 stable tag 必须保持禁止。hosted Windows/Linux smoke、reviewed publisher SPKI 公钥和 protected signing environment 亦未完成。Critical/High gate 已清零；后续仍需计划剩余 Moderate/Low advisories 的 major 迁移或风险接受。
+- 发布门：Task 11 的本地可执行门禁已完成；需推送并运行真实 `release-candidate.yml`，记录精确 source commit/run ID/双平台 digest，再以同一制品完成双平台 bootstrap/update/pre-COMMITTED rollback、Docker refusal、Nginx root/`/fs/`、375px、TOTP/恢复码和刷新续传验收并更新 `release-evidence/v0.2.5.json`，否则 stable tag 必须保持禁止。hosted Windows/Linux smoke、reviewed publisher SPKI 公钥和 protected signing environment 亦未完成；fresh audit 的 Critical/High 必须先处置或明确接受。
 - 用户手动验收：375px 小屏/设备；TOTP 与恢复码流程；刷新页面后的上传续传。真实 MCP 客户端上述用例已通过；直接 MCP `download_file` 工具尚未实现。
 
 ### 待设计（Phase 3+）

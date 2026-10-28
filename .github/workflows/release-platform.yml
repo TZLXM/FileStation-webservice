@@ -80,6 +80,13 @@ jobs:
       - name: Build application
         run: npm run build
 
+      - name: Run controlled updater integration and artifact tests
+        run: >-
+          npm test --workspace=@filestation/updater --
+          --runInBand
+          test/update-flow.integration.spec.ts
+          test/artifact-smoke.spec.ts
+
       - name: Package relocatable artifact
         run: >-
           node scripts/release/package-artifact.mjs

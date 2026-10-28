@@ -118,7 +118,7 @@ describe('UpdateValidationModule', () => {
       status: 'validating',
       attempt_id: intent.attempt.attemptId,
       fence: intent.attempt.fence,
-      version: '0.2.0',
+      version: '0.2.5',
       database: {
         integrity: 'ok',
         foreign_keys: 0,

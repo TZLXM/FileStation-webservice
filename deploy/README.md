@@ -46,8 +46,32 @@ bash scripts/start-filestation.sh --root /srv/filestation --dry-run
 完整的旧进程身份、路径变更、原始 DB/目标 DB 分离验证、恢复与人工 Nginx
 步骤见 [UPDATING.md](../docs/UPDATING.md)。
 
+### Managed 安装与升级
+
+v0.2.5 的稳定布局以 `/opt/filestation` 为例：
+
+```text
+/opt/filestation/current/       -> releases/<release>
+/opt/filestation/releases/       # 当前与回滚版本
+/opt/filestation/updater/        # 独立 updater
+/opt/filestation/data/           # DB、storage、temp
+/opt/filestation/.env            # 受限配置
+```
+
+源码部署先按 UPDATING.md 停止全部旧进程、校验旧 `.env` 来源与 canonical
+数据路径，再执行一次 bootstrap。managed 启动和 recover 必须以安装根为 cwd。
+调用环境变量优先于 `.env`；生产 `NODE_ENV` 和稳定的 `JWT_SECRET` 必须在任何
+数据库或目录写入前通过校验。状态、单 attempt 恢复、失败诊断确认和
+bootstrap 专属备份清理命令见 UPDATING.md。
+
+Docker 不执行应用内自更新、不挂载 Docker socket。管理员记录当前/目标镜像
+tag 或 immutable digest、备份挂载的 DB/storage，并通过 Compose 手动拉取和
+更新；回滚改用先前记录的镜像 digest，旧、新容器不得同时挂载并写同一数据。
+
 ## 启动
-1. `node apps/server/dist/main.js`
+1. managed 安装从安装根运行 `scripts/start-filestation.ps1` 或
+   `bash scripts/start-filestation.sh --root <install-root>`。源码模式可运行
+   `node apps/server/dist/main.js`
 2. 控制台打印初始化 Token（10 分钟有效，仅本机）
 3. 本机浏览器访问 `/init` 完成管理员初始化
 
@@ -64,6 +88,8 @@ npm run build --workspace=@filestation/web
 npx cross-env FILESTATION_BASE=/fs/ npm run build --workspace=@filestation/web
 ```
 
+Managed 安装的 Nginx `root`/`alias` 必须指向
+`<install-root>/current/apps/web/dist`，不能继续指向源码目录。
 根路径与子路径部署二选一，分别使用各自的 Web 构建产物。子路径构建会生成
 `/fs/assets/...` 引用；浏览器中的 API 请求使用 `/fs/api/v1/...`，分享页使用
 `/fs/s/...`。Nginx 在 `location /fs/api/` 代理前去掉 `/fs`，所以后端仍只看到

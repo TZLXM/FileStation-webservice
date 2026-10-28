@@ -13,5 +13,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   if (process.argv.slice(2).some(argument => argument !== "--bynginx")) throw new Error("usage: start-artifact.mjs [--bynginx]");
   Object.assign(process.env, startupEnvironment(process.env, process.argv.includes("--bynginx")));
   // Import in this process so service stop/termination also stops the server.
-  await import(pathToFileURL(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../apps/server/dist/main.js")).href);
+  const server = await import(pathToFileURL(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../apps/server/dist/main.js")).href);
+  if (typeof server.bootstrap !== "function") {
+    throw new Error("artifact server entrypoint does not export bootstrap()");
+  }
+  // Dynamic import does not make main.js the CommonJS entry module, so the
+  // shipped launcher must invoke the exported bootstrap explicitly.
+  await server.bootstrap();
 }

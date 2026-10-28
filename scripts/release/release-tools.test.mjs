@@ -838,6 +838,27 @@ test("artifact staging includes the built updater and stable launcher scripts", 
   }
 });
 
+test("artifact staging rejects any FileStation workspace version mismatch", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  await writeFixtureFile(
+    repositoryRoot,
+    "packages/update-core/package.json",
+    JSON.stringify({ version: "0.2.4", private: true }, null, 2),
+  );
+  await assert.rejects(
+    prepareArtifactDirectory({
+      repositoryRoot,
+      destination: path.join(
+        fixtureRoot,
+        `stage-mismatch-${crypto.randomUUID()}`,
+      ),
+      version: "0.2.0",
+      platform: "linux-x64",
+    }),
+    /packages\/update-core\/package\.json version does not match the artifact version/,
+  );
+});
+
 test("artifact staging refuses to remove a destination inside the source tree", async () => {
   const repositoryRoot = await createRepositoryFixture();
   await assert.rejects(
@@ -1124,6 +1145,43 @@ test("platform workflows assert and upload/attest the exact archive and use ship
   assert.match(workflow, /subject-path: release-artifacts\/filestation-v.*matrix\.archive/);
   assert.match(workflow, /node "\$smoke_root\/scripts\/release\/smoke-artifact.mjs"/);
   assert.match(workflow, /Join-Path \$smokeRoot.FullName "scripts\/release\/smoke-artifact.mjs"/);
+});
+
+test("candidate and tag workflows bind exact source and run final platform integration", async () => {
+  const platform = await readFile(
+    new URL("../../.github/workflows/release-platform.yml", import.meta.url),
+    "utf8",
+  );
+  const candidate = await readFile(
+    new URL("../../.github/workflows/release-candidate.yml", import.meta.url),
+    "utf8",
+  );
+  const release = await readFile(
+    new URL("../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    platform,
+    /test\/update-flow\.integration\.spec\.ts[\s\S]*test\/artifact-smoke\.spec\.ts/,
+  );
+  assert.match(platform, /npm test --workspace=@filestation\/updater/);
+  assert.match(platform, /node "\$smoke_root\/scripts\/release\/smoke-artifact\.mjs"/);
+  assert.match(candidate, /default:\s*0\.2\.5/);
+  assert.match(
+    candidate,
+    /ref:\s*\$\{\{\s*github\.event\.pull_request\.head\.sha\s*\|\|\s*inputs\.source_commit\s*\|\|\s*github\.sha\s*\}\}/,
+  );
+  assert.match(
+    candidate,
+    /RUN_SOURCE:\s*\$\{\{\s*github\.event\.pull_request\.head\.sha\s*\|\|\s*inputs\.source_commit\s*\|\|\s*github\.sha\s*\}\}/,
+  );
+  assert.match(
+    release,
+    /source_commit:\s*\$\{\{\s*needs\.verify\.outputs\.source-commit\s*\}\}/,
+  );
+  assert.match(release, /Verify rebuilt artifacts match candidate evidence/);
+  assert.match(release, /candidate\.platformDigests/);
 });
 test("shipped launcher provides portable standalone and nginx defaults", async () => {
   const { startupEnvironment } = await import("./start-artifact.mjs");

@@ -78,7 +78,7 @@ describe('update management API (e2e)', () => {
       .expect(200);
     expect(status.body).toEqual(
       expect.objectContaining({
-        current_version: '0.2.0',
+        current_version: '0.2.5',
         publisher_status: 'unconfigured',
       }),
     );

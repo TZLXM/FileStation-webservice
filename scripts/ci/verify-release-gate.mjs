@@ -11,7 +11,13 @@ const PHASE_2_MANUAL_CHECKS = [
   "totpRecovery",
   "resumeAfterRefresh",
 ];
-const UPDATE_SYSTEM_CHECKS = ["linuxX64", "windowsX64"];
+const UPDATE_SYSTEM_GROUPS = {
+  bootstrap: ["linuxX64", "windowsX64"],
+  confirmedUpdate: ["linuxX64", "windowsX64"],
+  rollbackBeforeCommit: ["linuxX64", "windowsX64"],
+  docker: ["selfUpdateRefused"],
+  nginx: ["root", "fsPrefix"],
+};
 const SUPPORTED_VERSIONS = new Set(["0.2.0", "0.2.5"]);
 const EVIDENCE_STATUSES = new Set(["passed", "failed", "pending"]);
 
@@ -121,9 +127,23 @@ function validateManualEvidence(manual) {
 }
 
 function validateUpdateSystem(updateSystem) {
-  assertExactObject(updateSystem, UPDATE_SYSTEM_CHECKS, "updateSystem");
-  for (const check of UPDATE_SYSTEM_CHECKS) {
-    validateManualRecord(updateSystem[check], `updateSystem.${check}`);
+  assertExactObject(
+    updateSystem,
+    Object.keys(UPDATE_SYSTEM_GROUPS),
+    "updateSystem",
+  );
+  for (const [group, checks] of Object.entries(UPDATE_SYSTEM_GROUPS)) {
+    assertExactObject(
+      updateSystem[group],
+      checks,
+      `updateSystem.${group}`,
+    );
+    for (const check of checks) {
+      validateManualRecord(
+        updateSystem[group][check],
+        `updateSystem.${group}.${check}`,
+      );
+    }
   }
 }
 
