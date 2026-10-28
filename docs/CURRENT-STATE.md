@@ -2,7 +2,7 @@
 
 Updated: 2026-10-29
 
-FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 2 实现/自动化验证已完成；release-auto-update 的 11 个任务及 chapter review 已完成，当前为同一个最终修复波次，待 scoped 最终复审。** 产品版本为 `0.2.5`；发布候选、真实 Windows/Linux bootstrap/update/rollback、Docker/Nginx、hosted workflow 与人工验收仍未完成。代码测试通过不能替代真实部署验收；fresh registry audit 仍有 Critical/High，不得描述为全绿或当前已清零。
+FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 2 实现/自动化验证已完成；release-auto-update 的 11 个任务、chapter review 和最终修复复审均已完成，本地实施范围内可合并。** 产品版本为 `0.2.5`；发布候选、真实 Windows/Linux bootstrap/update/rollback、Docker/Nginx、hosted workflow 与人工验收仍未完成。代码测试通过不能替代真实部署验收；fresh registry audit 仍有 Critical/High，不得描述为全绿或当前已清零。
 
 ## FR-I05 / FRF-I01：PREPARED 公共重试修正（2026-10-29）
 
@@ -10,7 +10,7 @@ FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 
 - 本次仅修该 reservation 生命周期：同步标记 abandonment 防止旧响应迟到 finish 自动继续；在 active recovery/writer/operation guard、同一 ownership/attempt/fence、严格 PREPARED 且无 pending、admission 开放、无 shutdown/handoff 均验证通过后，只退役 operation reservation。journal owner lock 与 native recovery guard 继续保留，foreign/stale takeover 仍拒绝；maintenance/freeze/partial shutdown 后不释放权限。新 install 与 shutdown 等待异步 retirement，替代尝试仍须 fresh password/TOTP 和新的单次 receipt，并以 ABORTED completion 与递增 fence 替换旧尝试。
 - 新 composed 回归使用真实公共 prepare HTTP、prepare/consume/controller、archive extraction、native guards、journal、SQLite-backed AuthService、bcrypt/TOTP；仅响应 close/finish、candidate/capacity/capability/executor/进程身份为受控 fixture 边界，不能当作真实断线或部署验收。TDD RED **2 failed**，均在第二次公共 prepare 收到 409 而非 201；修正后 focused GREEN **2/2**。完整 E2E 另覆盖迟到旧 finish 不自动继续、pending journal 与 maintenance 已开始时两种 native guard 保留，拒绝复用已 consumed receipt，错误密码/缺失 TOTP 不 consume 新 receipt，替代 response finish 前不进入 maintenance。
 - 本次 fresh server unit **54 suites / 325 passed / 20 todo**（107.293s）；full E2E **17 suites / 121 passed**（62.763s）；Web no-cache **22 files / 242 passed**（15.45s）；root typecheck/build 与 `git diff --check` exit 0，build 包含 root/`/fs/` 双 bundle。未修改 updater，不重复先前耗时 updater/公共恢复套件，其旧结果保留为原 revision 证据。
-- 此窄修复等待原 Faraday Sol xhigh 仅针对 FR-I05 / FRF-I01 再审；未自行 dispatch review，也未重开已闭合七项。发布仍独立 blocked，0.2.5 / key UNCONFIGURED / unresolved audit 与真实双平台、Docker、Nginx、人工验收 pending 不变。
+- 原 Faraday Sol xhigh 已完成 `bd9f1bc..135b5bf` 窄范围复审：FR-I05 / FRF-I01 均 ADDRESSED / CLOSED，未发现新增 Critical/Important；此前已闭合七项及 M05/M06 结论保持。本地实施 PASS、在接受范围内可合并；这只是就绪结论，尚未 merge/push/创建 PR。发布仍独立 blocked，0.2.5 / key UNCONFIGURED / unresolved audit 与真实双平台、Docker、Nginx、人工验收 pending 不变。既有 staging 自动回收、extracted managed CLI 证明、可读性与更广断线组合演练等非阻断 follow-up 仍保留。
 
 ## Final review 修复波次（2026-10-29，bd9f1bc 历史验证）
 
