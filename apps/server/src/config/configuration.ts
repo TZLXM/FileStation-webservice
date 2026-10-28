@@ -1,4 +1,5 @@
 import { registerAs } from '@nestjs/config';
+import packageMetadata from '../../package.json';
 
 export default registerAs('app', () => {
   const nodeEnv = process.env.NODE_ENV || 'development';
@@ -43,5 +44,11 @@ export default registerAs('app', () => {
     jwtSecret: jwtSecret || 'dev-secret-change-in-production',
     jwtExpiresIn: '24h',
     refreshTokenExpiresIn: '7d',
+    productVersion: packageMetadata.version,
+    updateInstallRoot: process.env.FILESTATION_INSTALL_ROOT,
+    updateJournalRoot: process.env.FILESTATION_INSTALL_ROOT,
+    updateManualCheckIntervalMs: 60_000,
+    updatePreparedTtlMs: 15 * 60 * 1000,
+    updateDownloadTimeoutMs: 60_000,
   };
 });

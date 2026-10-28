@@ -43,6 +43,14 @@ export const AuditAction = {
   AUTH_TOTP_FAILED: 'auth.totp_failed',
   RECOVERY_GENERATED: 'recovery.generated',
   RECOVERY_USED: 'recovery.used',
+  UPDATE_CHECKED: 'update.checked',
+  UPDATE_PREPARED: 'update.prepared',
+  UPDATE_CONFIRMED: 'update.confirmed',
+  UPDATE_CONFIRM_FAILED: 'update.confirm_failed',
+  UPDATE_MAINTENANCE: 'update.maintenance',
+  UPDATE_FAILED: 'update.failed',
+  UPDATE_ROLLBACK: 'update.rollback',
+  UPDATE_SUCCEEDED: 'update.succeeded',
 } as const;
 
 const RETENTION_MS = 90 * 24 * 60 * 60 * 1000;

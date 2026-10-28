@@ -230,6 +230,106 @@ export class AuthService {
     return this.recoveryService.generate(accountId, password, totpCode);
   }
 
+  /**
+   * Reconfirm the authenticated administrator for a privileged update action.
+   * This deliberately shares password-lock, IP-throttle and TOTP-step
+   * admission with login, but never creates a session, token or challenge.
+   */
+  async verifyUpdateConfirmation(
+    adminId: string,
+    password: string,
+    totpCode: string | undefined,
+    clientIp?: string,
+  ): Promise<void> {
+    const security = await this.settingsService.getSecuritySettings();
+    const now = Date.now();
+    if (clientIp) await this.checkIpThrottle(clientIp, now);
+
+    const account = await this.accountsService.findById(adminId);
+    if (!account) {
+      throw new UnauthorizedException({
+        code: 'UPDATE_REAUTH_FAILED',
+        message: 'Update confirmation failed',
+      });
+    }
+    const accountState = await this.getAccountLockout(account.username);
+    if (accountState.locked_until && accountState.locked_until > now) {
+      const retryAfterSec = Math.ceil(
+        (accountState.locked_until - now) / 1000,
+      );
+      throw new UnauthorizedException({
+        code: 'ACCOUNT_LOCKED',
+        message: `Account locked, retry after ${retryAfterSec} seconds`,
+        retry_after: retryAfterSec,
+      });
+    }
+
+    const passwordAccepted = await this.accountsService.validatePassword(
+      account,
+      password,
+    );
+    if (!passwordAccepted) {
+      await this.recordLoginFailure(
+        account.username,
+        security.max_login_attempts,
+        security.lockout_minutes,
+        now,
+      );
+      if (clientIp) await this.recordIpFailure(clientIp, now);
+      await this.auditService.record({
+        accountId: account.id,
+        action: AuditAction.UPDATE_CONFIRM_FAILED,
+        resourceType: 'update',
+        details: { factor: 'password' },
+        ip: clientIp,
+      });
+      throw new UnauthorizedException({
+        code: 'UPDATE_REAUTH_FAILED',
+        message: 'Update confirmation failed',
+      });
+    }
+
+    if (await this.totpService.hasActiveTotp(account.id)) {
+      const admission = await this.reserveTotpAttempt(
+        account.id,
+        account.username,
+        security.max_login_attempts,
+        security.lockout_minutes,
+        clientIp,
+        now,
+        totpCode ?? '',
+        false,
+      );
+      if (admission.rejection) {
+        throw new UnauthorizedException({
+          code: admission.rejection.code,
+          message:
+            admission.rejection.code === 'ACCOUNT_LOCKED'
+              ? `Account locked, retry after ${admission.rejection.retryAfterSec} seconds`
+              : `Too many attempts from this IP, retry after ${admission.rejection.retryAfterSec} seconds`,
+          retry_after: admission.rejection.retryAfterSec,
+        });
+      }
+      if (!admission.factorAccepted) {
+        await this.auditService.record({
+          accountId: account.id,
+          action: AuditAction.UPDATE_CONFIRM_FAILED,
+          resourceType: 'update',
+          details: { factor: 'totp' },
+          ip: clientIp,
+        });
+        throw new UnauthorizedException({
+          code: 'INVALID_TOTP',
+          message: 'Invalid TOTP code',
+        });
+      }
+      return;
+    }
+
+    await this.clearLoginFailures(account.username);
+    if (clientIp) await this.clearIpFailures(clientIp);
+  }
+
   /** Recovery login uses the shared IP throttle here and account-specific locking in RecoveryService. */
   async recoveryVerify(username: string, code: string, clientIp?: string): Promise<TokenPair & { username: string }> {
     const now = Date.now();
@@ -461,6 +561,7 @@ export class AuthService {
     ip: string | undefined,
     now: number,
     code: string,
+    issueTokens = true,
   ): Promise<{
     rejection: { code: 'ACCOUNT_LOCKED' | 'IP_THROTTLED'; retryAfterSec: number } | null;
     factorAccepted: boolean;
@@ -514,7 +615,13 @@ export class AuthService {
         if (factorAccepted) {
           await connection.run('DELETE FROM system_meta WHERE key = ?', [accountKey]);
           if (ipKey) await connection.run('DELETE FROM system_meta WHERE key = ?', [ipKey]);
-          tokens = await this.generateTokensInImmediateTransaction(connection, accountId, username);
+          if (issueTokens) {
+            tokens = await this.generateTokensInImmediateTransaction(
+              connection,
+              accountId,
+              username,
+            );
+          }
         }
       }
     });

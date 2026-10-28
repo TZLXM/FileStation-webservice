@@ -16,6 +16,9 @@ import {
 export const MAINTENANCE_LEASE_REQUEST = Symbol(
   'MAINTENANCE_LEASE_REQUEST',
 );
+export const MAINTENANCE_LEASE_RESPONSE = Symbol(
+  'MAINTENANCE_LEASE_RESPONSE',
+);
 
 export interface MaintenanceRequestLease {
   readonly lease: WriteLease;
@@ -23,10 +26,15 @@ export interface MaintenanceRequestLease {
   handlerStarted: boolean;
   handlerDone: boolean;
   released: boolean;
+  readonly releaseWaiters: Set<() => void>;
 }
 
 export interface MaintenanceLeaseRequest extends Request {
   [MAINTENANCE_LEASE_REQUEST]?: MaintenanceRequestLease;
+}
+
+export interface MaintenanceLeaseResponse extends Response {
+  [MAINTENANCE_LEASE_RESPONSE]?: MaintenanceRequestLease;
 }
 
 export function releaseMaintenanceRequestLeaseIfSettled(
@@ -41,6 +49,8 @@ export function releaseMaintenanceRequestLeaseIfSettled(
   }
   state.released = true;
   state.lease.release();
+  for (const notify of [...state.releaseWaiters]) notify();
+  state.releaseWaiters.clear();
 }
 
 export function registerMaintenanceRequestLease(
@@ -54,8 +64,10 @@ export function registerMaintenanceRequestLease(
     handlerStarted: false,
     handlerDone: false,
     released: false,
+    releaseWaiters: new Set(),
   };
   request[MAINTENANCE_LEASE_REQUEST] = state;
+  (response as MaintenanceLeaseResponse)[MAINTENANCE_LEASE_RESPONSE] = state;
   const transportDone = () => {
     state.transportDone = true;
     releaseMaintenanceRequestLeaseIfSettled(state);
@@ -63,6 +75,28 @@ export function registerMaintenanceRequestLease(
   response.once('finish', transportDone);
   response.once('close', transportDone);
   return state;
+}
+
+export function waitForResponseAndLeaseRelease(
+  response: Response,
+): Promise<void> {
+  const state = (response as MaintenanceLeaseResponse)[
+    MAINTENANCE_LEASE_RESPONSE
+  ];
+  if (!state) {
+    return Promise.reject(
+      new Error('Response does not own a maintenance admission lease'),
+    );
+  }
+  return new Promise((resolve) => {
+    response.once('finish', () => {
+      if (state.released) {
+        resolve();
+        return;
+      }
+      state.releaseWaiters.add(resolve);
+    });
+  });
 }
 
 @Injectable()

@@ -17,7 +17,7 @@ import { ApiTokensModule } from './api-tokens/api-tokens.module';
 import { AuditModule } from './audit/audit.module';
 import { McpModule } from './mcp/mcp.module';
 import { MaintenanceModule } from './maintenance/maintenance.module';
-import { UpdateStatusModule } from './maintenance/update-status.module';
+import { UpdatesModule } from './updates/updates.module';
 
 // Nginx 可选项（v1.8）：FILESTATION_SERVE_STATIC=true 时由本进程托管前端构建产物。
 // 条件在此（模块加载时）读取，而不是走 ConfigService——ServeStaticModule.forRoot 的
@@ -70,7 +70,7 @@ const serveStaticImports =
     ApiTokensModule,
     AuditModule,
     McpModule,
-    UpdateStatusModule,
+    UpdatesModule,
   ],
 })
 export class AppModule {}
