@@ -135,6 +135,7 @@ npm run typecheck                                     # 类型检查
 npm run build                                         # 构建（shared → server → web）
 npm test --workspace=@filestation/server -- --runInBand # Server 单测
 npm run test:e2e --workspace=@filestation/server      # Server 全量 E2E
+npm run build:runtime && npm run build --workspace=@filestation/server # Web projection 测试前置构建（fresh checkout 必需）
 cd apps/web
 npx vitest run --no-cache                             # Web Vitest（单次运行）
 cd ../..
@@ -142,6 +143,8 @@ git diff --check                                      # 补丁空白检查
 ```
 
 根 `npm test` 会遍历所有 workspace，但 `packages/shared` 没有 test script，因而退出非零；请显式运行上面的 Server/Web 命令，勿误报为完整测试套件通过。当前已安装依赖未提供 ESLint 可执行文件，`npm run lint` 可能不可用，需复核后如实报告。
+
+Web 的真实更新状态 projection fixture 会加载已编译的 server 和 updater 模块；单独运行 Web 测试前也须从仓库根执行上述前置构建，不能依赖旧的 `apps/server/dist`。Windows PowerShell 使用 `npm.cmd`，将 `&&` 两侧命令分开执行并在每步检查 `$LASTEXITCODE`。
 
 ## 许可证
 

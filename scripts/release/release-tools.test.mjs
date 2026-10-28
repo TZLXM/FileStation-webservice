@@ -1081,6 +1081,29 @@ test("CI and release verification build updater dependencies before server tests
   }
 });
 
+for (const [workflowName, jobName] of [["ci.yml", "test"], ["release.yml", "verify"]]) {
+  test(`${workflowName} builds server projection prerequisites before Web tests`, async () => {
+    const workflow = await readFile(new URL(`../../.github/workflows/${workflowName}`, import.meta.url), "utf8");
+    const job = workflow.split(`  ${jobName}:`)[1]?.split(/^  [\w-]+:/m)[0];
+    assert.ok(job, `${workflowName} must retain its ${jobName} job`);
+    const beforeWeb = job.split("      - name: Web unit tests")[0];
+    assert.notEqual(beforeWeb, job, "Web test step must be present");
+    const commands = [
+      "npm run build:shared",
+      "npm run build --workspace=@filestation/update-core",
+      "npm run build --workspace=@filestation/updater",
+      "npm run build --workspace=@filestation/server",
+    ];
+    let previous = -1;
+    for (const command of commands) {
+      const position = beforeWeb.indexOf(command);
+      assert.ok(position > previous, `${workflowName}: ${command} must run in dependency order before Web tests`);
+      previous = position;
+    }
+    assert.match(job.slice(beforeWeb.length), /run: npx --no-install vitest run --no-cache/);
+  });
+}
+
 test("release workflows isolate candidate builds from protected signing and publication", async () => {
   const platform = await readFile(
     new URL("../../.github/workflows/release-platform.yml", import.meta.url),

@@ -43,6 +43,7 @@ jobs:
           npm run build:shared
           npm run build --workspace=@filestation/update-core
           npm run build --workspace=@filestation/updater
+          npm run build --workspace=@filestation/server
 
       - name: Server unit tests
         run: npm test --workspace=@filestation/server -- --runInBand

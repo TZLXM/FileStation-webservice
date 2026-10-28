@@ -33,6 +33,13 @@ FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 
 - 当前 audit 未刷新/修复：full **4C/7H/25M/9L**、production **1C/5H/19M/0L**，均 exit 1。多数 advisory 标记 fix available；body-parser/multer 涉及 `@nestjs/platform-express@12.3.2` major，Zod 需 4.x major。风险未接受，发布 blocked。
 - **0.2.5 / UNCONFIGURED / candidate run+digests / real platform acceptance pending** 不变。无 subagents、push/PR/trigger/tag/sign/release；I1/I2/M3 待 independent re-review。
 
+## Task 11 chapter fix round 3/5 — projection build prerequisite（2026-10-28）
+
+- Round2 independent review 已关闭 I1/I2/M3；新 Important I3 是真实 Web projection fixture 的 server dist 前置构建遗漏。普通 CI `test` 与 tag `verify` 现在均按 shared → update-core → updater → server 顺序构建，再运行 Server/Web tests；README 明确 fresh checkout 或独立 Web 验证所需的 runtime/server 构建命令。未改动已关闭的 fence/target、双 bundle 或 launcher 行为。
+- 两个新增 workflow 顺序回归 RED **2 failed**；移走旧生成目录、确认 `apps/server/dist` 不存在后，真实 Web projection RED **2 failed / 24 filtered**（缺少 server module）。从该缺失状态完成 runtime/server 构建后 GREEN **2 passed / 24 filtered**；full Web no-cache **22 files / 242 passed**。Release tools/resolver/gate tests **110 passed**，包含两项顺序回归。独立 RED/GREEN 日志见 `task-11-logs/fix3-*`；这不是 hosted CI 运行证明。
+- Root typecheck/build 与 `git diff --check` 均 exit 0。未触及 runtime 源码，未重跑 server unit/full E2E、slow artifact/full updater；server unit/E2E 的上一轮通过记录仍保留，不冒充本轮重跑。最终 owned commit 记录于本地 Task11 round3 report。
+- M1/M2 仍 minor open；audit 未刷新且未接受，full **4C/7H/25M/9L**、production **1C/5H/19M/0L**；发布仍 blocked。**0.2.5 / UNCONFIGURED / candidate run+digests / real external evidence pending** 不变；无 push/PR/trigger/tag/sign/release。
+
 ## Task 9 / Chapter 7–9 fix round 3/5 — I1–I4
 
 - I1: scheduled install now carries explicit pre-freeze/freeze-started/close-started progress. A proved pre-freeze failure durably fails the exact attempt, retires its owner/OS guard and restores admission/background leases for a fresh confirmation. Freeze or partial close never thaws the source. Real coordinator/executor + SQLite regressions cover file/parent snapshot flush, drain, partial freeze and close failures.
