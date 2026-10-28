@@ -1,10 +1,17 @@
-import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  ConflictException,
+  Optional,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { Folder } from './entities/folder.entity';
 import { File, FileStatus } from '../files/entities/file.entity';
 import { v4 as uuidv4 } from 'uuid';
 import { beginImmediate, safeRollback } from '../common/database/tx.helper';
+import { WriteFreezeService } from '../maintenance/write-freeze.service';
 
 @Injectable()
 export class FoldersService {
@@ -14,6 +21,8 @@ export class FoldersService {
     @InjectRepository(File)
     private filesRepository: Repository<File>,
     private dataSource: DataSource,
+    @Optional()
+    private readonly writeFreeze?: WriteFreezeService,
   ) {}
 
   /** v1.7 阻断 6：目标文件夹验证纳入 BEGIN IMMEDIATE 写事务（防 delete 与 move 同时成功） */
@@ -29,7 +38,7 @@ export class FoldersService {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     try {
-      await beginImmediate(queryRunner);
+      await beginImmediate(queryRunner, 12, this.writeFreeze);
       const parentRows = await queryRunner.query(
         `SELECT id FROM folders WHERE id = ? AND is_deleted = 0`, [parentId],
       );
@@ -99,7 +108,7 @@ export class FoldersService {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     try {
-      await beginImmediate(queryRunner);
+      await beginImmediate(queryRunner, 12, this.writeFreeze);
 
       // 本文件夹存在且未删除
       const selfRows = await queryRunner.query(`SELECT id FROM folders WHERE id = ? AND is_deleted = 0`, [id]);
@@ -153,7 +162,7 @@ export class FoldersService {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     try {
-      await beginImmediate(queryRunner);
+      await beginImmediate(queryRunner, 12, this.writeFreeze);
 
       // 事务内重查：文件夹存在且未删除
       const folderRows = await queryRunner.query(`SELECT id FROM folders WHERE id = ? AND is_deleted = 0`, [id]);

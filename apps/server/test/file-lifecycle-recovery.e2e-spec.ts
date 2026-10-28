@@ -272,6 +272,7 @@ describe('File lifecycle verifying recovery (SQLite integration)', () => {
         dataSource,
         new SqliteImmediateTransactionService(app.get(ConfigService)),
       );
+      await secondLifecycle.activate({ runStartupScan: false });
       (secondLifecycle as any).verifyLeaseMs = 120;
       (secondLifecycle as any).verifyHeartbeatIntervalMs = 15;
       await secondLifecycle.recoverVerifyingUploads();
@@ -414,6 +415,7 @@ describe('File lifecycle verifying recovery (SQLite integration)', () => {
       dataSource,
       new SqliteImmediateTransactionService(app.get(ConfigService)),
     );
+    await secondLifecycle.activate({ runStartupScan: false });
     const oldRecovery = lifecycle.recoverVerifyingUploads();
     let secondRecovery: Promise<void> | undefined;
     let testError: unknown;
@@ -512,6 +514,7 @@ describe('File lifecycle verifying recovery (SQLite integration)', () => {
         dataSource,
         new SqliteImmediateTransactionService(app.get(ConfigService)),
       );
+      await competitor.activate({ runStartupScan: false });
       await competitor.recoverVerifyingUploads();
       const afterCompetitor = await readSession(id);
       expect(afterCompetitor.verify_owner_token).toBe(claimedOwner);

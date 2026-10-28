@@ -9,6 +9,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { createHash } from 'crypto';
 import { AppModule } from '../src/app.module';
 import { AuthService } from '../src/auth/auth.service';
+import { FileLifecycleService } from '../src/files/file-lifecycle.service';
+import { StorageService } from '../src/files/storage.service';
 import { RangeNotSatisfiableFilter } from '../src/common/http/range-not-satisfiable.filter';
 import { setupSwagger } from '../src/common/swagger/setup-swagger';
 
@@ -44,6 +46,8 @@ export async function createApp(configure?: (app: INestApplication) => void): Pr
   app.useGlobalFilters(new RangeNotSatisfiableFilter());
   configure?.(app);
   await app.init();
+  await app.get(StorageService).activate();
+  await app.get(FileLifecycleService).activate();
   return app;
 }
 

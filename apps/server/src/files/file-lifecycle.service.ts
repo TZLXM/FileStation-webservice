@@ -1,4 +1,10 @@
-import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnApplicationBootstrap,
+  OnModuleDestroy,
+  Optional,
+} from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, In, LessThan } from 'typeorm';
@@ -11,6 +17,13 @@ import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { SqliteImmediateTransactionService } from '../common/database/sqlite-immediate-transaction.service';
 import { UploadVerifyHeartbeat } from './upload-verify-heartbeat';
+import {
+  MaintenanceUnavailableError,
+  WriteBarrierService,
+  WriteSource,
+} from '../maintenance/write-barrier.service';
+import { WriteFreezeService } from '../maintenance/write-freeze.service';
+import { WriteFrozenError } from '../maintenance/write-freeze.service';
 
 const RECEIVING_TIMEOUT_MS = 10 * 60 * 1000; // receiving 分块超 10 分钟（大于最长 64MB 写入预期）
 const BATCH_SIZE = 100;
@@ -43,6 +56,7 @@ export class FileLifecycleService implements OnApplicationBootstrap, OnModuleDes
   private readonly activeVerifyHeartbeats = new Set<UploadVerifyHeartbeat>();
   private verifyLeaseMs = VERIFY_LEASE_MS;
   private verifyHeartbeatIntervalMs = 30 * 1000;
+  private activated = false;
 
   constructor(
     @InjectRepository(File)
@@ -53,6 +67,10 @@ export class FileLifecycleService implements OnApplicationBootstrap, OnModuleDes
     private settingsService: SettingsService,
     private dataSource: DataSource,
     private sqliteTransactions: SqliteImmediateTransactionService,
+    @Optional()
+    private readonly writeBarrier?: WriteBarrierService,
+    @Optional()
+    private readonly writeFreeze?: WriteFreezeService,
   ) {}
 
   async onModuleDestroy(): Promise<void> {
@@ -62,27 +80,46 @@ export class FileLifecycleService implements OnApplicationBootstrap, OnModuleDes
     this.activeVerifyHeartbeats.clear();
   }
 
-  /**
-   * 启动全量扫描：覆盖进程停机期间的过期文件/删除队列/过期上传/卡死 verifying/孤儿临时文件。
-   * 在 app.listen() 前执行完毕（main.ts 阶段 3 app.init() 触发），无竞态窗口。
-   * 注：@Cron 方法也有独立调度，若启动扫描耗时超过 1 分钟，cron 触发的那次会被 guard 静默跳过（可接受）。
-   */
-  async onApplicationBootstrap(): Promise<void> {
-    this.logger.log('Startup lifecycle scan...');
-    try {
-      await this.expireFiles();
-      await this.processDeletes();
-      await this.cleanupExpiredUploadSessions();
-      await this.recoverVerifyingUploads();
-      await this.scanOrphanTempFiles();
-    } catch (err) {
-      this.logger.error('Startup lifecycle scan failed', err instanceof Error ? err.stack : err);
+  onApplicationBootstrap(): void {
+    // Normal startup invokes activate() before listen. Gated startup keeps
+    // background work disabled until a matching durable COMMITTED is observed.
+  }
+
+  async activate(
+    options: { runStartupScan?: boolean } = {},
+  ): Promise<void> {
+    if (this.activated) return;
+    const scan = async () => {
+      this.activated = true;
+      if (options.runStartupScan === false) return;
+      this.logger.log('Startup lifecycle scan...');
+      try {
+        await this.expireFiles();
+        await this.processDeletes();
+        await this.cleanupExpiredUploadSessions();
+        await this.recoverVerifyingUploads();
+        await this.scanOrphanTempFiles();
+      } catch (err) {
+        this.logger.error(
+          'Startup lifecycle scan failed',
+          err instanceof Error ? err.stack : err,
+        );
+      }
+    };
+    if (this.writeBarrier) {
+      await this.writeBarrier.withLease('startup-scan', scan);
+    } else {
+      await scan();
     }
   }
 
   /** active 且 expires_at < now → expired（单语句条件 UPDATE；expires_at 为 NULL（永久）天然不匹配 "<"） */
   @Cron(CronExpression.EVERY_MINUTE)
   async expireFiles(): Promise<number> {
+    return this.runBackground('cron:file-lifecycle', () => this.expireFilesCore(), 0);
+  }
+
+  private async expireFilesCore(): Promise<number> {
     const now = Date.now();
     const result = await this.filesRepository.update(
       { status: FileStatus.ACTIVE, expiresAt: LessThan(now) },
@@ -95,6 +132,10 @@ export class FileLifecycleService implements OnApplicationBootstrap, OnModuleDes
 
   /** expired 超过 cleanup_grace_hours → deleting（cleanup_grace_hours 消费方） */
   async queueDeletion(): Promise<number> {
+    return this.runBackground('cron:file-lifecycle', () => this.queueDeletionCore(), 0);
+  }
+
+  private async queueDeletionCore(): Promise<number> {
     const { cleanup_grace_hours } = await this.settingsService.getStorageSettings();
     const graceMs = Math.max(0, cleanup_grace_hours) * 60 * 60 * 1000;
     const cutoff = Date.now() - graceMs;
@@ -116,6 +157,14 @@ export class FileLifecycleService implements OnApplicationBootstrap, OnModuleDes
    */
   @Cron(CronExpression.EVERY_5_MINUTES)
   async processDeletes(): Promise<void> {
+    return this.runBackground(
+      'cron:file-lifecycle',
+      () => this.processDeletesCore(),
+      undefined,
+    );
+  }
+
+  private async processDeletesCore(): Promise<void> {
     if (this.processingDeletes) return;
     this.processingDeletes = true;
     try {
@@ -150,6 +199,14 @@ export class FileLifecycleService implements OnApplicationBootstrap, OnModuleDes
    */
   @Cron(CronExpression.EVERY_10_MINUTES)
   async cleanupExpiredUploadSessions(): Promise<void> {
+    return this.runBackground(
+      'cron:file-lifecycle',
+      () => this.cleanupExpiredUploadSessionsCore(),
+      undefined,
+    );
+  }
+
+  private async cleanupExpiredUploadSessionsCore(): Promise<void> {
     const now = Date.now();
     const expiring = await this.uploadSessionsRepository.find({
       where: { status: In([UploadStatus.INITIATED, UploadStatus.UPLOADING]), expiresAt: LessThan(now) },
@@ -177,6 +234,14 @@ export class FileLifecycleService implements OnApplicationBootstrap, OnModuleDes
    */
   @Cron(CronExpression.EVERY_MINUTE)
   async recoverVerifyingUploads(): Promise<void> {
+    return this.runBackground(
+      'cron:file-lifecycle',
+      () => this.recoverVerifyingUploadsCore(),
+      undefined,
+    );
+  }
+
+  private async recoverVerifyingUploadsCore(): Promise<void> {
     if (this.recoveringVerifying) return;
     this.recoveringVerifying = true;
     try {
@@ -270,10 +335,12 @@ export class FileLifecycleService implements OnApplicationBootstrap, OnModuleDes
             await heartbeat.refreshNow();
             const fs = await import('fs/promises');
             heartbeat.assertOwned();
+            this.writeFreeze?.assertWritable();
             await fs.rename(tempPath, this.storageService.getFinalPath(storedName));
             heartbeat.assertOwned();
           } catch (error) {
             const fs = await import('fs/promises');
+            this.writeFreeze?.assertWritable();
             await fs.unlink(tempPath).catch(() => {});
             throw error;
           }
@@ -364,7 +431,7 @@ export class FileLifecycleService implements OnApplicationBootstrap, OnModuleDes
     });
 
     this.logger.log(`Recovered verifying upload ${session.id} -> completed (file ${newFileId})`);
-    this.storageService.deleteUploadTempDir(session.id).catch(() => {});
+    await this.storageService.deleteUploadTempDir(session.id).catch(() => {});
   }
 
   private startVerifyHeartbeat(uploadId: string, ownerToken: string): UploadVerifyHeartbeat {
@@ -397,6 +464,14 @@ export class FileLifecycleService implements OnApplicationBootstrap, OnModuleDes
    */
   @Cron(CronExpression.EVERY_MINUTE)
   async recoverStaleReceivingParts(): Promise<void> {
+    return this.runBackground(
+      'cron:file-lifecycle',
+      () => this.recoverStaleReceivingPartsCore(),
+      undefined,
+    );
+  }
+
+  private async recoverStaleReceivingPartsCore(): Promise<void> {
     const deadline = Date.now() - RECEIVING_TIMEOUT_MS;
     const stale = await this.dataSource.query(
       `SELECT upload_id, part_number, owner_token FROM upload_parts WHERE status = 'receiving' AND received_at < ?`,
@@ -424,6 +499,14 @@ export class FileLifecycleService implements OnApplicationBootstrap, OnModuleDes
    * 4) storage 根目录只回收租约失效的 owner verify staging 与旧版共享 .tmp；活 owner 的 staging 保留
    */
   async scanOrphanTempFiles(): Promise<void> {
+    return this.runBackground(
+      'startup-scan',
+      () => this.scanOrphanTempFilesCore(),
+      undefined,
+    );
+  }
+
+  private async scanOrphanTempFilesCore(): Promise<void> {
     const tempRoot = this.storageService.getTempRoot();
     const entries = await fs.readdir(tempRoot).catch(() => [] as string[]);
 
@@ -441,6 +524,7 @@ export class FileLifecycleService implements OnApplicationBootstrap, OnModuleDes
       const files = await fs.readdir(dir).catch(() => [] as string[]);
       for (const name of files) {
         if (name.endsWith('.part.tmp')) {
+          this.writeFreeze?.assertWritable();
           await fs.unlink(join(dir, name)).catch(() => {});
         }
       }
@@ -476,8 +560,32 @@ export class FileLifecycleService implements OnApplicationBootstrap, OnModuleDes
           [storedName, now, now - LEGACY_VERIFY_LEASE_MS],
         );
       if (active.length === 0) {
+        this.writeFreeze?.assertWritable();
         await fs.unlink(join(storageRoot, name)).catch(() => {});
       }
+    }
+  }
+
+  private async runBackground<T>(
+    source: WriteSource,
+    operation: () => Promise<T>,
+    inactiveValue: T,
+  ): Promise<T> {
+    if (!this.activated) return inactiveValue;
+    try {
+      this.writeFreeze?.assertWritable();
+      if (this.writeBarrier) {
+        return await this.writeBarrier.withLease(source, operation);
+      }
+      return await operation();
+    } catch (error) {
+      if (
+        error instanceof MaintenanceUnavailableError ||
+        error instanceof WriteFrozenError
+      ) {
+        return inactiveValue;
+      }
+      throw error;
     }
   }
 }

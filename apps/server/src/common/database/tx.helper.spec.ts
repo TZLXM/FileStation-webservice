@@ -4,6 +4,8 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { SystemMeta } from '../../auth/entities/system-meta.entity';
 import { SqliteImmediateTransactionService } from './sqlite-immediate-transaction.service';
+import { WriteFreezeService } from '../../maintenance/write-freeze.service';
+import { beginImmediate } from './tx.helper';
 
 describe('SQLite transaction connection isolation', () => {
   let dataSource: DataSource;
@@ -102,4 +104,28 @@ describe('SQLite transaction connection isolation', () => {
     expect(observedValues).toEqual(Array(count).fill('present'));
     expect(await repository.count()).toBe(count + 1);
   }, 15_000);
+
+  it('refuses BEGIN IMMEDIATE through the shared latch before issuing SQL', async () => {
+    const freeze = new WriteFreezeService();
+    freeze.freeze({
+      attemptId: 'attempt-01',
+      fence: 1,
+      installRoot: directory,
+      backupId: 'backup-01',
+      targetVersion: '0.2.5',
+    });
+    const queryRunner = dataSource.createQueryRunner();
+    await queryRunner.connect();
+    const query = jest.spyOn(queryRunner, 'query');
+    try {
+      await expect(
+        beginImmediate(queryRunner, 12, freeze),
+      ).rejects.toMatchObject({
+        code: 'UPDATE_SOURCE_FROZEN',
+      });
+      expect(query).not.toHaveBeenCalled();
+    } finally {
+      await queryRunner.release();
+    }
+  });
 });

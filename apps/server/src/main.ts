@@ -2,9 +2,21 @@ import { realpath } from 'fs/promises';
 import {
   loadInstallEnvironment,
   loadManagedInstallMetadata,
+  validateManagedLaunch,
   validateManagedLaunchOnDisk,
 } from './bootstrap/managed-preflight';
 import { detectStartupMode } from './bootstrap/startup-mode';
+import {
+  ParsedStartupExecution,
+  parseStartupExecution,
+  RefusingTrustedStartupAccess,
+  TrustedStartupAccess,
+  UpdateStartupIntent,
+} from './maintenance/startup-authority';
+import {
+  startGatedApplication,
+  startValidationApplication,
+} from './maintenance/server-startup';
 
 interface PreparedStartup {
   mode: 'legacy' | 'managed';
@@ -55,24 +67,68 @@ async function prepareStartup(): Promise<PreparedStartup> {
   };
 }
 
-async function bootstrap() {
+async function prepareAuthorizedUpdateStartup(
+  intent: UpdateStartupIntent,
+): Promise<PreparedStartup> {
+  const cwdRealpath = await realpath(process.cwd());
+  const executableRealpath = await realpath(__filename);
+  const installRoot = await realpath(intent.attempt.installRoot);
+  if (installRoot !== intent.attempt.installRoot) {
+    throw new Error('authorized update install root must be canonical');
+  }
+  const startup = await detectStartupMode({
+    cwd: cwdRealpath,
+    executableRealpath,
+    environment: {
+      ...process.env,
+      FILESTATION_INSTALL_ROOT: installRoot,
+    },
+  });
+  if (startup.mode !== 'managed') {
+    throw new Error('update validation and gated startup require a managed install');
+  }
+  const invocationEnvironment = { ...process.env };
+  const environment = await loadInstallEnvironment(startup.root, {
+    processEnvironment: invocationEnvironment,
+  });
+  applyEnvironment(environment.values);
+  const metadata = await loadManagedInstallMetadata(startup.root);
+  const currentRealpath = await realpath(metadata.currentPath);
+  const plan = validateManagedLaunch({
+    cwd: cwdRealpath,
+    executableRealpath,
+    installMetadata: metadata,
+    environment: environment.values,
+    processEnvironment: invocationEnvironment,
+    currentRealpath,
+    configuredPaths: {
+      database: environment.values.FILESTATION_DB_PATH,
+      storage: environment.values.FILESTATION_STORAGE_PATH,
+      temp: environment.values.FILESTATION_TEMP_PATH,
+    },
+  });
+  applyEnvironment(plan.environment);
+  return {
+    mode: 'managed',
+    root: startup.root,
+    releaseRealpath: plan.releaseRealpath,
+  };
+}
+
+async function bootstrapNormal() {
   const prepared = await prepareStartup();
   const { NestFactory } = await import('@nestjs/core');
-  const { ValidationPipe, Logger } = await import('@nestjs/common');
+  const { Logger } = await import('@nestjs/common');
   const { AppModule } = await import('./app.module');
   const { ConfigService } = await import('@nestjs/config');
   const { AuthService } = await import('./auth/auth.service');
   const { StorageService } = await import('./files/storage.service');
-  const { RangeNotSatisfiableFilter } = await import(
-    './common/http/range-not-satisfiable.filter'
+  const { FileLifecycleService } = await import(
+    './files/file-lifecycle.service'
   );
-  const cookieParser = (await import('cookie-parser')).default;
-  const fs = await import('fs/promises');
-  const { dirname } = await import('path');
-  const { installNonMcpBodyParsers } = await import(
-    './common/http/body-parsers'
+  const { setupFullApplication } = await import(
+    './common/http/application-setup'
   );
-  const { setupSwagger } = await import('./common/swagger/setup-swagger');
   const logger = new Logger('Bootstrap');
 
   // ========== 阶段 0：端口预检（防 EADDRINUSE 时 init token 未激活的混淆） ==========
@@ -95,47 +151,17 @@ async function bootstrap() {
     process.exit(1);
   }
 
-  // ========== 阶段 1：目录预创建（NestFactory.create 之前，纯配置读取，无 DI） ==========
-  // DatabaseModule 连接 SQLite 前 db 父目录必须存在，否则报 SQLITE_CANTOPEN
-  const storagePath = process.env.FILESTATION_STORAGE_PATH || './data/storage';
-  const tempPath = process.env.FILESTATION_TEMP_PATH || './data/temp';
-  const dbPath = process.env.FILESTATION_DB_PATH || './data/filestation.db';
-  await fs.mkdir(storagePath, { recursive: true });
-  await fs.mkdir(tempPath, { recursive: true });
-  await fs.mkdir(dirname(dbPath), { recursive: true });
-  logger.log(`Directories ensured: storage=${storagePath}, temp=${tempPath}, db=${dirname(dbPath)}`);
-
-  // ========== 阶段 2：创建应用（migrationsRun 在此触发） ==========
+  // ========== 阶段 1：创建应用（migrationsRun 在此触发） ==========
   const app = await NestFactory.create(AppModule, { bodyParser: false });
   app.enableShutdownHooks();
   const configService = app.get(ConfigService);
 
-  // Ordinary routes retain the default 100KB parser limit. MCP is parsed only
-  // inside its controller, after its disabled/method/auth gates.
-  installNonMcpBodyParsers(app);
-  app.use(cookieParser());
-  app.setGlobalPrefix('api/v1'); // 唯一前缀来源
-  setupSwagger(app);
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      transform: true,
-      forbidNonWhitelisted: true,
-      transformOptions: { enableImplicitConversion: false }, // DTO @Type 显式转换
-    }),
-  );
-  app.useGlobalFilters(new RangeNotSatisfiableFilter()); // 416 + Content-Range
-  const corsOrigins = configService.get<string[]>('app.corsOrigins') ?? [];
-  if (corsOrigins.length > 0) {
-    app.enableCors({ origin: corsOrigins, credentials: true });
-  }
-  // CORS 为空 = 同源部署（静态托管或 FILESTATION_CORS_ORIGINS 未配置且非开发模式），
-  // 浏览器不发 CORS 预检，无需 enableCors。
+  setupFullApplication(app, configService);
 
-  // ========== 阶段 3：app.init() 触发 OnApplicationBootstrap ==========
-  // DatabaseInitializer（PRAGMA + foreign_keys 校验）、StorageService.ensureDirectories、
-  // FileLifecycleService 启动扫描 在此执行，migrationsRun 已完成
+  // ========== 阶段 3：app.init() 触发数据库初始化 ==========
   await app.init();
+  await app.get(StorageService).activate();
+  await app.get(FileLifecycleService).activate();
 
   // ========== 阶段 4：init token 覆盖（listen 前写入 DB，防 listen 后窗口期旧 token 仍有效） ==========
   const authService = app.get(AuthService);
@@ -179,11 +205,78 @@ async function bootstrap() {
     logger.log('（输入上面的初始化 Token + 设置管理员用户名/密码）');
     logger.log('================================');
   }
+  return { app, prepared, configService, initToken };
 }
 
-void bootstrap().catch((error) => {
-  const message =
-    error instanceof Error ? error.message : 'FileStation startup failed';
-  process.stderr.write(`FileStation startup failed: ${message}\n`);
-  process.exitCode = 1;
-});
+async function bootstrapUpdate(
+  execution: Exclude<ParsedStartupExecution, { mode: 'normal' }>,
+  access: TrustedStartupAccess,
+) {
+  const intent: UpdateStartupIntent = {
+    mode: execution.mode,
+    attempt: execution.attempt,
+  };
+  await access.authorizeStartup(intent);
+  const prepared = await prepareAuthorizedUpdateStartup(intent);
+  const { Logger } = await import('@nestjs/common');
+  const logger = new Logger('Bootstrap');
+
+  if (execution.mode === 'validate') {
+    const handle = await startValidationApplication({
+      access,
+      intent,
+      startupAuthorized: true,
+    });
+    const address = handle.app.getHttpServer().address();
+    const port =
+      address && typeof address === 'object' ? address.port : 0;
+    logger.log(
+      `Update validation listening on 127.0.0.1:${port} (release=${prepared.releaseRealpath})`,
+    );
+    return handle;
+  }
+
+  const handle = await startGatedApplication({
+    access,
+    intent,
+    startupAuthorized: true,
+    host: process.env.FILESTATION_HOST || '127.0.0.1',
+    port: parseInt(process.env.FILESTATION_PORT || '8080', 10),
+    onCommitted: async (app) => {
+      const { AuthService } = await import('./auth/auth.service');
+      await app.get(AuthService).ensureInitToken();
+    },
+  });
+  void handle.committed.then(
+    () => logger.log('Matching durable COMMITTED observed; normal service activated'),
+    (error) =>
+      logger.error(
+        `Gated startup failed: ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+      ),
+  );
+  logger.log(
+    `Update gated service listening in maintenance mode (release=${prepared.releaseRealpath})`,
+  );
+  return handle;
+}
+
+export async function bootstrap(
+  startupAccess: TrustedStartupAccess = new RefusingTrustedStartupAccess(),
+) {
+  const execution = parseStartupExecution(process.argv.slice(2));
+  if (execution.mode !== 'normal') {
+    return bootstrapUpdate(execution, startupAccess);
+  }
+  return bootstrapNormal();
+}
+
+if (require.main === module) {
+  void bootstrap().catch((error) => {
+    const message =
+      error instanceof Error ? error.message : 'FileStation startup failed';
+    process.stderr.write(`FileStation startup failed: ${message}\n`);
+    process.exitCode = 1;
+  });
+}

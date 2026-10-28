@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Cron } from '@nestjs/schedule';
 import { LessThan, Repository } from 'typeorm';
@@ -6,6 +6,14 @@ import { isIPv4, isIPv6 } from 'net';
 import { v4 as uuidv4 } from 'uuid';
 import { AuditLogEntry, PaginatedResponse } from '@filestation/shared';
 import { AuditLog } from './entities/audit-log.entity';
+import {
+  MaintenanceUnavailableError,
+  WriteBarrierService,
+} from '../maintenance/write-barrier.service';
+import {
+  WriteFreezeService,
+  WriteFrozenError,
+} from '../maintenance/write-freeze.service';
 
 export interface AuditEntry {
   accountId: string | null;
@@ -46,22 +54,34 @@ export class AuditService {
   constructor(
     @InjectRepository(AuditLog)
     private readonly auditRepository: Repository<AuditLog>,
+    @Optional()
+    private readonly writeBarrier?: WriteBarrierService,
+    @Optional()
+    private readonly writeFreeze?: WriteFreezeService,
   ) {}
 
   /** Audit persistence must never change the outcome of a business operation. */
   async record(entry: AuditEntry): Promise<void> {
     try {
-      await this.auditRepository.save({
-        id: uuidv4(),
-        accountId: entry.accountId,
-        action: entry.action,
-        resourceType: entry.resourceType ?? null,
-        resourceId: entry.resourceId ?? null,
-        details: entry.details ? JSON.stringify(entry.details) : null,
-        ipAddress: entry.ip ? this.anonymizeIp(entry.ip) : null,
-        userAgent: entry.userAgent ? entry.userAgent.slice(0, 256) : null,
-        createdAt: Date.now(),
-      });
+      const persist = async () => {
+        this.writeFreeze?.assertWritable();
+        await this.auditRepository.save({
+          id: uuidv4(),
+          accountId: entry.accountId,
+          action: entry.action,
+          resourceType: entry.resourceType ?? null,
+          resourceId: entry.resourceId ?? null,
+          details: entry.details ? JSON.stringify(entry.details) : null,
+          ipAddress: entry.ip ? this.anonymizeIp(entry.ip) : null,
+          userAgent: entry.userAgent ? entry.userAgent.slice(0, 256) : null,
+          createdAt: Date.now(),
+        });
+      };
+      if (this.writeBarrier) {
+        await this.writeBarrier.withLease('audit', persist);
+      } else {
+        await persist();
+      }
     } catch {
       // Keep the warning generic so an unexpected payload cannot leak into application logs.
       try {
@@ -91,8 +111,26 @@ export class AuditService {
 
   @Cron('0 4 * * *')
   async purgeExpired(): Promise<number> {
-    const result = await this.auditRepository.delete({ createdAt: LessThan(Date.now() - RETENTION_MS) });
-    return result.affected ?? 0;
+    const purge = async () => {
+      this.writeFreeze?.assertWritable();
+      const result = await this.auditRepository.delete({
+        createdAt: LessThan(Date.now() - RETENTION_MS),
+      });
+      return result.affected ?? 0;
+    };
+    try {
+      return this.writeBarrier
+        ? await this.writeBarrier.withLease('cron:audit-purge', purge)
+        : await purge();
+    } catch (error) {
+      if (
+        error instanceof MaintenanceUnavailableError ||
+        error instanceof WriteFrozenError
+      ) {
+        return 0;
+      }
+      throw error;
+    }
   }
 
   private anonymizeIp(ip: string): string {

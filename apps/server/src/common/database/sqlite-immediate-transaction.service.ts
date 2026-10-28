@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import sqlite3 = require('sqlite3');
+import { WriteFreezeService } from '../../maintenance/write-freeze.service';
 
 export interface SqliteRunResult {
   changes: number;
@@ -52,14 +53,20 @@ export class SqliteImmediateTransactionService {
   // Concurrent busy-timeout waits can starve libuv workers needed by the lock owner.
   private transactionTail: Promise<void> = Promise.resolve();
 
-  constructor(private readonly configService: ConfigService) {}
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional()
+    private readonly writeFreeze?: WriteFreezeService,
+  ) {}
 
   async run<T>(work: (connection: SqliteTransactionConnection) => Promise<T>): Promise<T> {
+    this.writeFreeze?.assertWritable();
     // Queue before opening a connection or issuing BEGIN IMMEDIATE.
     const previous = this.transactionTail;
     let release!: () => void;
     this.transactionTail = new Promise<void>((resolve) => { release = resolve; });
     await previous;
+    this.writeFreeze?.assertWritable();
 
     try {
       return await this.runWithExclusiveConnection(work);
@@ -71,17 +78,20 @@ export class SqliteImmediateTransactionService {
   private async runWithExclusiveConnection<T>(
     work: (connection: SqliteTransactionConnection) => Promise<T>,
   ): Promise<T> {
+    this.writeFreeze?.assertWritable();
     const databasePath = this.configService.get<string>('app.dbPath');
     if (!databasePath || databasePath === ':memory:' || databasePath.includes('mode=memory')) {
       throw new Error('SQLite immediate transactions require the configured file-backed database path');
     }
 
     const database = await this.open(databasePath);
+    this.writeFreeze?.assertWritable();
     const connection = new PromiseSqliteConnection(database);
     let transactionStarted = false;
     try {
       database.configure('busyTimeout', 5000);
       await connection.run('PRAGMA foreign_keys = ON');
+      this.writeFreeze?.assertWritable();
       await connection.run('BEGIN IMMEDIATE');
       transactionStarted = true;
 

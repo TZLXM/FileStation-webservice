@@ -1,14 +1,21 @@
 import { QueryRunner } from 'typeorm';
+import { WriteFreezeService } from '../../maintenance/write-freeze.service';
 
 /**
  * BEGIN IMMEDIATE 并发安全启动（SQLite 单写者）：
  * 并发写事务时后者报 "cannot start a transaction within a transaction" / "database is locked"，
  * busy_timeout 不覆盖 BEGIN 升级场景。此处短退避重试，serialize 并发写者。
  */
-export async function beginImmediate(queryRunner: QueryRunner, retries = 12): Promise<void> {
+export async function beginImmediate(
+  queryRunner: QueryRunner,
+  retries = 12,
+  writeFreeze?: WriteFreezeService,
+): Promise<void> {
+  writeFreeze?.assertWritable();
   let lastErr: unknown;
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
+      writeFreeze?.assertWritable();
       await queryRunner.query('BEGIN IMMEDIATE');
       return;
     } catch (err: any) {

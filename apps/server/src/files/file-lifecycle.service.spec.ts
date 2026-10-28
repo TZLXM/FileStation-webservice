@@ -43,6 +43,19 @@ describe('FileLifecycleService', () => {
     }).compile();
 
     service = module.get<FileLifecycleService>(FileLifecycleService);
+    const startupMethods = [
+      jest.spyOn(service, 'expireFiles').mockResolvedValue(0),
+      jest.spyOn(service, 'processDeletes').mockResolvedValue(undefined),
+      jest
+        .spyOn(service, 'cleanupExpiredUploadSessions')
+        .mockResolvedValue(undefined),
+      jest
+        .spyOn(service, 'recoverVerifyingUploads')
+        .mockResolvedValue(undefined),
+      jest.spyOn(service, 'scanOrphanTempFiles').mockResolvedValue(undefined),
+    ];
+    await service.activate();
+    for (const method of startupMethods) method.mockRestore();
   });
 
   afterEach(() => {
