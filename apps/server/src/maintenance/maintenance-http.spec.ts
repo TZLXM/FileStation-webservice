@@ -1,4 +1,8 @@
 import {
+  CanActivate,
+  ExecutionContext,
+  Injectable,
+  UseGuards,
   Controller,
   Get,
   INestApplication,
@@ -10,12 +14,42 @@ import request from 'supertest';
 import http from 'node:http';
 import { once } from 'node:events';
 import { Response } from 'express';
+import { MaintenanceInterceptor } from './maintenance.interceptor';
 import { MaintenanceModule } from './maintenance.module';
 import { MaintenanceAllowed } from './maintenance-allowed.decorator';
 import { WriteBarrierService } from './write-barrier.service';
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+@Injectable()
+class DelayedAuthGuard implements CanActivate {
+  entered = deferred();
+  closed = deferred();
+  resume = deferred();
+  accepted = true;
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    context.switchToHttp().getResponse<Response>().once('close', this.closed.resolve);
+    this.entered.resolve();
+    await this.resume.promise;
+    return this.accepted;
+  }
+}
+
 @Controller('business')
 class BusinessController {
+  writes = 0;
+
+  @Get('delayed-auth')
+  @UseGuards(DelayedAuthGuard)
+  guardedWrite(): { ok: boolean } {
+    this.writes++;
+    return { ok: true };
+  }
+
   @Get()
   read(): { ok: boolean } {
     return { ok: true };
@@ -49,6 +83,7 @@ class UpdateStatusController {
 @Module({
   imports: [MaintenanceModule],
   controllers: [BusinessController, UpdateStatusController],
+  providers: [DelayedAuthGuard],
 })
 class FixtureModule {}
 
@@ -65,6 +100,43 @@ describe('maintenance HTTP admission', () => {
 
   afterEach(async () => {
     await app.close();
+  });
+
+  it('prevents a handler from using a released lease after disconnect during auth', async () => {
+    const auth = app.get(DelayedAuthGuard);
+    const barrier = app.get(WriteBarrierService);
+    const intercept = jest.spyOn(app.get(MaintenanceInterceptor), 'intercept');
+    const address = app.getHttpServer().address() as { port: number };
+    const client = http.get({ host: '127.0.0.1', port: address.port,
+      path: '/business/delayed-auth' });
+    client.on('error', () => undefined);
+    await auth.entered.promise;
+    expect(barrier.activeLeaseCount).toBe(1);
+    client.destroy();
+    await auth.closed.promise;
+    barrier.enterMaintenance({ attemptId: 'attempt-01', fence: 1,
+      installRoot: 'C:\\fixture', backupId: 'backup-01', targetVersion: '0.2.5' });
+    await barrier.waitForZero(Date.now() + 1000);
+    auth.resume.resolve();
+    // Let Nest finish the resumed guard and invoke its interceptor.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(intercept).toHaveBeenCalledTimes(1);
+    await expect(intercept.mock.results[0].value).rejects.toThrow();
+    expect(app.get(BusinessController).writes).toBe(0);
+    expect(barrier.activeLeaseCount).toBe(0);
+  });
+
+  it('releases admission when a delayed authentication guard rejects', async () => {
+    const auth = app.get(DelayedAuthGuard);
+    auth.accepted = false;
+    const pending = request(app.getHttpServer()).get('/business/delayed-auth')
+      .then((response) => response);
+    await auth.entered.promise;
+    expect(app.get(WriteBarrierService).activeLeaseCount).toBe(1);
+    auth.resume.resolve();
+    expect((await pending).status).toBe(403);
+    expect(app.get(BusinessController).writes).toBe(0);
+    expect(app.get(WriteBarrierService).activeLeaseCount).toBe(0);
   });
 
   it('rejects business routes with a stable maintenance response', async () => {

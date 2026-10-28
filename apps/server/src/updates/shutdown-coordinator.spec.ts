@@ -1,7 +1,9 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { AttemptJournal } from '@filestation/updater';
+import { DataSource } from 'typeorm';
+import { DatabaseSnapshotService } from './database-snapshot.service';
+import { AttemptJournal, NodeDurableFileSystem } from '@filestation/updater';
 import { WriteBarrierService } from '../maintenance/write-barrier.service';
 import { WriteFreezeService } from '../maintenance/write-freeze.service';
 import {
@@ -141,6 +143,34 @@ describe('ShutdownCoordinator', () => {
       false,
     );
     expect(completed.records.at(-1)?.kind).toBe('completion');
+  });
+
+  it('never publishes SNAPSHOT_READY when the real snapshot file flush fails', async () => {
+    const databasePath = path.join(root, 'source.sqlite');
+    const dataSource = new DataSource({ type: 'sqlite', database: databasePath });
+    await dataSource.initialize();
+    await dataSource.query('CREATE TABLE sample (value TEXT)');
+    const durable = new NodeDurableFileSystem();
+    jest.spyOn(durable, 'syncFile').mockRejectedValue(new Error('snapshot flush failed'));
+    const spawner = { startWaiting: jest.fn(async () => undefined) };
+    const closeApplication = jest.fn(async () => undefined);
+    const exit = jest.fn() as unknown as (code: number) => never;
+    const coordinator = new ShutdownCoordinator({ journalRoot: root, barrier,
+      snapshot: new DatabaseSnapshotService(dataSource, { get: () => databasePath } as any,
+        barrier, freeze, durable), spawner, channel: { close: async () => undefined },
+      closeApplication, exit });
+    try {
+      await expect(coordinator.handoff(attempt())).rejects.toThrow('snapshot flush failed');
+      const state = await journal.readSnapshot();
+      expect(state.phase).toBe('MAINTENANCE');
+      expect(state.records.some((record) => record.phase === 'SNAPSHOT_READY')).toBe(false);
+      expect(freeze.isFrozen).toBe(false);
+      expect(spawner.startWaiting).not.toHaveBeenCalled();
+      expect(closeApplication).not.toHaveBeenCalled();
+      expect(exit).not.toHaveBeenCalled();
+    } finally {
+      await dataSource.destroy();
+    }
   });
 
   it('never writes HANDOFF_READY or exits when app.close fails', async () => {

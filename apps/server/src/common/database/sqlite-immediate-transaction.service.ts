@@ -65,10 +65,9 @@ export class SqliteImmediateTransactionService {
     const previous = this.transactionTail;
     let release!: () => void;
     this.transactionTail = new Promise<void>((resolve) => { release = resolve; });
-    await previous;
-    this.writeFreeze?.assertWritable();
-
     try {
+      await previous;
+      this.writeFreeze?.assertWritable();
       return await this.runWithExclusiveConnection(work);
     } finally {
       release();
@@ -85,10 +84,10 @@ export class SqliteImmediateTransactionService {
     }
 
     const database = await this.open(databasePath);
-    this.writeFreeze?.assertWritable();
     const connection = new PromiseSqliteConnection(database);
     let transactionStarted = false;
     try {
+      this.writeFreeze?.assertWritable();
       database.configure('busyTimeout', 5000);
       await connection.run('PRAGMA foreign_keys = ON');
       this.writeFreeze?.assertWritable();

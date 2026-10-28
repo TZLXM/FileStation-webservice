@@ -7,6 +7,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { NodeDurableFileSystem } from '@filestation/updater';
 import { DataSource } from 'typeorm';
 import sqlite3 = require('sqlite3');
 import { SystemMeta } from '../auth/entities/system-meta.entity';
@@ -94,6 +95,64 @@ describe('DatabaseSnapshotService', () => {
   afterEach(async () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
     await rm(root, { recursive: true, force: true });
+  });
+
+  it('closes the verifier, syncs the snapshot and parent before returning a receipt', async () => {
+    const durable = new NodeDurableFileSystem();
+    const events: string[] = [];
+    const originalClose = sqlite3.Database.prototype.close;
+    const closeSpy = jest.spyOn(sqlite3.Database.prototype, 'close').mockImplementation(function (this: sqlite3.Database, callback?: (error: Error | null) => void) {
+      return originalClose.call(this, (error: Error | null) => {
+        events.push('verifier-closed');
+        callback?.(error);
+      });
+    });
+    const originalSync = durable.syncFile.bind(durable);
+    jest.spyOn(durable, 'syncFile').mockImplementation(async (filename) => {
+      expect(events).toEqual(['verifier-closed']);
+      await originalSync(filename);
+      events.push('file-synced');
+    });
+    const originalDirectorySync = durable.fsyncDirectory.bind(durable);
+    jest.spyOn(durable, 'fsyncDirectory').mockImplementation(async (directory) => {
+      await originalDirectorySync(directory);
+      if (events.includes('file-synced')) {
+        expect(directory).toBe(path.join(root, 'backups', attempt().backupId));
+        events.push('parent-synced');
+      }
+    });
+    const snapshot = new DatabaseSnapshotService(dataSource,
+      { get: () => databasePath } as any, barrier, freeze, durable);
+    barrier.enterMaintenance(attempt());
+    try {
+      await snapshot.createVerifiedSnapshot(attempt());
+      events.push('receipt');
+      expect(events).toEqual(['verifier-closed', 'file-synced', 'parent-synced', 'receipt']);
+    } finally {
+      closeSpy.mockRestore();
+    }
+  });
+
+  it.each(['file', 'parent'])('does not return a receipt when %s flush fails', async (failure) => {
+    const durable = new NodeDurableFileSystem();
+    let fileSynced = false;
+    const sync = durable.syncFile.bind(durable);
+    jest.spyOn(durable, 'syncFile').mockImplementation(async (filename) => {
+      if (failure === 'file') throw new Error('injected snapshot flush failure');
+      await sync(filename);
+      fileSynced = true;
+    });
+    const syncDirectory = durable.fsyncDirectory.bind(durable);
+    jest.spyOn(durable, 'fsyncDirectory').mockImplementation(async (directory) => {
+      if (fileSynced) throw new Error('injected snapshot flush failure');
+      await syncDirectory(directory);
+    });
+    const snapshot = new DatabaseSnapshotService(dataSource,
+      { get: () => databasePath } as any, barrier, freeze, durable);
+    barrier.enterMaintenance(attempt());
+    await expect(snapshot.createVerifiedSnapshot(attempt())).rejects.toThrow('injected snapshot flush failure');
+    await expect(stat(path.join(root, 'backups', attempt().backupId, 'update-snapshot.sqlite')))
+      .rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('drains leases and captures a committed WAL row in a verified protected snapshot', async () => {

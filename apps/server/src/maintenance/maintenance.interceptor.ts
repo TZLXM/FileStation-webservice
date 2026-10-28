@@ -43,6 +43,14 @@ export class MaintenanceInterceptor implements NestInterceptor {
       .getRequest<MaintenanceLeaseRequest>();
     const existingState = request[MAINTENANCE_LEASE_REQUEST];
     if (existingState) {
+      // A route guard may finish after the transport closed and released admission.
+      // Such a request must never continue into business code with a stale lease.
+      if (existingState.released || existingState.transportDone) {
+        throw new ServiceUnavailableException({
+          code: 'UPDATE_MAINTENANCE',
+          message: 'Request disconnected before handler admission',
+        });
+      }
       existingState.handlerStarted = true;
       return this.runInsideLease(existingState.lease, next).pipe(
         finalize(() => {

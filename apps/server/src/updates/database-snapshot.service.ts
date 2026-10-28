@@ -175,7 +175,6 @@ export class DatabaseSnapshotService {
       }
     }
     await this.durable.ensurePrivateDirectory(destinationDirectory);
-    let snapshotConnection: sqlite3.Database | undefined;
     try {
       const [sourceIntegrity, sourceForeignKeys] = await Promise.all([
         this.dataSource.query(
@@ -190,22 +189,29 @@ export class DatabaseSnapshotService {
       await this.dataSource.query('VACUUM INTO ?', [output]);
       await this.durable.protect(output, false);
 
-      snapshotConnection = await openReadonly(output);
-      const [snapshotIntegrity, snapshotForeignKeys] = await Promise.all([
-        all<{ integrity_check: string }>(
-          snapshotConnection,
-          'PRAGMA integrity_check',
-        ),
-        all<Record<string, unknown>>(
-          snapshotConnection,
-          'PRAGMA foreign_key_check',
-        ),
-      ]);
-      await verify(
-        'snapshot',
-        snapshotIntegrity,
-        snapshotForeignKeys,
-      );
+      const snapshotConnection = await openReadonly(output);
+      try {
+        const [snapshotIntegrity, snapshotForeignKeys] = await Promise.all([
+          all<{ integrity_check: string }>(
+            snapshotConnection,
+            'PRAGMA integrity_check',
+          ),
+          all<Record<string, unknown>>(
+            snapshotConnection,
+            'PRAGMA foreign_key_check',
+          ),
+        ]);
+        await verify(
+          'snapshot',
+          snapshotIntegrity,
+          snapshotForeignKeys,
+        );
+      } finally {
+        // Release the independent verifier before Windows opens the file for flush.
+        await close(snapshotConnection);
+      }
+      await this.durable.syncFile(output);
+      await this.durable.fsyncDirectory(destinationDirectory);
       const info = await fs.stat(output);
       return {
         attemptId: attempt.attemptId,
@@ -221,8 +227,6 @@ export class DatabaseSnapshotService {
     } catch (error) {
       await this.durable.unlink(output).catch(() => {});
       throw error;
-    } finally {
-      if (snapshotConnection) await close(snapshotConnection).catch(() => {});
     }
   }
 
