@@ -9,7 +9,6 @@ import { detectStartupMode } from './bootstrap/startup-mode';
 import {
   ParsedStartupExecution,
   parseStartupExecution,
-  RefusingTrustedStartupAccess,
   TrustedStartupAccess,
   UpdateStartupIntent,
 } from './maintenance/startup-authority';
@@ -129,6 +128,9 @@ async function bootstrapNormal() {
   const { setupFullApplication } = await import(
     './common/http/application-setup'
   );
+  const { ApplicationShutdownService } = await import(
+    './updates/application-shutdown.service'
+  );
   const logger = new Logger('Bootstrap');
 
   // ========== 阶段 0：端口预检（防 EADDRINUSE 时 init token 未激活的混淆） ==========
@@ -153,6 +155,7 @@ async function bootstrapNormal() {
 
   // ========== 阶段 1：创建应用（migrationsRun 在此触发） ==========
   const app = await NestFactory.create(AppModule, { bodyParser: false });
+  app.get(ApplicationShutdownService).attach(app);
   app.enableShutdownHooks();
   const configService = app.get(ConfigService);
 
@@ -160,6 +163,14 @@ async function bootstrapNormal() {
 
   // ========== 阶段 3：app.init() 触发数据库初始化 ==========
   await app.init();
+  if (process.env.FILESTATION_INSTALL_ROOT) {
+    const { UpdateAuditReconciler } = await import(
+      './updates/update-audit-reconciler'
+    );
+    await app
+      .get(UpdateAuditReconciler)
+      .reconcile(process.env.FILESTATION_INSTALL_ROOT);
+  }
   await app.get(StorageService).activate();
   await app.get(FileLifecycleService).activate();
 
@@ -226,6 +237,8 @@ async function bootstrapUpdate(
       access,
       intent,
       startupAuthorized: true,
+      host: '127.0.0.1',
+      port: Number(process.env.FILESTATION_PORT ?? 0),
     });
     const address = handle.app.getHttpServer().address();
     const port =
@@ -263,13 +276,19 @@ async function bootstrapUpdate(
 }
 
 export async function bootstrap(
-  startupAccess: TrustedStartupAccess = new RefusingTrustedStartupAccess(),
+  startupAccess?: TrustedStartupAccess,
 ) {
   const execution = parseStartupExecution(process.argv.slice(2));
-  if (execution.mode !== 'normal') {
-    return bootstrapUpdate(execution, startupAccess);
+  if (execution.mode === 'normal') {
+    return bootstrapNormal();
   }
-  return bootstrapNormal();
+  const { InheritedTrustedStartupAccess } = await import(
+    './maintenance/inherited-startup-access'
+  );
+  const access =
+    startupAccess ??
+    (await InheritedTrustedStartupAccess.fromInherited(process.stdin));
+  return bootstrapUpdate(execution, access);
 }
 
 if (require.main === module) {

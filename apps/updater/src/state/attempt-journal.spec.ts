@@ -18,6 +18,50 @@ import {
 } from "../test-support";
 
 describe("AttemptJournal", () => {
+  it("binds handoff identity metadata without advancing the fence", async () => {
+    const temp = await createTempRoot();
+    try {
+      const journal = await makeJournal(temp.path);
+      const initial = context();
+      delete initial.owner.handoffIdentityHash;
+      await journal.beginAttempt(initial);
+      const intent = await journal.appendIntent({
+        attemptId: "attempt-01",
+        fence: 1,
+        action: "bind-handoff-identity",
+        phase: "MAINTENANCE",
+        payload: { identityHash: "b".repeat(64) },
+      });
+      const bound = {
+        ...initial,
+        phase: "MAINTENANCE" as const,
+        owner: {
+          ...initial.owner,
+          heartbeatAt: "2026-10-27T01:02:04.004Z",
+          handoffIdentityHash: "b".repeat(64),
+        },
+      };
+      await journal.appendCompletion({
+        attemptId: "attempt-01",
+        fence: 1,
+        intentId: intent.id,
+        phase: "MAINTENANCE",
+        nextContext: bound,
+      });
+
+      expect(await journal.readSnapshot()).toMatchObject({
+        fence: 1,
+        phase: "MAINTENANCE",
+        pending: null,
+        owner: {
+          handoffIdentityHash: "b".repeat(64),
+        },
+      });
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
   it("rebuilds authoritative state and a secret-free status projection", async () => {
     const temp = await createTempRoot();
     try {

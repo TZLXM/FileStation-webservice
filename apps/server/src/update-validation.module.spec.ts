@@ -74,6 +74,13 @@ describe('UpdateValidationModule', () => {
         heartbeatAt: new Date().toISOString(),
       },
     });
+    await journal.appendIntent({
+      attemptId: intent.attempt.attemptId,
+      fence: intent.attempt.fence,
+      action: 'validate-release',
+      phase: 'MIGRATING',
+      payload: { targetVersion: intent.attempt.targetVersion },
+    });
 
     const handle = await startValidationApplication({ access, intent });
     app = handle.app;
@@ -104,9 +111,7 @@ describe('UpdateValidationModule', () => {
       .expect(401);
     const health = await request(app.getHttpServer())
       .get('/api/v1/internal/update/health')
-      .set('X-FileStation-Attempt', intent.attempt.attemptId)
-      .set('X-FileStation-Fence', String(intent.attempt.fence))
-      .set('X-FileStation-Capability', 'fixture-capability')
+      .set('X-FileStation-Update-Capability', 'fixture-capability')
       .expect(200);
 
     expect(health.body).toMatchObject({

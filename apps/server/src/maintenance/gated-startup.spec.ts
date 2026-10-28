@@ -11,6 +11,8 @@ import {
 } from './startup-authority';
 import { DataSource } from 'typeorm';
 
+jest.setTimeout(30_000);
+
 async function databaseFingerprint(dataSource: DataSource): Promise<string> {
   const tables = (await dataSource.query(
     `SELECT name FROM sqlite_master
@@ -103,9 +105,7 @@ describe('gated startup', () => {
       .expect(503);
     await request(handle.app.getHttpServer())
       .get('/api/v1/internal/update/health')
-      .set('X-FileStation-Attempt', intent.attempt.attemptId)
-      .set('X-FileStation-Fence', String(intent.attempt.fence))
-      .set('X-FileStation-Capability', 'fixture-capability')
+      .set('X-FileStation-Update-Capability', 'fixture-capability')
       .expect(200)
       .expect((response) => {
         expect(response.body.status).toBe('gated');

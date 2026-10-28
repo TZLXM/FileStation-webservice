@@ -19,6 +19,12 @@ import {
   PlatformBootIdentityProvider,
   ProcessIdentityProvider,
 } from "./state/boot-identity";
+import {
+  encodeInheritedCapability,
+  readInheritedCapability,
+} from "./update/capability";
+import { createManagedUpdateOrchestrator } from "./update/orchestrator";
+import { RetentionService } from "./update/retention";
 
 const execFileAsync = promisify(execFile);
 const MINIMUM_NODE = [20, 17, 0] as const;
@@ -35,6 +41,8 @@ Usage:
   filestation-updater launch --root <managed-root> [--dry-run]
   filestation-updater status --root <managed-root>
   filestation-updater recover --root <managed-root>
+  filestation-updater continue --attempt <id> --root <managed-root>
+  filestation-updater cleanup --bootstrap-backup <exact-id> --root <managed-root>
 
 Manual operation:
   1. Stop and drain the old FileStation process. Bootstrap never stops a process.
@@ -151,7 +159,16 @@ export async function main(
     return 0;
   }
   const command = argv[0];
-  if (!["bootstrap", "launch", "status", "recover"].includes(command)) {
+  if (
+    ![
+      "bootstrap",
+      "launch",
+      "status",
+      "recover",
+      "continue",
+      "cleanup",
+    ].includes(command)
+  ) {
     throw new Error(`unsupported command ${command}`);
   }
   const parsed = parseArgs({
@@ -173,6 +190,8 @@ export async function main(
       "service-port": { type: "string" },
       "release-version": { type: "string" },
       "dry-run": { type: "boolean" },
+      attempt: { type: "string" },
+      "bootstrap-backup": { type: "string" },
     },
   });
   const values = parsed.values as Record<
@@ -236,6 +255,45 @@ export async function main(
   const installRoot = path.resolve(
     typeof values.root === "string" ? values.root : process.cwd(),
   );
+  if (command === "continue") {
+    const attemptId = required(values, "attempt");
+    const authority = await readInheritedCapability(process.stdin);
+    const encoded = encodeInheritedCapability(authority);
+    const handoffIdentity = encoded.toString("utf8");
+    encoded.fill(0);
+    const configuredPort =
+      (await loadInstallEnvironment(installRoot)).values.FILESTATION_PORT;
+    const servicePort =
+      configuredPort && /^\d+$/.test(configuredPort)
+        ? Number(configuredPort)
+        : 8080;
+    if (!Number.isSafeInteger(servicePort) || servicePort < 1 || servicePort > 65535) {
+      throw new Error("FILESTATION_PORT must be a valid service port");
+    }
+    const orchestrator = createManagedUpdateOrchestrator({
+      handoffIdentity,
+      identity: dependencies.identityProvider,
+    });
+    const result = await orchestrator.run({
+      attemptId,
+      installRoot,
+      handoffIdentity,
+      servicePort,
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return 0;
+  }
+  if (command === "cleanup") {
+    const backupId = required(values, "bootstrap-backup");
+    const removed =
+      await new RetentionService(installRoot).cleanupBootstrapRecoveryAssets(
+        backupId,
+      );
+    process.stdout.write(
+      `${JSON.stringify({ state: "cleaned", backupId, removed }, null, 2)}\n`,
+    );
+    return 0;
+  }
   if (command === "status") {
     const result = await inspectManagedUpdate(installRoot);
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

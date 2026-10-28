@@ -648,13 +648,27 @@ export class AttemptJournal {
         validateContext(input.nextContext);
         if (input.nextContext.attemptId !== snapshot.attemptId)
           throw new JournalFenceError("owner replacement changes the attempt id");
-        const allowed =
+        const ownerReplacement =
           snapshot.pending.action === "replace-owner" &&
           input.nextContext.fence === input.fence + 1 &&
           input.nextContext.phase === snapshot.phase && input.phase === snapshot.phase;
+        const handoffMetadata =
+          snapshot.pending.action === "bind-handoff-identity" &&
+          input.nextContext.fence === input.fence &&
+          input.nextContext.phase === input.phase &&
+          input.nextContext.currentVersion === snapshot.currentVersion &&
+          input.nextContext.targetVersion === snapshot.targetVersion &&
+          input.nextContext.previousVersion === snapshot.previousVersion &&
+          input.nextContext.backupId === snapshot.backupId &&
+          input.nextContext.owner.bootIdentity === snapshot.owner?.bootIdentity &&
+          input.nextContext.owner.pid === snapshot.owner?.pid &&
+          input.nextContext.owner.processCreatedAt ===
+            snapshot.owner?.processCreatedAt &&
+          !!input.nextContext.owner.handoffIdentityHash;
+        const allowed = ownerReplacement || handoffMetadata;
         if (!allowed)
           throw new JournalFenceError(
-            "context replacement is only valid for owner fencing",
+            "context replacement is not authorized for this transition",
           );
       } else {
         context.phase = input.phase;

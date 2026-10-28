@@ -4,9 +4,10 @@ import configuration from './config/configuration';
 import { DatabaseModule } from './database/database.module';
 import {
   InternalUpdateAccessGuard,
-  InternalUpdateHealthController,
   InternalUpdateHealthService,
 } from './maintenance/internal-update-health.controller';
+import { InternalUpdateController } from './updates/internal-update.controller';
+import { PromoteReadyService } from './updates/promote-ready.service';
 import {
   TRUSTED_STARTUP_ACCESS,
   TrustedStartupAccess,
@@ -31,7 +32,7 @@ export class UpdateValidationModule {
         }),
         DatabaseModule,
       ],
-      controllers: [InternalUpdateHealthController],
+      controllers: [InternalUpdateController],
       providers: [
         {
           provide: TRUSTED_STARTUP_ACCESS,
@@ -43,6 +44,7 @@ export class UpdateValidationModule {
         },
         InternalUpdateAccessGuard,
         InternalUpdateHealthService,
+        PromoteReadyService,
       ],
     };
   }

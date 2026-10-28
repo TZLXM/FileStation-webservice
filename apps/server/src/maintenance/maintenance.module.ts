@@ -7,7 +7,7 @@ import { WriteFreezeService } from './write-freeze.service';
 import {
   HANDOFF_SPAWNER,
 } from '../updates/handoff-spawner';
-import { RefusingHandoffSpawner } from '../updates/handoff-spawner';
+import { AnonymousPipeHandoffSpawner } from '../updates/handoff-spawner';
 
 @Global()
 @Module({
@@ -16,10 +16,13 @@ import { RefusingHandoffSpawner } from '../updates/handoff-spawner';
     WriteBarrierService,
     MaintenanceAdmissionGuard,
     MaintenanceInterceptor,
-    RefusingHandoffSpawner,
+    {
+      provide: AnonymousPipeHandoffSpawner,
+      useFactory: () => new AnonymousPipeHandoffSpawner(),
+    },
     {
       provide: HANDOFF_SPAWNER,
-      useExisting: RefusingHandoffSpawner,
+      useExisting: AnonymousPipeHandoffSpawner,
     },
     {
       provide: APP_GUARD,

@@ -8,3 +8,7 @@ export * from "./platform/recovery-guard";
 export * from "./bootstrap/path-plan";
 export * from "./bootstrap/bootstrap-command";
 export * from "./launcher";
+export * from "./update/capability";
+export * from "./update/orchestrator";
+export * from "./update/retention";
+export * from "./update/rollback";

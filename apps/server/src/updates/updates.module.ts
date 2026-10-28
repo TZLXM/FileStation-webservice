@@ -13,14 +13,17 @@ import { UpdateStatusController } from '../maintenance/update-status.controller'
 import { UpdateStatusService } from '../maintenance/update-status.service';
 import { SecurityModule } from '../security/security.module';
 import {
-  RefusingUpdateInstallExecutor,
+  HandoffUpdateInstallExecutor,
   UpdateInstallCoordinator,
 } from './update-install-coordinator';
+import { ApplicationShutdownService } from './application-shutdown.service';
 import { UpdateCapabilityService } from './update-capability.service';
 import { UpdateCheckService } from './update-check.service';
 import { UpdatePrepareService } from './update-prepare.service';
 import { UpdateReauthService } from './update-reauth.service';
 import { UpdateSpacePreflightService } from './update-space-preflight.service';
+import { UpdateAuditReconciler } from './update-audit-reconciler';
+import { DatabaseSnapshotService } from './database-snapshot.service';
 import {
   UPDATE_FETCH,
   UPDATE_INSTALL_EXECUTOR,
@@ -57,11 +60,14 @@ function trustedKey(): KeyObject | null {
     UpdateSpacePreflightService,
     UpdatePrepareService,
     UpdateReauthService,
-    RefusingUpdateInstallExecutor,
+    UpdateAuditReconciler,
+    ApplicationShutdownService,
+    DatabaseSnapshotService,
+    HandoffUpdateInstallExecutor,
     UpdateInstallCoordinator,
     {
       provide: UPDATE_INSTALL_EXECUTOR,
-      useExisting: RefusingUpdateInstallExecutor,
+      useExisting: HandoffUpdateInstallExecutor,
     },
     {
       provide: UPDATE_FETCH,

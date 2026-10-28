@@ -193,13 +193,31 @@ managed metadata file, changed canonical target (including an ancestor junction)
 active/pending update, torn journal tail or unresolved staging marker also fails
 closed. A completed update must agree with the journal's COMMITTED target version
 and current release. `status` and `recover` inspect the journal without creating
-or protecting directories; uncertain state requires Task 9 recovery.
+or protecting directories.
 
 Use `--dry-run` on `bootstrap` or `launch` to inspect validation without
 creating directories or opening the database. `filestation-updater status
---root <root>` reads the existing journal contract. Active update
-recovery returns a fail-closed instruction until the authenticated Task 9
-orchestrator is installed; do not edit or truncate journal files by hand.
+--root <root>` reads the existing journal contract. The updater process starts
+automatically as `continue --attempt <id>` with its private capability delivered
+on inherited stdin; never place that capability in argv, environment variables,
+URLs, logs or status files. Ambiguous active states, including states requiring
+an operator proof that is unavailable to this CLI, still fail closed. Do not edit
+or truncate journal files by hand.
+
+After a committed update has passed the independent restart check, remove the
+bootstrap-only recovery copies for one exact identifier with:
+
+```powershell
+node .\updater\dist\cli.js cleanup --bootstrap-backup <exact-id> --root .
+```
+
+```bash
+node updater/dist/cli.js cleanup --bootstrap-backup <exact-id> --root .
+```
+
+This removes only that backup's `env` and `legacy-source` recovery trees. It
+keeps the verified database snapshot and every current/previous/active rollback
+asset. Startup and retention never remove those bootstrap trees automatically.
 
 Each bootstrap creates `backups/<id>/MANIFEST.json`, a verified SQLite snapshot,
 the recoverable `legacy-source` tree, and a separate `env/legacy.env` copy.
@@ -228,6 +246,9 @@ that an interrupted publication completed.
 
 Nginx configuration is intentionally untouched. Review `proxy_pass` and the
 manual root or `/fs/` configuration, run `nginx -t`, and reload Nginx yourself.
+The supplied configuration explicitly denies the internal health/promote routes
+at both the root and `/fs/`; this is defense in depth because the inherited
+capability remains the authority even for loopback requests.
 
 Source development commands establish emitted runtime dependencies explicitly:
 `npm run dev:prepare` builds shared → update-core → updater, `npm run dev` runs

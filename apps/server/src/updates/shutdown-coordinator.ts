@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { AttemptJournal } from '@filestation/updater';
 import {
   MaintenanceAttempt,
@@ -19,13 +20,16 @@ export interface VerifiedSnapshotPort {
 
 export interface ShutdownCoordinatorOptions {
   journalRoot: string;
+  journal: AttemptJournal;
   barrier: WriteBarrierService;
   snapshot: VerifiedSnapshotPort;
   spawner: HandoffSpawner;
   channel: HandoffChannel;
+  handoffCapability: Buffer;
   closeApplication: () => Promise<void>;
   exit?: (code: number) => never;
   drainDeadline?: () => number;
+  now?: () => Date;
 }
 
 function safeRelative(parent: string, candidate: string): boolean {
@@ -46,11 +50,13 @@ function safeRelative(parent: string, candidate: string): boolean {
 export class ShutdownCoordinator {
   private readonly exit: (code: number) => never;
   private readonly drainDeadline: () => number;
+  private readonly now: () => Date;
 
   constructor(private readonly options: ShutdownCoordinatorOptions) {
     this.exit = options.exit ?? ((code: number) => process.exit(code));
     this.drainDeadline =
       options.drainDeadline ?? (() => Date.now() + 60_000);
+    this.now = options.now ?? (() => new Date());
   }
 
   async handoff(attempt: MaintenanceAttempt): Promise<never> {
@@ -62,13 +68,27 @@ export class ShutdownCoordinator {
     ) {
       throw new Error('shutdown attempt or fence does not own the write barrier');
     }
+    if (
+      !Buffer.isBuffer(this.options.handoffCapability) ||
+      this.options.handoffCapability.length === 0 ||
+      this.options.handoffCapability.length > 4096
+    ) {
+      throw new Error('shutdown requires one bounded inherited capability');
+    }
+    const identityHash = createHash('sha256')
+      .update(this.options.handoffCapability)
+      .digest('hex');
+    await this.bindHandoffIdentity(
+      attempt,
+      identityHash,
+    );
     await this.options.barrier.waitForZero(this.drainDeadline());
     const metadata =
       await this.options.snapshot.createVerifiedSnapshot(attempt);
     this.validateSnapshot(attempt, metadata);
 
     await this.options.snapshot.freezeSourceDatabase(attempt);
-    const journal = await AttemptJournal.open(this.options.journalRoot);
+    const journal = this.options.journal;
     const snapshotIntent = await journal.appendIntent({
       attemptId: attempt.attemptId,
       fence: attempt.fence,
@@ -93,6 +113,7 @@ export class ShutdownCoordinator {
     await this.options.spawner.startWaiting(
       attempt,
       this.options.channel,
+      this.options.handoffCapability,
     );
     const closeIntent = await journal.appendIntent({
       attemptId: attempt.attemptId,
@@ -108,6 +129,47 @@ export class ShutdownCoordinator {
       phase: 'HANDOFF_READY',
     });
     return this.exit(0);
+  }
+
+  private async bindHandoffIdentity(
+    attempt: MaintenanceAttempt,
+    identityHash: string,
+  ) {
+    const current = await this.options.journal.readSnapshot();
+    if (
+      current.attemptId !== attempt.attemptId ||
+      current.fence !== attempt.fence ||
+      current.pending ||
+      current.phase !== 'MAINTENANCE' ||
+      !current.records.length
+    ) {
+      throw new Error('handoff identity cannot bind to the current journal');
+    }
+    const previous = current.records.at(-1)!.context;
+    const nextContext = {
+      ...structuredClone(previous),
+      phase: 'MAINTENANCE' as const,
+      owner: {
+        ...structuredClone(previous.owner),
+        heartbeatAt: this.now().toISOString(),
+        handoffIdentityHash: identityHash,
+      },
+    };
+    const intent = await this.options.journal.appendIntent({
+      attemptId: attempt.attemptId,
+      fence: attempt.fence,
+      action: 'bind-handoff-identity',
+      phase: 'MAINTENANCE',
+      payload: { identityHash },
+    });
+    await this.options.journal.appendCompletion({
+      attemptId: attempt.attemptId,
+      fence: attempt.fence,
+      intentId: intent.id,
+      phase: 'MAINTENANCE',
+      nextContext,
+    });
+    return nextContext;
   }
 
   private validateSnapshot(

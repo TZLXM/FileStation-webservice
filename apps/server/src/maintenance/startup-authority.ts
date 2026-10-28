@@ -6,6 +6,7 @@ export const TRUSTED_STARTUP_ACCESS = Symbol('TRUSTED_STARTUP_ACCESS');
 export const UPDATE_STARTUP_INTENT = Symbol('UPDATE_STARTUP_INTENT');
 
 export type UpdateStartupMode = 'validate' | 'gated';
+export type UpdateProtocolPurpose = 'health' | 'promote';
 
 export interface UpdateStartupIntent {
   mode: UpdateStartupMode;
@@ -20,6 +21,9 @@ export interface UpdateProtocolCredentials {
   attemptId: string;
   fence: number;
   capability?: string;
+  purpose: UpdateProtocolPurpose;
+  method: 'GET' | 'POST';
+  stage: UpdateStartupMode;
 }
 
 export interface TrustedStartupAccess {
@@ -30,6 +34,8 @@ export interface TrustedStartupAccess {
     intent: UpdateStartupIntent,
     credentials: UpdateProtocolCredentials,
   ): Promise<void>;
+  /** Creates a deterministic receipt bound to the inherited capability key. */
+  signReceipt?(payload: unknown): string;
 }
 
 export class TrustedUpdateStartupUnavailableError extends Error {
@@ -53,6 +59,10 @@ export class RefusingTrustedStartupAccess implements TrustedStartupAccess {
     _intent: UpdateStartupIntent,
     _credentials: UpdateProtocolCredentials,
   ): Promise<void> {
+    throw new TrustedUpdateStartupUnavailableError();
+  }
+
+  signReceipt(_payload: unknown): string {
     throw new TrustedUpdateStartupUnavailableError();
   }
 }

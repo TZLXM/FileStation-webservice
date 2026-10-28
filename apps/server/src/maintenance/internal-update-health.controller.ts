@@ -1,28 +1,43 @@
 import {
   CanActivate,
-  Controller,
   ExecutionContext,
-  Get,
   Inject,
   Injectable,
   UnauthorizedException,
-  UseGuards,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import path from 'node:path';
 import { DataSource } from 'typeorm';
 import { AttemptJournal } from '@filestation/updater';
 import packageMetadata from '../../package.json';
-import { MaintenanceAllowed } from './maintenance-allowed.decorator';
 import {
   TRUSTED_STARTUP_ACCESS,
   TrustedStartupAccess,
   UPDATE_STARTUP_INTENT,
   UpdateStartupIntent,
+  UpdateProtocolPurpose,
 } from './startup-authority';
 
 interface UpdateProtocolRequest {
   headers: Record<string, string | string[] | undefined>;
+  method: string;
+}
+const INTERNAL_UPDATE_PURPOSE = Symbol('INTERNAL_UPDATE_PURPOSE');
+
+export function InternalUpdatePurpose(
+  purpose: UpdateProtocolPurpose,
+): MethodDecorator {
+  return (
+    _target,
+    _propertyKey,
+    descriptor: PropertyDescriptor,
+  ) => {
+    Reflect.defineMetadata(
+      INTERNAL_UPDATE_PURPOSE,
+      purpose,
+      descriptor.value,
+    );
+  };
 }
 
 @Injectable()
@@ -36,29 +51,30 @@ export class InternalUpdateAccessGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<UpdateProtocolRequest>();
-    const attemptId = request.headers['x-filestation-attempt'];
-    const fenceValue = request.headers['x-filestation-fence'];
-    const capability = request.headers['x-filestation-capability'];
+    const capability =
+      request.headers['x-filestation-update-capability'];
+    const purpose = Reflect.getMetadata(
+      INTERNAL_UPDATE_PURPOSE,
+      context.getHandler(),
+    ) as UpdateProtocolPurpose | undefined;
+    const method = request.method.toUpperCase();
     if (
-      typeof attemptId !== 'string' ||
-      typeof fenceValue !== 'string' ||
-      (capability !== undefined && typeof capability !== 'string')
-    ) {
-      throw new UnauthorizedException();
-    }
-    const fence = Number(fenceValue);
-    if (
-      attemptId !== this.intent.attempt.attemptId ||
-      fence !== this.intent.attempt.fence ||
-      !Number.isSafeInteger(fence)
+      typeof capability !== 'string' ||
+      capability.length === 0 ||
+      capability.length > 4096 ||
+      !purpose ||
+      (method !== 'GET' && method !== 'POST')
     ) {
       throw new UnauthorizedException();
     }
     try {
       await this.access.authorizeRequest(this.intent, {
-        attemptId,
-        fence,
-        capability: capability as string | undefined,
+        attemptId: this.intent.attempt.attemptId,
+        fence: this.intent.attempt.fence,
+        capability,
+        purpose,
+        method,
+        stage: this.intent.mode,
       });
       return true;
     } catch {
@@ -110,7 +126,11 @@ export class InternalUpdateHealthService {
     if (
       snapshot.attemptId !== this.intent.attempt.attemptId ||
       snapshot.fence !== this.intent.attempt.fence ||
-      snapshot.pending ||
+      (snapshot.pending !== null &&
+        !(
+          this.intent.mode === 'validate' &&
+          snapshot.pending.action === 'validate-release'
+        )) ||
       !snapshot.owner?.heartbeatAt ||
       Date.now() - Date.parse(snapshot.owner.heartbeatAt) > 5 * 60 * 1000
     ) {
@@ -151,17 +171,5 @@ export class InternalUpdateHealthService {
       },
       heartbeat_at: snapshot.owner.heartbeatAt,
     };
-  }
-}
-
-@Controller('internal/update')
-@UseGuards(InternalUpdateAccessGuard)
-export class InternalUpdateHealthController {
-  constructor(private readonly health: InternalUpdateHealthService) {}
-
-  @Get('health')
-  @MaintenanceAllowed()
-  check() {
-    return this.health.check();
   }
 }

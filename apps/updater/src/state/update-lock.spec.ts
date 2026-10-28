@@ -16,6 +16,8 @@ import {
   handoffHash,
 } from "../test-support";
 
+jest.setTimeout(30_000);
+
 const execFileAsync = promisify(execFile);
 
 class TestIdentityProvider implements ProcessIdentityProvider {

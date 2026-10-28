@@ -1,9 +1,10 @@
 import { DynamicModule, Module } from '@nestjs/common';
 import {
   InternalUpdateAccessGuard,
-  InternalUpdateHealthController,
   InternalUpdateHealthService,
 } from './internal-update-health.controller';
+import { InternalUpdateController } from '../updates/internal-update.controller';
+import { PromoteReadyService } from '../updates/promote-ready.service';
 import {
   TRUSTED_STARTUP_ACCESS,
   TrustedStartupAccess,
@@ -21,7 +22,7 @@ export class UpdateProtocolModule {
   static register(options: UpdateProtocolModuleOptions): DynamicModule {
     return {
       module: UpdateProtocolModule,
-      controllers: [InternalUpdateHealthController],
+      controllers: [InternalUpdateController],
       providers: [
         {
           provide: TRUSTED_STARTUP_ACCESS,
@@ -33,6 +34,7 @@ export class UpdateProtocolModule {
         },
         InternalUpdateAccessGuard,
         InternalUpdateHealthService,
+        PromoteReadyService,
       ],
     };
   }

@@ -65,6 +65,9 @@ describe('update startup authority', () => {
         attemptId: 'attempt-01',
         fence: 7,
         capability: undefined,
+        purpose: 'health',
+        method: 'GET',
+        stage: 'gated',
       }),
     ).rejects.toMatchObject({
       code: 'TRUSTED_UPDATE_STARTUP_UNAVAILABLE',

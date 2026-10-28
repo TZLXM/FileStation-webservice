@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DataSource } from 'typeorm';
@@ -74,11 +75,16 @@ describe('ShutdownCoordinator', () => {
       },
     };
     const spawner: HandoffSpawner = {
-      async startWaiting(_attempt, receivedChannel) {
+      async startWaiting(_attempt, receivedChannel, capability) {
         expect(receivedChannel).toBe(channel);
+        expect(capability).toEqual(handoffCapability);
         events.push('spawner-waiting');
       },
     };
+    const handoffCapability = Buffer.from(
+      '{"schemaVersion":1,"key":"fixture-private-key"}\n',
+    );
+    const openJournal = jest.spyOn(AttemptJournal, 'open');
     const snapshot = {
       createVerifiedSnapshot: jest.fn(async () => {
         events.push('snapshot');
@@ -106,10 +112,12 @@ describe('ShutdownCoordinator', () => {
     };
     const coordinator = new ShutdownCoordinator({
       journalRoot: root,
+      journal,
       barrier,
       snapshot,
       spawner,
       channel,
+      handoffCapability,
       closeApplication: async () => {
         events.push('app-close');
       },
@@ -135,6 +143,7 @@ describe('ShutdownCoordinator', () => {
     expect(events.indexOf('app-close')).toBeLessThan(
       events.indexOf('exit:0'),
     );
+    expect(openJournal).not.toHaveBeenCalled();
 
     const completed = await journal.readSnapshot();
     expect(completed.phase).toBe('HANDOFF_READY');
@@ -143,6 +152,16 @@ describe('ShutdownCoordinator', () => {
       false,
     );
     expect(completed.records.at(-1)?.kind).toBe('completion');
+    expect(completed.owner?.handoffIdentityHash).toBe(
+      createHash('sha256').update(handoffCapability).digest('hex'),
+    );
+    expect(
+      completed.records.some(
+        (record) =>
+          record.action === 'bind-handoff-identity' &&
+          record.kind === 'intent',
+      ),
+    ).toBe(true);
   });
 
   it('never publishes SNAPSHOT_READY when the real snapshot file flush fails', async () => {
@@ -156,8 +175,10 @@ describe('ShutdownCoordinator', () => {
     const closeApplication = jest.fn(async () => undefined);
     const exit = jest.fn() as unknown as (code: number) => never;
     const coordinator = new ShutdownCoordinator({ journalRoot: root, barrier,
+      journal,
       snapshot: new DatabaseSnapshotService(dataSource, { get: () => databasePath } as any,
         barrier, freeze, durable), spawner, channel: { close: async () => undefined },
+      handoffCapability: Buffer.from('bounded-handoff-capability'),
       closeApplication, exit });
     try {
       await expect(coordinator.handoff(attempt())).rejects.toThrow('snapshot flush failed');
@@ -180,6 +201,7 @@ describe('ShutdownCoordinator', () => {
     const exit = jest.fn() as unknown as (code: number) => never;
     const coordinator = new ShutdownCoordinator({
       journalRoot: root,
+      journal,
       barrier,
       snapshot: {
         createVerifiedSnapshot: async () => ({
@@ -202,6 +224,7 @@ describe('ShutdownCoordinator', () => {
       },
       spawner,
       channel: { close: async () => undefined },
+      handoffCapability: Buffer.from('bounded-handoff-capability'),
       closeApplication: async () => {
         throw new Error('partial close failed');
       },

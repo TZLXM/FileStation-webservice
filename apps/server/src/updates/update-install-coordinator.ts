@@ -12,7 +12,9 @@ import { Response } from 'express';
 import {
   AttemptJournal,
   AttemptJournalSnapshot,
+  UpdateCapabilityAuthority,
   acquireRecoveryGuard,
+  encodeInheritedCapability,
   RecoveryGuard,
   LockHandle,
   UpdateLock,
@@ -22,6 +24,10 @@ import { waitForResponseAndLeaseRelease } from '../maintenance/maintenance-admis
 import { WriteBarrierService } from '../maintenance/write-barrier.service';
 import { MaintenanceAttempt } from '../maintenance/write-freeze.service';
 import { UpdateCapabilityService } from './update-capability.service';
+import { ApplicationShutdownService } from './application-shutdown.service';
+import { DatabaseSnapshotService } from './database-snapshot.service';
+import { HANDOFF_SPAWNER, HandoffSpawner } from './handoff-spawner';
+import { ShutdownCoordinator } from './shutdown-coordinator';
 import {
   UPDATE_INSTALL_EXECUTOR,
   UPDATE_JOURNAL_IDENTITY,
@@ -57,6 +63,15 @@ export interface UpdateInstallExecutor {
   execute(context: UpdateInstallContext): Promise<void>;
 }
 
+interface HandoffExecution {
+  readonly ownership: Readonly<{
+    lock: LockHandle;
+    journal: AttemptJournal;
+    recoveryGuard: RecoveryGuard;
+  }>;
+  readonly receipt: PreparedUpdateReceipt;
+}
+
 export class UpdateInstallExecutorUnavailableError extends Error {
   readonly code = 'UPDATE_INSTALL_EXECUTOR_UNAVAILABLE';
 
@@ -76,6 +91,96 @@ export class RefusingUpdateInstallExecutor implements UpdateInstallExecutor {
 
   async execute(_context: UpdateInstallContext): Promise<void> {
     throw new UpdateInstallExecutorUnavailableError();
+  }
+}
+
+@Injectable()
+export class HandoffUpdateInstallExecutor
+  implements UpdateInstallExecutor
+{
+  constructor(
+    private readonly config: ConfigService,
+    private readonly capability: UpdateCapabilityService,
+    private readonly snapshot: DatabaseSnapshotService,
+    private readonly barrier: WriteBarrierService,
+    private readonly shutdown: ApplicationShutdownService,
+    @Inject(HANDOFF_SPAWNER)
+    private readonly spawner: HandoffSpawner,
+  ) {}
+
+  async assertAvailable(): Promise<void> {
+    const capability = await this.capability.inspect();
+    if (
+      capability.mode !== 'managed' ||
+      !capability.supported ||
+      !capability.install_root
+    ) {
+      throw new UpdateInstallExecutorUnavailableError();
+    }
+  }
+
+  async execute(context: UpdateInstallContext): Promise<void> {
+    if (
+      context.contract_version !== UPDATE_INSTALL_EXECUTOR_CONTRACT_VERSION ||
+      !context.attempt ||
+      !context.receipt ||
+      !context.ownership
+    ) {
+      throw new Error('Task 8 update executor contract v2 is required');
+    }
+    await context.ownership.recoveryGuard.assertActive();
+    await context.ownership.lock.assertActive();
+    await this.runHandoff(context.attempt, {
+      ownership: context.ownership,
+      receipt: context.receipt,
+    });
+  }
+
+  protected async runHandoff(
+    attempt: UpdateInstallContext['attempt'],
+    execution: HandoffExecution,
+  ): Promise<void> {
+    const databasePath = this.config.get<string>('app.dbPath');
+    if (!databasePath || !path.isAbsolute(databasePath)) {
+      throw new Error('update requires an absolute database path');
+    }
+    const intent = await execution.ownership.journal.appendIntent({
+      attemptId: attempt.attemptId,
+      fence: attempt.fence,
+      action: 'prepare-update',
+      phase: 'MAINTENANCE',
+      payload: {
+        stagingPath: execution.receipt.staging_path,
+        targetVersion: execution.receipt.version,
+        artifactSha256: execution.receipt.artifact_sha256,
+        manifestSha256: execution.receipt.manifest_sha256,
+        databasePath,
+      },
+    });
+    await execution.ownership.journal.appendCompletion({
+      attemptId: attempt.attemptId,
+      fence: attempt.fence,
+      intentId: intent.id,
+      phase: 'MAINTENANCE',
+    });
+    const authority = new UpdateCapabilityAuthority();
+    const inheritedCapability = encodeInheritedCapability(authority);
+    try {
+      const coordinator = new ShutdownCoordinator({
+        journalRoot: attempt.installRoot,
+        journal: execution.ownership.journal,
+        barrier: this.barrier,
+        snapshot: this.snapshot,
+        spawner: this.spawner,
+        channel: { close: async () => undefined },
+        handoffCapability: inheritedCapability,
+        closeApplication: () => this.shutdown.close(),
+      });
+      await coordinator.handoff(attempt);
+    } finally {
+      // Keep the capability only in memory until the OS pipe copy is complete.
+      inheritedCapability.fill(0);
+    }
   }
 }
 

@@ -135,6 +135,10 @@ export async function startGatedApplication(
   });
   const RootModule = createGatedRootModule(protocolModule, appModule);
   const app = await NestFactory.create(RootModule, { bodyParser: false });
+  const { ApplicationShutdownService } = await import(
+    '../updates/application-shutdown.service'
+  );
+  app.get(ApplicationShutdownService).attach(app);
   app.enableShutdownHooks();
   setupFullApplication(app, app.get(ConfigService));
 
@@ -165,6 +169,12 @@ export async function startGatedApplication(
         },
       );
       barrier.reopenAfterCommitted(options.intent.attempt);
+      const { UpdateAuditReconciler } = await import(
+        '../updates/update-audit-reconciler'
+      );
+      await app
+        .get(UpdateAuditReconciler)
+        .reconcile(options.intent.attempt.installRoot);
     } finally {
       barrier.finishCommittedActivation(authority);
     }

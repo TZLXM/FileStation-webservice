@@ -72,3 +72,37 @@ jobs:
           else
             git diff --check
           fi
+
+  update-platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build runtime prerequisites
+        run: |
+          npm run build:shared
+          npm run build --workspace=@filestation/update-core
+          npm run build --workspace=@filestation/updater
+
+      - name: Updater lock link crash and capability suites
+        run: npm test --workspace=@filestation/updater -- --runInBand src/update src/state/update-lock.spec.ts src/platform/current-link.spec.ts
+
+      - name: Internal update protocol unit tests
+        run: npm test --workspace=@filestation/server -- --runInBand updates/internal-update.controller.spec.ts updates/update-audit-reconciler.spec.ts
+
+      - name: Internal update protocol and Nginx fixtures
+        run: npm run test:e2e --workspace=@filestation/server -- internal-update.e2e-spec.ts nginx-update-deny.e2e-spec.ts
