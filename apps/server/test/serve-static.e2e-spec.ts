@@ -99,12 +99,22 @@ describe('ServeStatic (HTTP E2E)', () => {
         + 'Cache-Control "no-store" always;[\\s\\S]*?try_files',
       ));
     }
+    // Interpret the fixture's status map for both deployment locations, including
+    // negative responses. A blanket immutable 'always' or expires must fail here.
+    const map = /map\s+\$status\s+\$filestation_asset_cache\s*\{([^}]+)\}/.exec(configuration);
+    expect(map).not.toBeNull();
+    const policies = new Map(Array.from(map![1].matchAll(/(default|\d+)\s+"([^"]+)"\s*;/g),
+      (match) => [match[1], match[2]]));
     for (const location of ['/assets/', '/fs/assets/']) {
       const escaped = location.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      expect(configuration).toMatch(new RegExp(
-        `location\\s+${escaped}\\s*\\{[\\s\\S]*?`
-        + 'Cache-Control "public, max-age=31536000, immutable" always;',
-      ));
+      const block = new RegExp(`location\\s+${escaped}\\s*\\{([^}]+)\\}`).exec(configuration)![1];
+      expect(block).toMatch(/add_header Cache-Control \$filestation_asset_cache always;/);
+      expect(block).not.toMatch(/expires\s/);
+      for (const status of [200, 206, 304, 403, 404, 500, 503]) {
+        const policy = policies.get(String(status)) ?? policies.get('default');
+        expect(policy).toBe(status === 200 || status === 206 || status === 304
+          ? 'public, max-age=31536000, immutable' : 'no-store');
+      }
     }
   });
 

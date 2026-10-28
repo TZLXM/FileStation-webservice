@@ -5,6 +5,7 @@ import type {
   UpdateStatusResponse,
 } from '@filestation/shared';
 import { api } from '../../lib/api';
+import { useAuthStore } from '../../stores/authStore';
 
 interface UpdateCapabilityView {
   mode: 'managed' | 'docker' | 'unmanaged' | 'unsupported' | 'unavailable';
@@ -167,6 +168,8 @@ export default function UpdateSection({
   totpActive,
   pollIntervalMs,
 }: UpdateSectionProps) {
+  const accessToken = useAuthStore((state) => state.accessToken);
+  const [acceptedSession, setAcceptedSession] = useState<string | null>(null);
   const [status, setStatus] = useState<UpdateStatusView | null>(null);
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
@@ -177,6 +180,7 @@ export default function UpdateSection({
   const [totpCode, setTotpCode] = useState('');
   const [confirming, setConfirming] = useState(false);
   const [attemptId, setAttemptId] = useState('');
+  const [attemptFence, setAttemptFence] = useState<number>();
   const [installPhase, setInstallPhase] = useState('');
   const [installing, setInstalling] = useState(false);
   const [installMessage, setInstallMessage] = useState('');
@@ -210,6 +214,11 @@ export default function UpdateSection({
 
   useEffect(() => {
     if (!installing || !attemptId) return;
+    if (accessToken !== acceptedSession) {
+      setInstalling(false);
+      setInstallMessage('登录会话已变化，请重新检查更新状态。');
+      return;
+    }
     const controller = new AbortController();
     let timer: number | undefined;
     let cancelled = false;
@@ -223,6 +232,12 @@ export default function UpdateSection({
         );
         if (cancelled || controller.signal.aborted || !response.data) return;
         const latest = response.data;
+        if (latest.attempt_id !== attemptId || latest.fence !== attemptFence) {
+          setInstalling(false);
+          setInstallPhase('SUPERSEDED');
+          setInstallMessage('更新尝试已被替代或身份无法确认，请重新检查更新状态。');
+          return;
+        }
         setStatus(latest);
         setInstallPhase(latest.phase ?? '');
         if (latest.phase && TERMINAL_PHASES.has(latest.phase)) {
@@ -247,7 +262,7 @@ export default function UpdateSection({
       controller.abort();
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [attemptId, installing, pollIntervalMs]);
+  }, [attemptId, attemptFence, installing, pollIntervalMs, accessToken, acceptedSession]);
 
   const checkUpdate = async () => {
     if (checkInFlight.current) return;
@@ -342,6 +357,8 @@ export default function UpdateSection({
         throw new Error('服务器未返回有效的更新尝试。');
       }
       setAttemptId(accepted.attempt_id);
+      setAttemptFence(accepted.fence);
+      setAcceptedSession(accessToken);
       setInstallPhase(accepted.phase);
       setInstallMessage('更新安装已开始');
       setInstalling(true);
@@ -436,7 +453,9 @@ export default function UpdateSection({
             </p>
           )}
 
-          {status.decision === 'manual_bootstrap' && (
+          {(status.decision === 'manual_bootstrap'
+            || capability?.mode === 'unmanaged'
+            || capability?.reason === 'UNMANAGED_INSTALL') && (
             <div className="mt-4 rounded border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
               <h3 className="font-semibold">需要手动 bootstrap</h3>
               <p className="mt-1">

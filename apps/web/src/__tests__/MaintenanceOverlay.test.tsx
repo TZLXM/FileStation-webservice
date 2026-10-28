@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import MaintenanceOverlay from '../components/MaintenanceOverlay';
 import { ApiError, api } from '../lib/api';
 import { maintenanceStore } from '../lib/maintenance';
+import { useAuthStore } from '../stores/authStore';
 
 vi.mock('../lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/api')>();
@@ -26,11 +27,13 @@ describe('MaintenanceOverlay', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     maintenanceStore.getState().reset();
+    useAuthStore.setState({ accessToken: 'admin-session', isAuthenticated: true });
   });
 
   afterEach(() => {
     cleanup();
     maintenanceStore.getState().reset();
+    useAuthStore.setState({ accessToken: null, isAuthenticated: false });
   });
 
   it('opens from the global store, polls the read-only status route, and shows target/retry state', async () => {
@@ -80,8 +83,11 @@ describe('MaintenanceOverlay', () => {
     expect(maintenanceStore.getState().active).toBe(false);
   });
 
-  it('preserves an authentication failure as an auth error instead of clearing maintenance state', async () => {
-    mockedApi.get.mockRejectedValue(new ApiError(401, 'Session expired', 'AUTH_REQUIRED'));
+  it('recovers an expired session through public readiness without exposing admin status', async () => {
+    mockedApi.get.mockImplementation(async (path) => {
+      if (path === '/updates/status') throw new ApiError(401, 'Session expired', 'AUTH_REQUIRED');
+      return response({ initialized: true });
+    });
 
     render(<MaintenanceOverlay pollIntervalMs={20} />);
     act(() => maintenanceStore.getState().activate({
@@ -90,9 +96,29 @@ describe('MaintenanceOverlay', () => {
       retryAfterSeconds: 2,
     }));
 
-    expect(await screen.findByText(/登录已过期/)).toBeInTheDocument();
-    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+    await waitFor(() => expect(maintenanceStore.getState().active).toBe(false));
+    expect(mockedApi.get.mock.calls.map(([path]) => path)).toEqual(['/updates/status', '/auth/status']);
+  });
+  it('lets an anonymous share visitor recover after public readiness returns', async () => {
+    useAuthStore.setState({ accessToken: null, isAuthenticated: false });
+    mockedApi.get.mockRejectedValueOnce(new ApiError(503, 'Maintenance', 'UPDATE_MAINTENANCE'))
+      .mockResolvedValue(response({ initialized: true }));
+    maintenanceStore.getState().activate({ status: 503, code: 'UPDATE_MAINTENANCE' });
+    render(<MaintenanceOverlay pollIntervalMs={5} />);
+    await waitFor(() => expect(maintenanceStore.getState().active).toBe(false));
+    expect(mockedApi.get.mock.calls.map(([path]) => path)).toEqual(['/auth/status', '/auth/status']);
+  });
+  it('retires pending status polling when the session changes and ignores the old result', async () => {
+    let finish!: (value: unknown) => void;
+    mockedApi.get.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }) as never)
+      .mockResolvedValue(response({ phase: 'MAINTENANCE', attempt_id: 'new-session-attempt' }));
+    maintenanceStore.getState().activate({ status: 503, code: 'UPDATE_MAINTENANCE' });
+    render(<MaintenanceOverlay pollIntervalMs={1000} />);
+    const oldSignal = mockedApi.get.mock.calls[0][2]!;
+    act(() => useAuthStore.setState({ accessToken: 'replacement-session' }));
+    expect(oldSignal.aborted).toBe(true);
+    await act(async () => finish(response({ phase: 'COMMITTED' })));
     expect(maintenanceStore.getState().active).toBe(true);
-    expect(maintenanceStore.getState().code).toBe('UPDATE_MAINTENANCE');
+    expect(await screen.findByText('new-session-attempt')).toBeInTheDocument();
   });
 });

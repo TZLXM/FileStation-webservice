@@ -105,7 +105,8 @@ function showDefaultError(
 
   card.append(title, message, button);
   panel.append(card);
-  target.document.body.append(panel);
+  // A stylesheet can fail while the HTML parser is still in <head>.
+  (target.document.body ?? target.document.documentElement).append(panel);
 }
 
 export function installAssetRecovery(

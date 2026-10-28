@@ -22,6 +22,16 @@ FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 
 - Fresh 验证：focused Web **5 files / 53 passed**；full Web no-cache **20 files / 216 passed**；server unit **52 suites / 311 passed / 20 todo**；ServeStatic E2E **4/4**；controller `require_escalated` full server E2E **16 suites / 117 passed**（51.729s）；root typecheck/build、根路径与 `/fs/` Web build、diff-check 通过。第一次本地 escalated E2E 启动请求两次在自动审批服务返回 HTTP 502 时未执行；sandbox fallback 因 loopback listen `EACCES` 停止且不计为通过，最终由 controller 在原 worktree 成功运行 full E2E。
 - 仍待真实浏览器 375px/视觉/键盘行为、真实维护窗口内页面刷新、实际缺失 chunk 恢复、managed upgrade/rollback、真实 Nginx/FRP 与 hosted Windows/Linux/Node 20.17 人工验收。产品版本保持 **0.2.0**，publisher key 保持 **UNCONFIGURED**；未调用外部 GitHub/release/生产服务，未 push/tag/Release。
 
+## Task 10 fix round 1/5 — I1–I5（2026-10-28）
+
+- I1：Vite 在最终 HTML 的 `<head>` 起始位置内联 classic recovery bootstrap，使用同一 recovery 实现并在 entry/modulepreload/CSS 之前执行；不再依赖 React 入口模块自身成功加载。root 与 `/fs/` 实际构建 shell 的独立执行回归覆盖入口 JS/CSS 缺失、一次 session reload 和再次失败后的可恢复 UI；head 阶段没有 body 时也能显示错误。
+- I2：匿名或 status 返回 401/403 的会话改用现有公开 `GET /auth/status` 探测维护结束，该接口仍受 server maintenance barrier 约束；未开放管理员 status。认证 login/TOTP/recovery/refresh/logout 可到达 server，避免客户端合成维护错误；token/session 变化清理维护状态、终止旧轮询，旧请求迟到的 503 不会重新激活遮罩。真实 API/store 联动回归覆盖 root/fs 匿名恢复、过期凭据连续 503 后恢复、refresh 和 logout cookie revocation；安装轮询也在会话变化时退出。
+- I3：保留接受安装时的 attempt_id 与 fence，只认同一身份的阶段/终态；不同 attempt、变化 fence 或缺失身份均停止轮询并显示尝试被替代/无法确认，不能显示为本次成功。成功/失败/回滚 fixture 均携带实际身份。
+- I4：以真实 `decision=unavailable`、`capability.mode=unmanaged`、`reason=UNMANAGED_INSTALL` 响应展示 bootstrap 指引，同时保留 managed 安装的 migration `manual_bootstrap` 分支。
+- I5：Nginx root/fs assets 使用按 response status 的 map：200/206/304 immutable，其它响应 `no-store`；移除额外 expires，避免错误被缓存一年。配置 fixture 覆盖成功、403/404/500/503、index/fallback 及既有 API 边界；真实 Nginx/FRP 与 `nginx -t` 仍 pending。
+- Fresh 验证：focused Web **7 files / 72 passed**；full Web `--no-cache` **22 files / 235 passed**；ServeStatic focused E2E **1 suite / 4 passed**；root typecheck/build、root `/assets/` 与 `/fs/assets/` 构建及 bootstrap 顺序检查、`git diff --check` exit 0。本轮未改 server 生产代码，按授权不重复无关 full server unit/E2E；上节 controller 117/117 为上一轮证据。预期 PageErrorBoundary 日志及首次 static RED 的既有 ts-jest transform 提示仍存在（Minor1，未作为本轮五项修复范围）。完整命令/RED/GREEN 见本地 Task10 report 的 fix round 1 附录。
+- 产品仍 **0.2.0**、publisher key **UNCONFIGURED**；未使用 subagent、外部服务、push/tag/Release。真实浏览器/375px/键盘、维护窗口刷新/缺失 chunk、managed upgrade/rollback、hosted Windows/Linux/Node 20.17 仍需验收，I1–I5 待独立复审确认。
+
 ## 项目状态
 
 | 方面 | 状态 |

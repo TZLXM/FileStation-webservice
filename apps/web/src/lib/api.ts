@@ -42,14 +42,23 @@ function retryAfterSeconds(response: Response): number | undefined {
   return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : undefined;
 }
 
-function maintenanceStatusRequest(path: string): boolean {
-  return path.split(/[?#]/, 1)[0] === '/updates/status';
+function maintenanceRecoveryRequest(method: string, path: string): boolean {
+  const route = path.split(/[?#]/, 1)[0];
+  return (method === 'GET' && ['/updates/status', '/auth/status'].includes(route))
+    || (method === 'POST' && [
+      '/auth/login', '/auth/login/totp', '/auth/recovery/verify', '/auth/refresh', '/auth/logout',
+    ].includes(route));
 }
 
 class ApiClient {
   private accessToken: string | null = null;
+  private sessionGeneration = 0;
 
   setAccessToken(token: string | null) {
+    if (token !== this.accessToken) {
+      this.sessionGeneration++;
+      maintenanceStore.getState().reset();
+    }
     this.accessToken = token;
   }
 
@@ -65,7 +74,8 @@ class ApiClient {
     signal?: AbortSignal,
   ): Promise<ApiResponse<T>> {
     const maintenance = maintenanceStore.getState();
-    if (maintenance.active && !maintenanceStatusRequest(path)) {
+    const generation = this.sessionGeneration;
+    if (maintenance.active && !maintenanceRecoveryRequest(method, path)) {
       throw new ApiError(
         503,
         'FileStation is temporarily unavailable while an update is prepared',
@@ -115,7 +125,9 @@ class ApiClient {
         attemptId:
           typeof body.attempt_id === 'string' ? body.attempt_id : undefined,
       });
-      if (isMaintenanceFailure(error)) maintenanceStore.getState().activate(error);
+      if (generation === this.sessionGeneration && !signal?.aborted && isMaintenanceFailure(error)) {
+        maintenanceStore.getState().activate(error);
+      }
       throw error;
     }
     return response.json();

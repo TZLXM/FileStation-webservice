@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../lib/api';
 import UpdateSection from '../pages/settings/UpdateSection';
+import { useAuthStore } from '../stores/authStore';
 
 vi.mock('../lib/api', () => ({
   api: {
@@ -113,6 +114,7 @@ describe('UpdateSection', () => {
 
   afterEach(() => {
     cleanup();
+    useAuthStore.setState({ accessToken: null, isAuthenticated: false });
   });
 
   it('shows current and latest versions when no stable update is available', async () => {
@@ -141,17 +143,23 @@ describe('UpdateSection', () => {
     expect(screen.getByText(/上次检查/)).toBeInTheDocument();
   });
 
-  it('shows manual bootstrap instructions without exposing an automatic update action', async () => {
+  it.each([
+    ['unavailable', 'unmanaged', 'UNMANAGED_INSTALL'],
+    ['manual_bootstrap', 'managed', null],
+  ])('shows bootstrap guidance for the real unmanaged response and migration decision %s', async (decision, mode, reason) => {
     mockedApi.get.mockResolvedValue(response(status({
-      decision: 'manual_bootstrap',
-      available_version: '0.2.5',
+      decision,
+      stage: decision === 'unavailable' ? 'failed' : 'idle',
+      available_version: decision === 'unavailable' ? null : '0.2.5',
+      error_code: reason,
+      message: decision === 'unavailable' ? 'Automatic updates require a managed FileStation installation' : null,
       capability: {
-        mode: 'unmanaged',
-        supported: false,
-        install_root: null,
-        updater_version: null,
+        mode,
+        supported: mode === 'managed',
+        install_root: mode === 'managed' ? '/srv/filestation' : null,
+        updater_version: mode === 'managed' ? '0.2.0' : null,
         platform: 'linux-x64',
-        reason: 'UNMANAGED_INSTALL',
+        reason,
       },
     })));
 
@@ -266,7 +274,8 @@ describe('UpdateSection', () => {
     [false, false],
     [true, true],
   ])('requires a password and conditionally TOTP when active=%s', async (totpActive, expectsTotp) => {
-    mockedApi.get.mockResolvedValue(response(available));
+    mockedApi.get.mockResolvedValueOnce(response(available))
+      .mockResolvedValue(response(status({ phase: 'MAINTENANCE', attempt_id: 'attempt-01', fence: 2 })));
     await openConfirmation(totpActive);
 
     expect(screen.getByLabelText('当前密码')).toHaveAttribute('type', 'password');
@@ -348,8 +357,8 @@ describe('UpdateSection', () => {
   ])('polls a 202 attempt through %s and shows the terminal message', async (phase, message) => {
     const statuses = [
       response(available),
-      response(status({ phase: 'MAINTENANCE', target_version: '0.2.5' })),
-      response(status({ phase, target_version: '0.2.5' })),
+      response(status({ phase: 'MAINTENANCE', attempt_id: 'attempt-01', fence: 2, target_version: '0.2.5' })),
+      response(status({ phase, attempt_id: 'attempt-01', fence: 2, target_version: '0.2.5' })),
     ];
     mockedApi.get.mockImplementation(async () => statuses.shift()!);
 
@@ -363,5 +372,37 @@ describe('UpdateSection', () => {
     expect(screen.getByText(/attempt-01/)).toBeInTheDocument();
     await waitFor(() => expect(mockedApi.get.mock.calls.filter(([path]) => path === '/updates/status').length)
       .toBeGreaterThanOrEqual(3));
+  });
+  it.each([
+    ['other-attempt', 2],
+    ['attempt-01', 3],
+    [undefined, undefined],
+  ])('does not attribute a mismatching terminal journal %s/%s to the accepted install', async (attempt_id, fence) => {
+    mockedApi.get.mockResolvedValueOnce(response(available))
+      .mockResolvedValue(response(status({ phase: 'COMMITTED', attempt_id, fence })));
+    await openConfirmation();
+    fireEvent.change(screen.getByLabelText('当前密码'), { target: { value: 'local-password' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认安装' }));
+    expect(await screen.findByText(/更新尝试已被替代或身份无法确认/)).toBeInTheDocument();
+    expect(screen.queryByText('更新完成')).not.toBeInTheDocument();
+    const calls = mockedApi.get.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(mockedApi.get).toHaveBeenCalledTimes(calls);
+  });
+  it('retires accepted install polling when the login session changes', async () => {
+    let finish!: (value: unknown) => void;
+    mockedApi.get.mockResolvedValueOnce(response(available))
+      .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }) as never);
+    await openConfirmation();
+    fireEvent.change(screen.getByLabelText('当前密码'), { target: { value: 'local-password' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认安装' }));
+    await screen.findByText('更新安装已开始');
+    const signal = mockedApi.get.mock.calls[1][2]!;
+    act(() => useAuthStore.setState({ accessToken: 'different-session' }));
+    expect(signal.aborted).toBe(true);
+    await act(async () => finish(response(status({ phase: 'COMMITTED', attempt_id: 'attempt-01', fence: 2 }))));
+    expect(screen.queryByText('更新完成')).not.toBeInTheDocument();
+    expect(screen.getByText(/登录会话已变化/)).toBeInTheDocument();
+    expect(mockedApi.get).toHaveBeenCalledTimes(2);
   });
 });

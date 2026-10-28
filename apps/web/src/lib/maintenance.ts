@@ -79,7 +79,7 @@ export const maintenanceStore = create<MaintenanceState>((set) => ({
 
   activate: (failure) => {
     if (!isMaintenanceFailure(failure)) return;
-    set({
+    set((current) => ({
       active: true,
       status: failure.status,
       code: failure.code,
@@ -88,8 +88,8 @@ export const maintenanceStore = create<MaintenanceState>((set) => ({
       targetVersion: failure.targetVersion,
       attemptId: failure.attemptId,
       pollError: undefined,
-      authError: false,
-    });
+      authError: current.authError,
+    }));
   },
 
   applyStatus: (value) => {
@@ -108,7 +108,7 @@ export const maintenanceStore = create<MaintenanceState>((set) => ({
   },
 
   setPollError: (message, authError = false) => {
-    set({ pollError: message, authError });
+    set((current) => ({ pollError: message, authError: current.authError || authError }));
   },
 
   reset: () => set(initialState),

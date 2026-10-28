@@ -158,4 +158,15 @@ describe('upload API request headers and failures', () => {
       method: 'GET',
     }));
   });
+  it.each(['/auth/login', '/auth/login/totp', '/auth/recovery/verify', '/auth/refresh', '/auth/logout'])('sends auth operation %s to the server during maintenance', async (path) => {
+    maintenanceStore.getState().activate({ status: 503, code: 'UPDATE_MAINTENANCE' });
+    fetchMock.mockResolvedValue({ ok: false, status: 401, json: async () => ({ code: 'AUTH_REQUIRED' }) });
+    await expect(api.post(path)).rejects.toMatchObject({ status: 401, code: 'AUTH_REQUIRED' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+  it('retires maintenance when the access session changes', () => {
+    maintenanceStore.getState().activate({ status: 503, code: 'UPDATE_MAINTENANCE' });
+    api.setAccessToken(null);
+    expect(maintenanceStore.getState().active).toBe(false);
+  });
 });

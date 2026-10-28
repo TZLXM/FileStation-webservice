@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useEffect, useState } from 'react';
 import { ApiError, api } from '../lib/api';
 import {
   MaintenanceStatusView,
-  isTerminalMaintenancePhase,
   maintenanceStore,
 } from '../lib/maintenance';
+import { useAuthStore } from '../stores/authStore';
 
 interface MaintenanceOverlayProps {
   pollIntervalMs?: number;
@@ -32,56 +32,64 @@ export default function MaintenanceOverlay({
   pollIntervalMs,
 }: MaintenanceOverlayProps) {
   const maintenance = maintenanceStore();
-  const pollInFlight = useRef(false);
-
-  const poll = useCallback(async (signal: AbortSignal) => {
-    if (pollInFlight.current || signal.aborted) return;
-    pollInFlight.current = true;
-    try {
-      const response = await api.get<MaintenanceStatusView>(
-        '/updates/status',
-        undefined,
-        signal,
-      );
-      if (signal.aborted) return;
-      const status = response.data;
-      if (!status) {
-        maintenanceStore.getState().setPollError(
-          '服务器暂未返回更新状态；服务重启后会自动重试。',
-        );
-        return;
-      }
-      if (isTerminalMaintenancePhase(status.phase)) {
-        maintenanceStore.getState().applyStatus(status);
-        return;
-      }
-      maintenanceStore.getState().applyStatus(status);
-    } catch (error) {
-      if (signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
-        return;
-      }
-      if (isAuthenticationFailure(error)) {
-        maintenanceStore.getState().setPollError(
-          '登录已过期。更新完成后请重新加载页面并登录。',
-          true,
-        );
-        return;
-      }
-      maintenanceStore.getState().setPollError(
-        '暂时无法连接更新状态接口；网络恢复后会自动重试。',
-      );
-    } finally {
-      pollInFlight.current = false;
-    }
-  }, []);
+  const accessToken = useAuthStore((state) => state.accessToken);
+  const [refresh, setRefresh] = useState(0);
+  const [pollInFlight, setPollInFlight] = useState(false);
 
   useEffect(() => {
     if (!maintenance.active) return;
     const controller = new AbortController();
-    void poll(controller.signal);
+    const { signal } = controller;
+    let inFlight = false;
+    const readinessOnly = !accessToken || maintenance.authError;
+    const poll = async () => {
+      if (inFlight || signal.aborted) return;
+      inFlight = true;
+      setPollInFlight(true);
+      try {
+        const response = await api.get<MaintenanceStatusView>(
+          readinessOnly ? '/auth/status' : '/updates/status',
+          undefined,
+          signal,
+        );
+        if (signal.aborted) return;
+        if (readinessOnly) {
+          // Public auth readiness remains behind the server maintenance barrier.
+          // Success proves admission resumed, without exposing admin journal data.
+          maintenanceStore.getState().reset();
+          return;
+        }
+        const status = response.data;
+        if (!status) {
+          maintenanceStore.getState().setPollError(
+            '服务器暂未返回更新状态；服务重启后会自动重试。',
+          );
+          return;
+        }
+        maintenanceStore.getState().applyStatus(status);
+      } catch (error) {
+        if (signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
+          return;
+        }
+        if (isAuthenticationFailure(error)) {
+          maintenanceStore.getState().setPollError(
+            '登录已过期。服务恢复后可重新登录。',
+            true,
+          );
+          return;
+        }
+        maintenanceStore.getState().setPollError(
+          '暂时无法连接状态接口；网络恢复后会自动重试。',
+        );
+      } finally {
+        inFlight = false;
+        if (!signal.aborted) setPollInFlight(false);
+      }
+    };
+    void poll();
     const delay = pollIntervalMs ?? Math.max(1, maintenance.retryAfterSeconds) * 1_000;
     const timer = window.setInterval(() => {
-      void poll(controller.signal);
+      void poll();
     }, delay);
     return () => {
       controller.abort();
@@ -89,8 +97,10 @@ export default function MaintenanceOverlay({
     };
   }, [
     maintenance.active,
+    maintenance.authError,
     maintenance.retryAfterSeconds,
-    poll,
+    accessToken,
+    refresh,
     pollIntervalMs,
   ]);
 
@@ -122,7 +132,7 @@ export default function MaintenanceOverlay({
               系统维护中
             </h2>
             <p id="maintenance-description" className="mt-2 text-sm text-gray-600">
-              更新期间普通操作会暂停。页面会保留，并只轮询只读的更新状态。
+              更新期间普通操作会暂停。页面会保留，并查询更新状态或服务恢复状态。
             </p>
           </div>
         </div>
@@ -169,13 +179,12 @@ export default function MaintenanceOverlay({
           <button
             type="button"
             onClick={() => {
-              const controller = new AbortController();
-              void poll(controller.signal);
+              setRefresh((value) => value + 1);
             }}
-            disabled={pollInFlight.current}
+            disabled={pollInFlight}
             className="rounded-md bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
           >
-            {pollInFlight.current ? '正在查询…' : '立即刷新状态'}
+            {pollInFlight ? '正在查询…' : '立即刷新状态'}
           </button>
           <button
             type="button"
