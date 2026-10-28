@@ -5,11 +5,12 @@ import {
   mkdir,
   mkdtemp,
   realpath,
+  readFile,
   rm,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { AttemptJournal } from '@filestation/updater';
+import { AttemptJournal, JournalRecord, NodeDurableFileSystem } from '@filestation/updater';
 import { Response } from 'express';
 import { AuditAction, AuditService } from '../audit/audit.service';
 import {
@@ -135,6 +136,7 @@ describe('UpdateInstallCoordinator', () => {
               value: 'win32:fixture',
             }),
             processCreatedAt: async () => 'win32:process',
+            isProcessAlive: async () => true,
           },
         },
       ],
@@ -144,6 +146,10 @@ describe('UpdateInstallCoordinator', () => {
   });
 
   afterEach(async () => {
+    await service.onModuleDestroy();
+    const context = (executor.execute as jest.Mock).mock.calls[0]?.[0];
+    await context?.ownership.recoveryGuard.release();
+    jest.restoreAllMocks();
     await rm(root, { recursive: true, force: true });
   });
 
@@ -206,8 +212,36 @@ describe('UpdateInstallCoordinator', () => {
     expect(executor.execute).not.toHaveBeenCalled();
     expect((await AttemptJournal.inspect(root)).phase).toBe('PREPARED');
 
-    const replacement = await service.accept(receipt);
+    let resume!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => { resume = resolve; });
+    const appending = new Promise<void>((resolve) => { entered = resolve; });
+    const append = NodeDurableFileSystem.prototype.append;
+    jest.spyOn(NodeDurableFileSystem.prototype, 'append').mockImplementationOnce(async function (this: NodeDurableFileSystem, ...args) {
+      entered();
+      await waiting;
+      return append.apply(this, args);
+    });
+    const replacing = service.accept(receipt);
+    await appending;
+    try {
+      await expect(service.accept(receipt)).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'UPDATE_IN_PROGRESS' }),
+      });
+    } finally { resume(); }
+    const replacement = await replacing;
     expect(replacement.attempt_id).not.toBe(accepted.attempt_id);
+    expect(replacement.fence).toBe(accepted.fence + 1);
+    // inspect validates every record/checksum but exposes only this attempt's records.
+    const snapshot = await AttemptJournal.inspect(root);
+    const history: JournalRecord[] = (await readFile(journal.filename, 'utf8'))
+      .trim().split('\n').map((line) => JSON.parse(line));
+    expect(history.map((record) => record.seq)).toEqual([1, 2, 3, 4]);
+    expect(history.filter((record) => record.kind === 'attempt').map((record) => record.context.fence))
+      .toEqual([accepted.fence, replacement.fence]);
+    expect(history[2]).toMatchObject({ kind: 'completion', phase: 'ABORTED', context: { attemptId: accepted.attempt_id } });
+    expect(snapshot).toMatchObject({ sequence: 4, attemptId: replacement.attempt_id, fence: replacement.fence, phase: 'PREPARED', pending: null });
+    expect(snapshot.records).toHaveLength(1);
     expect((await AttemptJournal.inspect(root)).phase).toBe('PREPARED');
   });
 
@@ -251,6 +285,7 @@ describe('UpdateInstallCoordinator', () => {
               value: 'win32:fixture',
             }),
             processCreatedAt: async () => 'win32:process',
+            isProcessAlive: async () => true,
           },
         },
       ],
@@ -274,6 +309,7 @@ describe('UpdateInstallCoordinator', () => {
 
     expect(barrier.accepting).toBe(true);
     expect((await AttemptJournal.inspect(root)).phase).toBe('PREPARED');
+    await module.close();
   });
 
   it('rejects an expired receipt or one that no longer targets this platform', async () => {
@@ -292,4 +328,58 @@ describe('UpdateInstallCoordinator', () => {
       response: expect.objectContaining({ code: 'UPDATE_PLATFORM_CHANGED' }),
     });
   });
+  it('admits only one distinct receipt across independent coordinators', async () => {
+    const other = new UpdateInstallCoordinator(
+      { get: () => root } as unknown as ConfigService, barrier,
+      { inspect: async () => capability } as UpdateCapabilityService,
+      audit as unknown as AuditService, executor,
+      { current: async () => ({ provider: 'windows-cim', value: 'win32:fixture' }),
+        processCreatedAt: async () => 'win32:process', isProcessAlive: async () => true },
+      () => now, '0.2.0', () => 'competing-attempt',
+    );
+    let resume!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => { resume = resolve; });
+    const appending = new Promise<void>((resolve) => { entered = resolve; });
+    const append = NodeDurableFileSystem.prototype.append;
+    jest.spyOn(NodeDurableFileSystem.prototype, 'append').mockImplementationOnce(async function (this: NodeDurableFileSystem, ...args) {
+      entered();
+      await waiting;
+      return append.apply(this, args);
+    });
+    const first = service.accept(receipt);
+    await appending;
+    const second = await Promise.allSettled([
+      other.accept(Object.freeze({ ...receipt, prepared_id: 'other-receipt' })),
+    ]);
+    resume();
+    const results = [...await Promise.allSettled([first]), ...second];
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+    expect(second[0]).toMatchObject({ status: 'rejected', reason: { response: { code: 'UPDATE_IN_PROGRESS' } } });
+    const snapshot = await AttemptJournal.inspect(root);
+    expect(snapshot.phase).toBe('PREPARED');
+    expect(snapshot.records).toHaveLength(1);
+  });
+
+  it.each([
+    ['live foreign PID', process.pid + 10000, 'foreign-created'],
+    ['dead foreign PID', process.pid + 20000, 'dead-created'],
+    ['reused PID', process.pid, 'old-created'],
+    ['restarted coordinator with same process identity', process.pid, 'win32:process'],
+    ['unknown creation identity', process.pid + 30000, 'unknown'],
+  ])('refuses %s without mutating PREPARED, including expired heartbeat', async (_name, pid, created) => {
+    await journal.beginAttempt({
+      attemptId: 'prior-attempt', fence: 1, currentVersion: '0.2.0',
+      targetVersion: '0.2.5', phase: 'PREPARED', backupId: 'prior-backup',
+      owner: { bootIdentity: 'win32:fixture', pid,
+        processCreatedAt: created, heartbeatAt: '2020-01-01T00:00:00.000Z' },
+    });
+    const before = await AttemptJournal.inspect(root);
+    await expect(service.accept(receipt)).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'UPDATE_IN_PROGRESS' }),
+    });
+    expect(await AttemptJournal.inspect(root)).toEqual(before);
+  });
+
 });

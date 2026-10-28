@@ -87,4 +87,5 @@ export interface InstallAcceptance {
 export interface UpdateJournalIdentity {
   current(): Promise<BootIdentity>;
   processCreatedAt(pid: number): Promise<string>;
+  isProcessAlive(pid: number, processCreatedAt: string): Promise<boolean>;
 }

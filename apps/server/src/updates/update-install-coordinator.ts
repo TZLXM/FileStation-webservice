@@ -3,6 +3,7 @@ import {
   Inject,
   Injectable,
   Logger,
+  OnModuleDestroy,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { lstat, realpath } from 'node:fs/promises';
@@ -11,7 +12,10 @@ import { Response } from 'express';
 import {
   AttemptJournal,
   AttemptJournalSnapshot,
-  PlatformBootIdentityProvider,
+  acquireRecoveryGuard,
+  RecoveryGuard,
+  LockHandle,
+  UpdateLock,
 } from '@filestation/updater';
 import { AuditAction, AuditService } from '../audit/audit.service';
 import { waitForResponseAndLeaseRelease } from '../maintenance/maintenance-admission.guard';
@@ -32,12 +36,20 @@ import {
   UpdateJournalIdentity,
 } from './update-types';
 
-export const UPDATE_INSTALL_EXECUTOR_CONTRACT_VERSION = 1 as const;
+export const UPDATE_INSTALL_EXECUTOR_CONTRACT_VERSION = 2 as const;
 
 export interface UpdateInstallContext {
   readonly contract_version: typeof UPDATE_INSTALL_EXECUTOR_CONTRACT_VERSION;
   readonly attempt: Readonly<MaintenanceAttempt>;
   readonly receipt: PreparedUpdateReceipt;
+  /** Exclusive writer authority retained across app.close(). Task 9 must keep
+   * the guard until this process exits; the child then uses fenced recovery.
+   * Never release either handle merely because execute() returned. */
+  readonly ownership: Readonly<{
+    lock: LockHandle;
+    journal: AttemptJournal;
+    recoveryGuard: RecoveryGuard;
+  }>;
 }
 
 export interface UpdateInstallExecutor {
@@ -82,10 +94,30 @@ function ioFailure(code: string, message: string): ConflictException {
 }
 
 @Injectable()
-export class UpdateInstallCoordinator {
+export class UpdateInstallCoordinator implements OnModuleDestroy {
   private readonly logger = new Logger(UpdateInstallCoordinator.name);
   private readonly receipts = new Map<string, PreparedUpdateReceipt>();
   private readonly abandonedAttempts = new Set<string>();
+  private ownership?: {
+    root: string;
+    attemptId: string;
+    lock: LockHandle;
+    journal: AttemptJournal;
+    recoveryGuard: RecoveryGuard;
+  };
+  private changing = false;
+  private stopped = false;
+  private handedOff = false;
+  private readonly scheduled = new Set<string>();
+  private accepting?: Promise<InstallAcceptance>;
+
+  async onModuleDestroy(): Promise<void> {
+    this.stopped = true;
+    await this.accepting?.catch(() => undefined);
+    // The durable owner record stays for manual/fenced recovery after restart.
+    // An executor may call app.close(); its writer guard must survive that call.
+    if (!this.handedOff) await this.ownership?.recoveryGuard.release();
+  }
 
   constructor(
     private readonly config: ConfigService,
@@ -102,6 +134,26 @@ export class UpdateInstallCoordinator {
   ) {}
 
   async accept(receipt: PreparedUpdateReceipt): Promise<InstallAcceptance> {
+    if (
+      this.changing || this.stopped ||
+      (this.ownership && !this.abandonedAttempts.has(this.ownership.attemptId))
+    ) {
+      throw ioFailure('UPDATE_IN_PROGRESS', 'Update ownership is unavailable');
+    }
+    this.changing = true;
+    const pending = this.acceptOwned(receipt);
+    this.accepting = pending;
+    try {
+      return await pending;
+    } finally {
+      this.changing = false;
+      this.accepting = undefined;
+    }
+  }
+
+  private async acceptOwned(
+    receipt: PreparedUpdateReceipt,
+  ): Promise<InstallAcceptance> {
     if (!Object.isFrozen(receipt)) {
       throw ioFailure(
         'UPDATE_RECEIPT_INVALID',
@@ -125,64 +177,108 @@ export class UpdateInstallCoordinator {
     }
 
     const journalRoot = this.journalRoot(root);
-    const journal = await AttemptJournal.open(journalRoot);
-    let snapshot = await AttemptJournal.inspect(journalRoot);
-    if (
-      snapshot.phase === 'PREPARED' &&
-      snapshot.owner &&
-      (snapshot.owner.pid !== process.pid ||
-        this.abandonedAttempts.has(snapshot.attemptId!)) &&
-      !snapshot.pending
-    ) {
-      const abortIntent = await journal.appendIntent({
-        attemptId: snapshot.attemptId!,
-        fence: snapshot.fence,
-        action: 'abort-stale-prepared',
-        phase: 'ABORTED',
-        payload: { reason: 'owner-restarted-before-install-handoff' },
-      });
-      await journal.appendCompletion({
-        attemptId: snapshot.attemptId!,
-        fence: snapshot.fence,
-        intentId: abortIntent.id,
-        phase: 'ABORTED',
-      });
-      snapshot = await AttemptJournal.inspect(journalRoot);
-      this.abandonedAttempts.delete(snapshot.attemptId ?? '');
-    }
-    if (snapshot.initialized && !this.terminal(snapshot.phase)) {
+    // The same kernel guard used by Task 5 recovery excludes other coordinators,
+    // processes and recovery writers before journal open/read/abort/begin.
+    let recoveryGuard: RecoveryGuard;
+    try {
+      if (this.ownership) {
+        if (
+          this.ownership.root !== journalRoot ||
+          !this.abandonedAttempts.has(this.ownership.attemptId)
+        ) {
+          throw new Error('owner is not abandoned');
+        }
+        recoveryGuard = this.ownership.recoveryGuard;
+        await recoveryGuard.assertActive();
+        await this.ownership.lock.assertActive();
+      } else {
+        recoveryGuard = await acquireRecoveryGuard(
+          path.join(journalRoot, 'update.recovery.guard'),
+        );
+      }
+    } catch {
       throw ioFailure(
         'UPDATE_IN_PROGRESS',
-        'An update attempt is already active',
+        'Exclusive update ownership is unavailable',
       );
     }
-
-    const boot = await this.identity.current();
-    const createdAt = await this.identity.processCreatedAt(process.pid);
-    const acceptedAt = new Date(this.now()).toISOString();
-    const attemptId = this.randomId();
-    const backupId = `update-${this.randomId()}`.slice(0, 128);
-    const attempt: MaintenanceAttempt = {
-      attemptId,
-      fence: snapshot.fence + 1,
-      installRoot: root,
-      backupId,
-      targetVersion: receipt.version,
-    };
-    await journal.beginAttempt({
-      attemptId,
-      fence: attempt.fence,
-      currentVersion: this.productVersion,
-      targetVersion: receipt.version,
-      backupId,
-      phase: 'PREPARED',
-      owner: {
-        bootIdentity: boot.value,
-        pid: process.pid,
-        processCreatedAt: createdAt,
-        heartbeatAt: acceptedAt,
-      },
-    });
+    let attempt: MaintenanceAttempt;
+    let acceptedAt: string;
+    let attemptId: string;
+    try {
+      const journal =
+        this.ownership?.journal ?? await AttemptJournal.open(journalRoot);
+      let snapshot = await journal.readSnapshot();
+      if (this.ownership) {
+        const previous = this.ownership;
+        if (
+          snapshot.attemptId !== previous.attemptId ||
+          snapshot.fence !== previous.lock.fence ||
+          snapshot.phase !== 'PREPARED' || snapshot.pending
+        ) {
+          throw new Error('abandoned owner no longer matches PREPARED');
+        }
+        const intent = await journal.appendIntent({
+          attemptId: previous.attemptId,
+          fence: previous.lock.fence,
+          action: 'abort-abandoned-prepared',
+          phase: 'ABORTED',
+          payload: { reason: 'fresh-admin-confirmation' },
+        });
+        await journal.appendCompletion({
+          attemptId: previous.attemptId,
+          fence: previous.lock.fence,
+          intentId: intent.id,
+          phase: 'ABORTED',
+        });
+        await previous.lock.release();
+        this.receipts.delete(previous.attemptId);
+        this.abandonedAttempts.delete(previous.attemptId);
+        this.ownership = undefined;
+        snapshot = await journal.readSnapshot();
+      }
+      // Foreign, restarted, dead and unverifiable owners all require explicit
+      // recovery. Neither PID difference nor heartbeat expiry proves death.
+      if (
+        snapshot.initialized &&
+        (!this.terminal(snapshot.phase) || snapshot.pending)
+      ) {
+        throw new Error('existing attempt requires manual recovery');
+      }
+      const boot = await this.identity.current();
+      const createdAt = await this.identity.processCreatedAt(process.pid);
+      acceptedAt = new Date(this.now()).toISOString();
+      attemptId = this.randomId();
+      const backupId = `update-${this.randomId()}`.slice(0, 128);
+      const lock = await UpdateLock.acquire(
+        journalRoot,
+        {
+          attemptId,
+          bootIdentity: boot.value,
+          pid: process.pid,
+          processCreatedAt: createdAt,
+          heartbeatAt: acceptedAt,
+          currentVersion: this.productVersion,
+          targetVersion: receipt.version,
+          backupId,
+        },
+        { journal, identityProvider: this.identity },
+      );
+      this.ownership = { root: journalRoot, attemptId, journal, lock, recoveryGuard };
+      attempt = {
+        attemptId,
+        fence: lock.fence,
+        installRoot: root,
+        backupId,
+        targetVersion: receipt.version,
+      };
+    } catch {
+      if (!this.ownership) await recoveryGuard.release();
+      throw ioFailure(
+        'UPDATE_IN_PROGRESS',
+        'Update ownership requires manual recovery or is already held',
+      );
+    }
     this.receipts.set(attemptId, receipt);
     await this.audit.record({
       accountId: null,
@@ -206,6 +302,12 @@ export class UpdateInstallCoordinator {
   }
 
   scheduleAfterResponse(attempt: MaintenanceAttempt, response: Response): void {
+    if (
+      this.stopped || this.ownership?.attemptId !== attempt.attemptId ||
+      this.ownership.lock.fence !== attempt.fence ||
+      this.scheduled.has(attempt.attemptId)
+    ) return;
+    this.scheduled.add(attempt.attemptId);
     let finished = false;
     response.once('finish', () => {
       finished = true;
@@ -223,56 +325,77 @@ export class UpdateInstallCoordinator {
     response: Response,
   ): Promise<void> {
     await waitForResponseAndLeaseRelease(response);
-    if (!this.barrier.accepting) return;
-    const receipt = this.receipts.get(attempt.attemptId);
-    if (!receipt) {
-      await this.recordFailure(attempt, 'RECEIPT_NOT_AVAILABLE');
-      return;
-    }
+    if (
+      !this.barrier.accepting || this.stopped || this.changing ||
+      this.ownership?.attemptId !== attempt.attemptId ||
+      this.abandonedAttempts.has(attempt.attemptId)
+    ) return;
+    this.changing = true;
+    this.handedOff = true;
     try {
-      await this.executor.assertAvailable();
-    } catch {
-      this.abandonedAttempts.add(attempt.attemptId);
+      const ownership = this.ownership;
+      await ownership.recoveryGuard.assertActive();
+      await ownership.lock.assertActive();
+      const receipt = this.receipts.get(attempt.attemptId);
+      if (!receipt) {
+        await this.recordFailure(attempt, 'RECEIPT_NOT_AVAILABLE');
+        return;
+      }
+      try {
+        await this.executor.assertAvailable();
+      } catch {
+        this.handedOff = false;
+        this.abandonedAttempts.add(attempt.attemptId);
+        await this.audit.record({
+          accountId: null,
+          action: AuditAction.UPDATE_FAILED,
+          resourceType: 'update',
+          resourceId: attempt.attemptId,
+          details: { reason: 'INSTALL_EXECUTOR_UNAVAILABLE' },
+        });
+        return;
+      }
+
+      if (this.stopped) return;
       await this.audit.record({
         accountId: null,
-        action: AuditAction.UPDATE_FAILED,
+        action: AuditAction.UPDATE_MAINTENANCE,
         resourceType: 'update',
         resourceId: attempt.attemptId,
-        details: { reason: 'INSTALL_EXECUTOR_UNAVAILABLE' },
+        details: { target_version: attempt.targetVersion },
       });
-      return;
-    }
-
-    await this.audit.record({
-      accountId: null,
-      action: AuditAction.UPDATE_MAINTENANCE,
-      resourceType: 'update',
-      resourceId: attempt.attemptId,
-      details: { target_version: attempt.targetVersion },
-    });
-    this.barrier.enterMaintenance(attempt);
-    const journal = await AttemptJournal.open(this.journalRoot(attempt.installRoot));
-    const intent = await journal.appendIntent({
-      attemptId: attempt.attemptId,
-      fence: attempt.fence,
-      action: 'enter-maintenance',
-      phase: 'MAINTENANCE',
-    });
-    await journal.appendCompletion({
-      attemptId: attempt.attemptId,
-      fence: attempt.fence,
-      intentId: intent.id,
-      phase: 'MAINTENANCE',
-    });
-
-    try {
-      await this.executor.execute({
-        contract_version: UPDATE_INSTALL_EXECUTOR_CONTRACT_VERSION,
-        attempt: Object.freeze({ ...attempt }),
-        receipt,
+      if (this.stopped) return;
+      this.barrier.enterMaintenance(attempt);
+      const journal = ownership.journal;
+      const intent = await journal.appendIntent({
+        attemptId: attempt.attemptId,
+        fence: attempt.fence,
+        action: 'enter-maintenance',
+        phase: 'MAINTENANCE',
       });
-    } catch {
-      await this.recordFailure(attempt, 'INSTALL_EXECUTOR_FAILED');
+      await journal.appendCompletion({
+        attemptId: attempt.attemptId,
+        fence: attempt.fence,
+        intentId: intent.id,
+        phase: 'MAINTENANCE',
+      });
+
+      try {
+        await this.executor.execute({
+          contract_version: UPDATE_INSTALL_EXECUTOR_CONTRACT_VERSION,
+          attempt: Object.freeze({ ...attempt }),
+          receipt,
+          ownership: Object.freeze({
+            lock: ownership.lock,
+            journal,
+            recoveryGuard: ownership.recoveryGuard,
+          }),
+        });
+      } catch {
+        await this.recordFailure(attempt, 'INSTALL_EXECUTOR_FAILED');
+      }
+    } finally {
+      this.changing = false;
     }
   }
 
@@ -347,9 +470,14 @@ export class UpdateInstallCoordinator {
     reason: string,
   ): Promise<void> {
     try {
-      const journal = await AttemptJournal.open(
-        this.journalRoot(attempt.installRoot),
-      );
+      const ownership = this.ownership;
+      if (
+        !ownership || ownership.attemptId !== attempt.attemptId ||
+        ownership.lock.fence !== attempt.fence
+      ) return;
+      await ownership.recoveryGuard.assertActive();
+      await ownership.lock.assertActive();
+      const journal = ownership.journal;
       const intent = await journal.appendIntent({
         attemptId: attempt.attemptId,
         fence: attempt.fence,

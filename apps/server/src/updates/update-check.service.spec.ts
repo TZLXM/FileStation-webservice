@@ -255,4 +255,18 @@ describe('UpdateCheckService', () => {
       }),
     );
   });
+  it('throttles default retries after an expired success refresh fails', async () => {
+    const original = await service.check({ force: false });
+    now += 6 * 60 * 60 * 1000 + 1;
+    fetchImpl = scriptedFetch([{ fixture, fail: true }, { fixture }]);
+    const failed = await service.check({ force: false });
+    expect(failed.available_version).toBe(original.available_version);
+    await service.check({ force: false });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(service.getCachedStatus().available_version).toBe('0.2.5');
+    now += 60_000;
+    expect((await service.check({ force: false })).available_version).toBe('0.2.5');
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+
 });

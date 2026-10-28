@@ -106,6 +106,7 @@ describe('update install response handoff (e2e)', () => {
           value: 'win32:fixture',
         }),
         processCreatedAt: async () => 'win32:process',
+        isProcessAlive: async () => true,
       })
       .overrideProvider(UPDATE_RANDOM_ID)
       .useValue(
@@ -138,6 +139,7 @@ describe('update install response handoff (e2e)', () => {
 
   afterAll(async () => {
     await app.close();
+    await execute.mock.calls[0]?.[0].ownership.recoveryGuard.release();
     delete process.env.FILESTATION_DB_PATH;
     delete process.env.FILESTATION_STORAGE_PATH;
     delete process.env.FILESTATION_TEMP_PATH;
@@ -166,12 +168,13 @@ describe('update install response handoff (e2e)', () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 5));
     }
     expect(execute).toHaveBeenCalledWith({
-      contract_version: 1,
+      contract_version: 2,
       attempt: expect.objectContaining({
         attemptId: response.body.attempt_id,
         targetVersion: receipt.version,
       }),
       receipt,
+      ownership: expect.objectContaining({ lock: expect.anything(), journal: expect.anything(), recoveryGuard: expect.anything() }),
     });
     expect(app.get(WriteBarrierService).accepting).toBe(false);
 

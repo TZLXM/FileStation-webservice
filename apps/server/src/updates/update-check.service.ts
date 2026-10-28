@@ -149,7 +149,6 @@ export class UpdateCheckService implements OnApplicationBootstrap {
       this.config.get<number>('app.updateManualCheckIntervalMs') ??
       DEFAULT_MANUAL_INTERVAL_MS;
     if (
-      options.force &&
       this.cache &&
       now - this.cache.lastAttemptAt < manualInterval
     ) {
