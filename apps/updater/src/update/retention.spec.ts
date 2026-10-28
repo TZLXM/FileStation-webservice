@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { AttemptJournal } from "../state/attempt-journal";
 import { RetentionService } from "./retention";
+import { createHash } from 'node:crypto';
 
 async function committedFixture() {
   const root = await mkdtemp(path.join(tmpdir(), "filestation-retention-"));
@@ -86,6 +87,41 @@ async function committedFixture() {
 }
 
 describe("RetentionService", () => {
+  it('retains and exact-ID acknowledges journal-bound DB-volume diagnostics through backup references',async()=>{
+    const v=await committedFixture();
+    const directories:string[]=[];
+    try {
+      const {context}=await import('../test-support');
+      for(let i=0;i<4;i++) {
+        const attemptId='failed-local-'+i, fence=8+i;
+        const token=createHash('sha256').update(`${attemptId}:${fence}`).digest('hex').slice(0,24);
+        const databasePath=path.join(v.root,'db-volume','live.db');
+        const diagnosticDirectory=path.join(path.dirname(databasePath),'.filestation-update-diagnostics',token);
+        directories.push(diagnosticDirectory);
+        const snapshotPath=path.join(v.root,'backups','backup-'+i,'snapshot.sqlite');
+        const reference=path.join(path.dirname(snapshotPath),'diagnostics',`${attemptId}-${fence}`,'manifest.json');
+        await mkdir(diagnosticDirectory,{recursive:true});await mkdir(path.dirname(reference),{recursive:true});
+        await writeFile(snapshotPath,'unique-snapshot');
+        const manifest={attemptId,fence,databasePath,snapshotPath,diagnosticDirectory,restoreTag:token,createdAt:new Date(2026,0,i+1).toISOString(),detached:true};
+        await writeFile(path.join(diagnosticDirectory,'manifest.json'),JSON.stringify(manifest));await writeFile(path.join(diagnosticDirectory,'live.db'),'failed-db');
+        await writeFile(reference,JSON.stringify(manifest));
+        await v.journal.beginAttempt(context({attemptId,fence,phase:'ROLLBACK_INTENT'}));
+        const intent=await v.journal.appendIntent({attemptId,fence,action:'rollback-database',phase:'ROLLBACK_INTENT',payload:{databasePath,snapshotPath,diagnosticDirectory,restoreTag:token}});
+        await v.journal.appendCompletion({attemptId,fence,intentId:intent.id,phase:'ROLLED_BACK'});
+      }
+      await v.journal.beginAttempt(context({attemptId:'final-retention',fence:12,phase:'COMMITTED',targetVersion:'0.2.5'}));
+      const proof=await v.journal.appendIntent({attemptId:'final-retention',fence:12,action:'verify-committed-restart',phase:'COMMITTED'});
+      await v.journal.appendCompletion({attemptId:'final-retention',fence:12,intentId:proof.id,phase:'COMMITTED',result:{version:'0.2.5',health:'ok',pid:1234,createdAt:'fixture-created',boot:'fixture-boot',nonce:'fixture-nonce-0123456789',release:v.currentRelease}});
+      const service=new RetentionService(v.root);
+      await service.cleanup(await v.journal.readSnapshot());
+      await expect(readFile(path.join(directories[0],'live.db'))).rejects.toMatchObject({code:'ENOENT'});
+      for(const dir of directories.slice(1)) expect(await readFile(path.join(dir,'live.db'),'utf8')).toBe('failed-db');
+      await service.acknowledgeDiagnostic('failed-local-3-11');
+      await service.cleanup(await v.journal.readSnapshot());
+      await expect(readFile(path.join(directories[3],'live.db'))).rejects.toMatchObject({code:'ENOENT'});
+      expect(await readFile(path.join(v.root,'backups','backup-0','snapshot.sqlite'),'utf8')).toBe('unique-snapshot');
+    } finally {await rm(v.root,{recursive:true,force:true});}
+  },30000);
   it('preserves a release referenced only by a previous attempt in the durable journal',async()=>{
     const v=await committedFixture();
     try {

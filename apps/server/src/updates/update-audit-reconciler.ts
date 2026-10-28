@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import {
@@ -6,6 +6,7 @@ import {
   AttemptJournalSnapshot,
 } from '@filestation/updater';
 import { AuditAction } from '../audit/audit.service';
+import { WriteBarrierService } from '../maintenance/write-barrier.service';
 
 export interface AuditReconcileResult {
   inserted: number;
@@ -53,16 +54,51 @@ function details(snapshot: AttemptJournalSnapshot, event: string): string {
 }
 
 @Injectable()
-export class UpdateAuditReconciler {
-  constructor(private readonly dataSource: DataSource) {}
+export class UpdateAuditReconciler implements OnModuleDestroy {
+  private stopped = false;
+  private readonly retries = new Map<string, NodeJS.Timeout>();
+  constructor(private readonly dataSource: DataSource, private readonly barrier: WriteBarrierService) {}
+
+  onModuleDestroy(): void {
+    this.stopped = true;
+    for (const timer of this.retries.values()) clearTimeout(timer);
+    this.retries.clear();
+  }
+
+  private defer(root: string): void {
+    if (this.stopped || this.retries.has(root)) return;
+    const timer = setTimeout(() => {
+      this.retries.delete(root);
+      void this.reconcile(root);
+    }, 250);
+    timer.unref();
+    this.retries.set(root, timer);
+  }
 
   async reconcile(root: string): Promise<AuditReconcileResult> {
-    let snapshot: AttemptJournalSnapshot;
+    if (this.stopped) return {inserted:0,skipped:0};
+    let lease;
     try {
-      snapshot = await AttemptJournal.inspect(root);
+      lease = await this.barrier.forkLease('audit');
     } catch {
-      return { inserted: 0, skipped: 0 };
+      this.defer(root);
+      return {inserted:0,skipped:0};
     }
+    try {
+      const history = await AttemptJournal.inspectHistory(root);
+      let inserted=0, skipped=0;
+      for (const snapshot of history) {
+        const result = await this.persist(snapshot);
+        inserted+=result.inserted; skipped+=result.skipped;
+      }
+      return {inserted,skipped};
+    } catch {
+      this.defer(root);
+      return {inserted:0,skipped:0};
+    } finally { lease.release(); }
+  }
+
+  private async persist(snapshot: AttemptJournalSnapshot): Promise<AuditReconcileResult> {
     if (
       !snapshot.initialized ||
       !snapshot.attemptId ||

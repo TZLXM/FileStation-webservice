@@ -277,10 +277,9 @@ export function validateManagedLaunch(
   };
 }
 
-/** Read-only filesystem checks shared by CLI and direct server startup. */
-export async function validateManagedLaunchOnDisk(
+/** Read-only data safety preflight, including authorized update children. */
+export async function validateManagedDataOnDisk(
   input: ManagedLaunchValidationInput,
-  fs: DurableFileSystem = new NodeDurableFileSystem(),
 ): Promise<ManagedLaunchPlan> {
   const plan = validateManagedLaunch(input);
   requireProductionEnvironment(input.environment ?? {}, input.installMetadata.productionEnvironment, input.processEnvironment);
@@ -289,6 +288,15 @@ export async function validateManagedLaunchOnDisk(
     if (!sameCanonicalPath(actual, plan.paths[key]))
       throw new Error(`${key} canonical target drift detected before writes`);
   }
+  return plan;
+}
+
+/** Normal launch additionally refuses active/uncertain update ownership. */
+export async function validateManagedLaunchOnDisk(
+  input: ManagedLaunchValidationInput,
+  fs: DurableFileSystem = new NodeDurableFileSystem(),
+): Promise<ManagedLaunchPlan> {
+  const plan = await validateManagedDataOnDisk(input);
   await assertLaunchRecoverySafe(plan.installRoot, plan.releaseRealpath, fs);
   return plan;
 }

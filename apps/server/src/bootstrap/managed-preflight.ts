@@ -3,6 +3,7 @@ export {
   loadManagedInstallMetadata,
   parseManagedInstallMetadata,
   validateManagedLaunch,
+  validateManagedDataOnDisk,
   validateManagedLaunchOnDisk,
 } from "@filestation/updater";
 export type {

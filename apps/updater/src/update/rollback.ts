@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { copyFile, readFile } from "node:fs/promises";
 import path from "node:path";
+import { canonicalizePotentialPath } from '../bootstrap/path-plan';
 import {
   AttemptJournal,
   JsonValue,
@@ -98,19 +99,24 @@ export class UpdateRollbackService {
       throw new Error(`pending action ${current.pending.action} must recover first`);
     }
 
+    // A recovery owner advances the fence, but must resume the original
+    // diagnostic identity instead of creating another set for the new fence.
+    const diagnosticFence = current.pending
+      ? current.records.find(record => record.id === current.pending!.intentId)!.context.fence
+      : input.fence;
     let token = createHash("sha256")
-      .update(`${input.attemptId}:${input.fence}`)
+      .update(`${input.attemptId}:${diagnosticFence}`)
       .digest("hex")
       .slice(0, 24);
-    let diagnosticDirectory = path.join(
-      path.dirname(snapshotPath),
-      "diagnostics",
-      `${input.attemptId}-${input.fence}`,
-    );
+    const localDiagnostic = path.join(path.dirname(databasePath), '.filestation-update-diagnostics', token);
+    let diagnosticDirectory = localDiagnostic;
     if(current.pending?.action==='rollback-database') {
       const previous=object(current.pending.payload);
-      if(typeof previous.diagnosticDirectory!=='string' || typeof previous.restoreTag!=='string' || !within(path.dirname(snapshotPath),previous.diagnosticDirectory) || !/^[a-f0-9]{24}$/.test(previous.restoreTag)) throw new Error('pending rollback diagnostic identity malformed');
+      if(typeof previous.diagnosticDirectory!=='string' || previous.restoreTag !== token || (previous.diagnosticDirectory !== localDiagnostic && !within(path.dirname(snapshotPath),previous.diagnosticDirectory))) throw new Error('pending rollback diagnostic identity malformed');
       diagnosticDirectory=previous.diagnosticDirectory; token=previous.restoreTag;
+    }
+    if (await canonicalizePotentialPath(diagnosticDirectory, root) !== diagnosticDirectory) {
+      throw new Error('rollback diagnostic canonical target drift before writes');
     }
     const payload = {
       databasePath,
@@ -160,7 +166,16 @@ export class UpdateRollbackService {
       throw new Error("verified rollback snapshot hash changed");
     }
 
+    const referencePath = path.join(path.dirname(snapshotPath), 'diagnostics', `${input.attemptId}-${diagnosticFence}`, 'manifest.json');
+    const publishReference = async (): Promise<void> => {
+      if (diagnosticDirectory === path.dirname(referencePath)) return; // Existing pending protocol remains recoverable.
+      const manifest = JSON.parse((await this.fs.readFile(path.join(diagnosticDirectory, 'manifest.json'))).toString('utf8'));
+      if (await canonicalizePotentialPath(path.dirname(referencePath), root) !== path.dirname(referencePath)) throw new Error('rollback metadata canonical target drift');
+      await this.fs.ensurePrivateDirectory(path.dirname(referencePath));
+      await this.fs.writeAtomic(referencePath, Buffer.from(JSON.stringify({...manifest, databasePath, diagnosticDirectory, restoreTag:token})+'\n'), {mode:0o600});
+    };
     const complete = async (): Promise<RestoreDatabaseResult> => {
+      await publishReference();
       await input.journal.appendCompletion({ attemptId: input.attemptId, fence: input.fence, intentId: intentId!, phase: "ROLLBACK_INTENT", result: { diagnosticDirectory, snapshotPath, restored: true } });
       return { state: "restored", diagnosticDirectory, snapshotPath };
     };
@@ -177,7 +192,9 @@ export class UpdateRollbackService {
         if (await this.fs.exists(databasePath + suffix)) throw new Error("restored publication has live sidecars");
       return complete();
     }
+    await this.fs.ensurePrivateDirectory(path.dirname(diagnosticDirectory));
     await this.fs.ensurePrivateDirectory(diagnosticDirectory);
+    if (await this.fs.realpath(diagnosticDirectory) !== diagnosticDirectory) throw new Error('rollback diagnostic canonical target drift');
     const sidecars = ["", "-wal", "-shm", "-journal"] as const;
     for (const suffix of sidecars) {
       const source = `${databasePath}${suffix}`;
@@ -203,7 +220,7 @@ export class UpdateRollbackService {
           snapshotSha256: expectedHash,
           releaseReferences: current.records.filter(r => r.kind === "intent" && ["attach-current", "replace-current"].includes(r.action ?? "")).map(r => r.payload),
           attemptId: input.attemptId,
-          fence: input.fence,
+          fence: diagnosticFence,
           createdAt: this.now().toISOString(),
           files: sidecars.map(
             (suffix) => `${path.basename(databasePath)}${suffix}`,
@@ -212,6 +229,7 @@ export class UpdateRollbackService {
       ),
       { mode: 0o600 },
     );
+    await publishReference();
 
     const restorePath = `${databasePath}.restore-${token}`;
     if (await this.fs.exists(restorePath)) await this.fs.unlink(restorePath);

@@ -2,7 +2,7 @@ import { realpath } from 'fs/promises';
 import {
   loadInstallEnvironment,
   loadManagedInstallMetadata,
-  validateManagedLaunch,
+  validateManagedDataOnDisk,
   validateManagedLaunchOnDisk,
 } from './bootstrap/managed-preflight';
 import { detectStartupMode } from './bootstrap/startup-mode';
@@ -93,7 +93,7 @@ async function prepareAuthorizedUpdateStartup(
   applyEnvironment(environment.values);
   const metadata = await loadManagedInstallMetadata(startup.root);
   const currentRealpath = await realpath(metadata.currentPath);
-  const plan = validateManagedLaunch({
+  const plan = await validateManagedDataOnDisk({
     cwd: cwdRealpath,
     executableRealpath,
     installMetadata: metadata,

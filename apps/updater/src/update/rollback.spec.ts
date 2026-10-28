@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { AttemptJournal } from "../state/attempt-journal";
+import { NodeDurableFileSystem } from "../platform/durable-fs";
 import {
   InjectedRollbackCrash,
   UpdateRollbackService,
@@ -82,6 +83,17 @@ async function fixture() {
 }
 
 describe("UpdateRollbackService", () => {
+  it('refuses a retargeted diagnostic ancestor before mkdir/protect/detach', async()=>{
+    const v=await fixture();
+    const outside=await mkdtemp(path.join(tmpdir(),'rollback-diagnostic-outside-'));
+    try {
+      const {symlink}=await import('node:fs/promises');
+      await symlink(outside,path.join(path.dirname(v.databasePath),'.filestation-update-diagnostics'),process.platform==='win32'?'junction':'dir');
+      await expect(new UpdateRollbackService().restoreDatabase({...v,attemptId:'attempt-rollback-01',fence:5})).rejects.toThrow(/canonical|drift|link/i);
+      expect(await readdir(outside)).toEqual([]);
+      expect(await readFile(v.databasePath,'utf8')).toBe('new-database');
+    } finally {await rm(v.root,{recursive:true,force:true});await rm(outside,{recursive:true,force:true});}
+  });
   it("moves database sidecars as one diagnostic set and preserves the snapshot", async () => {
     const value = await fixture();
     try {
@@ -196,6 +208,34 @@ describe("UpdateRollbackService", () => {
 });
 
 describe('rollback filesystem crash boundaries', () => {
+  it.each(['after-diagnostic-intent', 'after-move-db', 'after-move-wal', 'after-move-shm', 'after-move-journal', 'before-publication', 'after-publication'])('split-volume rollback resumes %s with journal-bound DB-volume diagnostics', async (point) => {
+    const v = await fixture();
+    const fs = new NodeDurableFileSystem();
+    const rename = fs.rename.bind(fs);
+    jest.spyOn(fs, 'rename').mockImplementation(async (source, target, options) => {
+      // Model the accepted layout: data and backups are different volumes.
+      const volume = (p: string) => p.startsWith(path.join(v.root, 'data')) ? 'db' : 'install';
+      if (volume(source) !== volume(target)) throw Object.assign(new Error('cross-volume rename'), {code: 'EXDEV'});
+      return rename(source, target, options);
+    });
+    const input = {...v, attemptId: 'attempt-rollback-01', fence: 5};
+    try {
+      await expect(new UpdateRollbackService({fs, crashAt: point as never}).restoreDatabase(input)).rejects.toBeInstanceOf(InjectedRollbackCrash);
+      const pending=await v.journal.readSnapshot();
+      const replace=await v.journal.appendIntent({attemptId:input.attemptId,fence:5,action:'replace-owner',phase:pending.phase!});
+      await v.journal.appendCompletion({attemptId:input.attemptId,fence:5,intentId:replace.id,phase:pending.phase!,nextContext:{...pending.records.at(-1)!.context,fence:6}});
+      input.fence=6;
+      const result = await new UpdateRollbackService({fs}).restoreDatabase(input);
+      expect(result.diagnosticDirectory.startsWith(path.dirname(v.databasePath) + path.sep)).toBe(true);
+      expect(await readFile(v.databasePath, 'utf8')).toBe('verified-snapshot');
+      for (const suffix of ['', '-wal', '-shm', '-journal']) {
+        expect(await readFile(path.join(result.diagnosticDirectory, 'filestation.db' + suffix), 'utf8')).toBe(suffix ? 'new' + suffix : 'new-database');
+      }
+      const reference = JSON.parse(await readFile(path.join(path.dirname(v.snapshotPath), 'diagnostics', 'attempt-rollback-01-5', 'manifest.json'), 'utf8'));
+      expect(reference.diagnosticDirectory).toBe(result.diagnosticDirectory);
+      expect((await v.journal.readSnapshot()).pending).toBeNull();
+    } finally { await rm(v.root, {recursive: true, force: true}); }
+  });
   it.each(['after-move-db', 'after-move-wal', 'after-move-shm', 'after-move-journal', 'before-publication', 'after-publication'])('resumes %s without losing diagnostics or mixing sidecars', async (point) => {
     const v=await fixture();
     const input={...v, attemptId:'attempt-rollback-01', fence:5};
@@ -203,7 +243,8 @@ describe('rollback filesystem crash boundaries', () => {
       await expect(new UpdateRollbackService({crashAt:point as never}).restoreDatabase(input)).rejects.toBeInstanceOf(InjectedRollbackCrash);
       await new UpdateRollbackService().restoreDatabase(input);
       expect(await readFile(v.databasePath,'utf8')).toBe('verified-snapshot');
-      const diagnostics=path.join(path.dirname(v.snapshotPath),'diagnostics','attempt-rollback-01-5');
+      const reference=JSON.parse(await readFile(path.join(path.dirname(v.snapshotPath),'diagnostics','attempt-rollback-01-5','manifest.json'),'utf8'));
+      const diagnostics=reference.diagnosticDirectory;
       expect(await readFile(path.join(diagnostics,'filestation.db'),'utf8')).toBe('new-database');
       for(const suffix of ['-wal','-shm','-journal']) {
         expect(await readFile(path.join(diagnostics,'filestation.db'+suffix),'utf8')).toBe('new'+suffix);

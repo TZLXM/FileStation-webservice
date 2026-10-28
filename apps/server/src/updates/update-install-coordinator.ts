@@ -27,7 +27,7 @@ import { UpdateCapabilityService } from './update-capability.service';
 import { ApplicationShutdownService } from './application-shutdown.service';
 import { DatabaseSnapshotService } from './database-snapshot.service';
 import { HANDOFF_SPAWNER, HandoffSpawner } from './handoff-spawner';
-import { ShutdownCoordinator } from './shutdown-coordinator';
+import { HandoffProgress, ShutdownCoordinator } from './shutdown-coordinator';
 import {
   UPDATE_INSTALL_EXECUTOR,
   UPDATE_JOURNAL_IDENTITY,
@@ -48,6 +48,7 @@ export interface UpdateInstallContext {
   readonly contract_version: typeof UPDATE_INSTALL_EXECUTOR_CONTRACT_VERSION;
   readonly attempt: Readonly<MaintenanceAttempt>;
   readonly receipt: PreparedUpdateReceipt;
+  readonly onProgress?: (phase: HandoffProgress) => void;
   /** Exclusive writer authority retained across app.close(). Task 9 must keep
    * the guard until this process exits; the child then uses fenced recovery.
    * Never release either handle merely because execute() returned. */
@@ -70,6 +71,7 @@ interface HandoffExecution {
     recoveryGuard: RecoveryGuard;
   }>;
   readonly receipt: PreparedUpdateReceipt;
+  readonly onProgress?: (phase: HandoffProgress) => void;
 }
 
 export class UpdateInstallExecutorUnavailableError extends Error {
@@ -133,6 +135,7 @@ export class HandoffUpdateInstallExecutor
     await this.runHandoff(context.attempt, {
       ownership: context.ownership,
       receipt: context.receipt,
+      onProgress: context.onProgress,
     });
   }
 
@@ -175,6 +178,7 @@ export class HandoffUpdateInstallExecutor
         channel: { close: async () => undefined },
         handoffCapability: inheritedCapability,
         closeApplication: () => this.shutdown.close(),
+        onProgress: execution.onProgress,
       });
       await coordinator.handoff(attempt);
     } finally {
@@ -485,11 +489,13 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
         phase: 'MAINTENANCE',
       });
 
+      let progress: HandoffProgress | undefined;
       try {
         await this.executor.execute({
           contract_version: UPDATE_INSTALL_EXECUTOR_CONTRACT_VERSION,
           attempt: Object.freeze({ ...attempt }),
           receipt,
+          onProgress: (phase) => { progress = phase; },
           ownership: Object.freeze({
             lock: ownership.lock,
             journal,
@@ -497,7 +503,11 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
           }),
         });
       } catch {
-        await this.recordFailure(attempt, 'INSTALL_EXECUTOR_FAILED');
+        if (progress === 'pre-freeze') {
+          await this.abortBeforeFreeze(attempt);
+        } else {
+          await this.recordFailure(attempt, 'INSTALL_EXECUTOR_FAILED');
+        }
       }
     } finally {
       this.changing = false;
@@ -600,6 +610,9 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
       // PREPARED remains the durable fail-closed state when a failure event
       // itself cannot be recorded.
     }
+    // Handoff failures are replayed from the journal after recovery. Never
+    // perform uncounted business audit writes while admission is closed.
+    if (!this.barrier.accepting) return;
     await this.audit.record({
       accountId: null,
       action: AuditAction.UPDATE_FAILED,
@@ -607,5 +620,24 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
       resourceId: attempt.attemptId,
       details: { reason },
     });
+  }
+
+  private async abortBeforeFreeze(attempt: MaintenanceAttempt): Promise<void> {
+    const ownership = this.ownership;
+    if (!ownership || ownership.attemptId !== attempt.attemptId || ownership.lock.fence !== attempt.fence) throw new Error('abort ownership changed');
+    await ownership.recoveryGuard.assertActive();
+    await ownership.lock.assertActive();
+    const snapshot = await ownership.journal.readSnapshot();
+    if (snapshot.attemptId !== attempt.attemptId || snapshot.fence !== attempt.fence || snapshot.phase !== 'MAINTENANCE' || snapshot.pending) throw new Error('pre-freeze abort is not proven');
+    const intent = await ownership.journal.appendIntent({attemptId:attempt.attemptId,fence:attempt.fence,action:'record-install-failure',phase:'FAILED',payload:{reason:'PRE_FREEZE_ABORT'}});
+    await ownership.journal.appendCompletion({attemptId:attempt.attemptId,fence:attempt.fence,intentId:intent.id,phase:'FAILED'});
+    // Durable cancellation precedes retiring the exact owner and reopening.
+    await ownership.lock.release();
+    await ownership.recoveryGuard.release();
+    this.ownership = undefined;
+    this.receipts.delete(attempt.attemptId);
+    this.scheduled.delete(attempt.attemptId);
+    this.handedOff = false;
+    this.barrier.abortMaintenance(attempt);
   }
 }

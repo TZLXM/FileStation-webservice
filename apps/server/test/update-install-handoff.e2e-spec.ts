@@ -169,6 +169,7 @@ describe('update install response handoff (e2e)', () => {
     }
     expect(execute).toHaveBeenCalledWith({
       contract_version: 2,
+      onProgress: expect.any(Function),
       attempt: expect.objectContaining({
         attemptId: response.body.attempt_id,
         targetVersion: receipt.version,

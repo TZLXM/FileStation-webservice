@@ -4,6 +4,14 @@ Updated: 2026-10-28
 
 FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 2 实现/自动化验证已完成；security fix commit `7a5ba50` 经最终独立复审 APPROVED。最近一次成功 registry audit 快照中依赖 Critical/High 已清零，但 Phase 2 发布验收仍 pending。** 代码测试通过不能替代用户手动验收；该快照仍有 Moderate/Low advisories，续作时的 registry 刷新未获网络权限。
 
+## Task 9 / Chapter 7–9 fix round 3/5 — I1–I4
+
+- I1: scheduled install now carries explicit pre-freeze/freeze-started/close-started progress. A proved pre-freeze failure durably fails the exact attempt, retires its owner/OS guard and restores admission/background leases for a fresh confirmation. Freeze or partial close never thaws the source. Real coordinator/executor + SQLite regressions cover file/parent snapshot flush, drain, partial freeze and close failures.
+- I2: rollback detaches DB/WAL/SHM/journal into a protected DB-volume diagnostic directory, bound to the original rollback intent across recovery fence changes. A protected backups-root manifest references that set; canonical drift is rejected before diagnostic writes. Retention validates the reference against complete journal history, preserves latest failed/other bounded sets and snapshots, and applies exact-ID acknowledgment to the reference and its corresponding local diagnostic set.
+- I3: the whole strict journal-history inspection and terminal audit replay holds a counted audit lease. A next scheduled install drains that lease before snapshot; maintenance/frozen admission defers reconciliation. Validated older terminal/restart events survive newer PREPARED attempts and interrupted inserts retry idempotently. Deferred timers are retired at module shutdown.
+- I4: normal and authorized validation/gated startup share the read-only canonical DB/storage/temp and production-environment preflight. Verified inherited authority bypasses only normal active-journal refusal. Actual bootstrap regressions exercise both startup modes with real retargeted junctions/directories before the application startup/import boundary.
+- Fresh verification: affected updater **4 suites / 56 passed**; server unit **52 suites / 311 passed / 20 todo**; Web no-cache **17 files / 186 passed**; final full E2E **16 suites / 115 passed**; selected real production rollback **3 passed / 32 filtered out**, 122.780s; root typecheck/build and diff-check exit 0. Initial E2E was **114 passed / 1 failed** because its exact executor-context assertion omitted `onProgress`; the callback assertion was added and focused 1/1 plus final full 115/115 passed. The interrupted earlier E2E/production session outcomes were unavailable and are not claimed. No broad slow production matrix rerun; hosted/platform/service/power-loss/Nginx/FRP acceptance remains pending. Version **0.2.0**, publisher key `UNCONFIGURED`; no external calls/push/tag/release. Independent review must confirm I1–I4 closure.
+
 ## 项目状态
 
 | 方面 | 状态 |

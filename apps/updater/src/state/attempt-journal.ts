@@ -511,6 +511,20 @@ export class AttemptJournal {
     return summarize(await journal.loadAndRepair(true));
   }
 
+  /** One strict, read-only decode validates the whole history before exposing
+   * terminal attempts to delayed consumers. Never reopen raw JSON after validation. */
+  static async inspectHistory(root: string, options: AttemptJournalOptions = {}): Promise<AttemptJournalSnapshot[]> {
+    const fs = options.fs ?? new NodeDurableFileSystem();
+    const journal = new AttemptJournal(root, path.join(root, JOURNAL_FILENAME), fs, options.now ?? (() => new Date()), options.id ?? randomUUID);
+    const records = await journal.loadAndRepair(true);
+    const groups: JournalRecord[][] = [];
+    for (const record of records) {
+      if (record.kind === 'attempt') groups.push([]);
+      groups.at(-1)!.push(record);
+    }
+    return groups.map(summarizeAttempt);
+  }
+
   private withWrite<T>(operation: () => Promise<T>): Promise<T> {
     const next = this.writeQueue.then(operation, operation);
     this.writeQueue = next.then(

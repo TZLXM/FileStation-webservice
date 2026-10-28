@@ -1,5 +1,6 @@
 import { rm } from "node:fs/promises";
 import path from "node:path";
+import { createHash } from 'node:crypto';
 import {
   AttemptJournalSnapshot,
   AttemptJournal,
@@ -121,9 +122,9 @@ export class RetentionService {
     const verified = await AttemptJournal.inspect(root, {fs:this.fs});
     if(verified.attemptId!==snapshot.attemptId || verified.fence!==snapshot.fence || verified.sequence!==snapshot.sequence)
       throw new Error('retention journal changed before reachability scan');
-    // inspect validates the complete history; readSnapshot exposes only the
-    // latest attempt. Older snapshot/attempt references remain load-bearing.
-    for(const line of (await this.fs.readFile(path.join(root,'update-attempt.journal'))).toString('utf8').trim().split('\n')) collect(JSON.parse(line));
+    const history = await AttemptJournal.inspectHistory(root, {fs:this.fs});
+    const historyRecords = history.flatMap(attempt => attempt.records);
+    collect(historyRecords);
     const scan = async (directory:string):Promise<void> => {
       if (!(await this.fs.exists(directory))) return;
       for (const name of await this.fs.readdir(directory)) {
@@ -138,15 +139,32 @@ export class RetentionService {
       }
     };
     await scan(path.join(root,'backups'));
-    const retainedKeys = new Set(
-      retained.map((value) =>
-        process.platform === "win32"
-          ? path.resolve(value).toLowerCase()
-          : path.resolve(value),
-      ),
-    );
     const deleted: string[] = [];
     const diagnostics=metadata.filter(item=>path.basename(item.filename)==='manifest.json' && path.basename(path.dirname(path.dirname(item.filename)))==='diagnostics');
+    // A backup reference grants deletion authority only for the exact DB-local
+    // directory bound by a validated rollback intent. Metadata alone is not authority.
+    const targets = new Map<string,string>();
+    for (const item of diagnostics) {
+      const value=item.value;
+      if (value.diagnosticDirectory === undefined) continue;
+      const token=createHash('sha256').update(`${value.attemptId}:${value.fence}`).digest('hex').slice(0,24);
+      if (typeof value.databasePath!=='string' || !path.isAbsolute(value.databasePath)) throw new Error('diagnostic reference database malformed');
+      const expected=path.join(path.dirname(value.databasePath),'.filestation-update-diagnostics',token);
+      const bound=historyRecords.some(record => {
+        if(record.kind!=='intent' || record.action!=='rollback-database' || record.context.attemptId!==value.attemptId || record.context.fence!==value.fence) return false;
+        const payload=record.payload as Record<string,unknown> | undefined;
+        return payload !== undefined && payload.databasePath===value.databasePath && payload.diagnosticDirectory===expected && payload.restoreTag===token && typeof payload.snapshotPath==='string' && path.dirname(item.filename)===path.join(path.dirname(payload.snapshotPath),'diagnostics',`${value.attemptId}-${value.fence}`);
+      });
+      if (!bound || value.diagnosticDirectory!==expected || value.restoreTag!==token) throw new Error('diagnostic reference is not journal-bound');
+      if (await this.fs.exists(expected)) {
+        if (await this.fs.realpath(expected)!==expected || (await this.fs.lstat(expected)).isSymbolicLink()) throw new Error('diagnostic target drift');
+        const local=JSON.parse((await this.fs.readFile(path.join(expected,'manifest.json'))).toString('utf8'));
+        if(local.attemptId!==value.attemptId || local.fence!==value.fence || local.detached!==true) throw new Error('diagnostic manifest mismatch');
+        collect(local);
+      }
+      targets.set(item.filename,expected);
+    }
+    const retainedKeys = new Set(retained.map(value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value)));
     diagnostics.sort((a,b)=>String(b.value.createdAt).localeCompare(String(a.value.createdAt)) || a.filename.localeCompare(b.filename));
     // Latest failure requires an exact-ID administrator acknowledgment. Keep at
     // most two additional sets; snapshots and bootstrap assets are never pruned.
@@ -189,8 +207,12 @@ export class RetentionService {
     }
     for(const item of diagnostics) {
       const directory=path.dirname(item.filename);
-      if(keepDiagnostics.has(item.filename)) retained.push(directory);
-      else { await rm(directory,{recursive:true,force:false}); deleted.push(directory); }
+      const target=targets.get(item.filename);
+      if(keepDiagnostics.has(item.filename)) retained.push(directory,...(target ? [target] : []));
+      else {
+        if(target && await this.fs.exists(target)) {await rm(target,{recursive:true,force:false});deleted.push(target);}
+        await rm(directory,{recursive:true,force:false}); deleted.push(directory);
+      }
     }
     return { eligible: true, deleted, retained };
   }

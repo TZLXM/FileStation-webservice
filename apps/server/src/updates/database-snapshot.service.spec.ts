@@ -16,6 +16,16 @@ import { StorageService } from '../files/storage.service';
 import { WriteBarrierService } from '../maintenance/write-barrier.service';
 import { WriteFreezeService } from '../maintenance/write-freeze.service';
 import { DatabaseSnapshotService } from './database-snapshot.service';
+import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
+import { Response } from 'express';
+import { ConfigService } from '@nestjs/config';
+import { AttemptJournal } from '@filestation/updater';
+import { AuditService } from '../audit/audit.service';
+import { registerMaintenanceRequestLease } from '../maintenance/maintenance-admission.guard';
+import { HandoffUpdateInstallExecutor, UpdateInstallCoordinator } from './update-install-coordinator';
+import { UpdateCapabilityService } from './update-capability.service';
+import { ApplicationShutdownService } from './application-shutdown.service';
 
 function openReadonly(filename: string): Promise<sqlite3.Database> {
   return new Promise((resolve, reject) => {
@@ -96,6 +106,69 @@ describe('DatabaseSnapshotService', () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
     await rm(root, { recursive: true, force: true });
   });
+
+  it.each(['file', 'parent', 'drain', 'freeze', 'close'])('scheduled real handoff handles %s failure with retry only before freeze', async (failure) => {
+    const staging = path.join(root, '.filestation-update-staging', 'one', 'payload');
+    await import('node:fs/promises').then(fs => fs.mkdir(staging, {recursive:true}));
+    const durable = new NodeDurableFileSystem();
+    let fileSynced = false;
+    const sync = durable.syncFile.bind(durable);
+    jest.spyOn(durable, 'syncFile').mockImplementation(async filename => {
+      if (failure === 'file') throw new Error('snapshot file flush');
+      await sync(filename); fileSynced = true;
+    });
+    const syncParent = durable.fsyncDirectory.bind(durable);
+    jest.spyOn(durable, 'fsyncDirectory').mockImplementation(async directory => {
+      if (failure === 'parent' && fileSynced) throw new Error('snapshot parent flush');
+      await syncParent(directory);
+    });
+    if (failure === 'drain') jest.spyOn(barrier, 'waitForZero').mockRejectedValueOnce(new Error('drain deadline'));
+    const config = {get:(key:string) => key === 'app.dbPath' ? databasePath : key === 'app.updateJournalRoot' ? root : undefined} as ConfigService;
+    const capability = {inspect:async()=>({mode:'managed', supported:true, install_root:root, platform: process.platform === 'win32' ? 'windows-x64' : 'linux-x64'})} as UpdateCapabilityService;
+    const snapshot = new DatabaseSnapshotService(dataSource, config, barrier, freeze, durable);
+    const frozen = jest.spyOn(snapshot, 'freezeSourceDatabase');
+    if (failure === 'freeze') {
+      const freezeSource = DatabaseSnapshotService.prototype.freezeSourceDatabase.bind(snapshot);
+      frozen.mockImplementation(async attempt => { await freezeSource(attempt); throw new Error('partially frozen'); });
+    }
+    const close = jest.fn(async()=>{throw new Error('partial close');}); const spawn = jest.fn();
+    const executor = new HandoffUpdateInstallExecutor(config, capability, snapshot, barrier, {close} as unknown as ApplicationShutdownService, {startWaiting:spawn});
+    const execute=executor.execute.bind(executor);let executed=false;
+    jest.spyOn(executor,'execute').mockImplementation(async context=>{try{await execute(context);}finally{executed=true;}});
+    const identity = {current:async()=>({provider:'windows-cim' as const,value:'fixture-boot'}),processCreatedAt:async()=> 'fixture-created',isProcessAlive:async()=>true};
+    const coordinator = new UpdateInstallCoordinator(config, barrier, capability, {record:jest.fn()} as unknown as AuditService, executor, identity, Date.now, '0.2.0', randomUUID);
+    const receipt = Object.freeze({prepared_id:randomUUID(),manifest_sha256:'a'.repeat(64),artifact_sha256:'b'.repeat(64),version:'0.2.5', platform:process.platform === 'win32' ? 'windows-x64' : 'linux-x64',arch:'x64',staging_path:await import('node:fs/promises').then(fs=>fs.realpath(staging)),verified_size:1,unpacked_size:1,expires_at:Date.now()+60000});
+    try {
+      const accepted = await coordinator.accept(receipt);
+      const response = new EventEmitter() as Response;
+      const lease = await barrier.acquire('http');
+      const state = registerMaintenanceRequestLease({} as any,response,lease);
+      state.handlerStarted=true; state.handlerDone=true;
+      coordinator.scheduleAfterResponse(accepted.attempt,response);
+      response.emit('finish');
+      // Bound the real scheduled asynchronous execution without weakening assertions.
+      for(let i=0;i<400 && (!executed || (coordinator as any).changing);i++) await new Promise(r=>setTimeout(r,10));
+      expect(executed).toBe(true);
+      if (failure === 'freeze' || failure === 'close') {
+        expect(barrier.accepting).toBe(false);expect(freeze.isFrozen).toBe(true);
+        await expect(barrier.acquire('cron:file-lifecycle')).rejects.toThrow();
+        await expect(coordinator.accept(Object.freeze({...receipt,prepared_id:randomUUID()}))).rejects.toThrow();
+        expect(spawn).toHaveBeenCalledTimes(failure === 'close' ? 1 : 0);
+        expect(close).toHaveBeenCalledTimes(failure === 'close' ? 1 : 0);
+        expect((await AttemptJournal.inspect(root)).records.some(r=>r.phase==='HANDOFF_READY')).toBe(false);
+        return;
+      }
+      expect((await AttemptJournal.inspect(root)).phase).toBe('FAILED');
+      for(let i=0;i<100 && !barrier.accepting;i++) await new Promise(r=>setTimeout(r,10));
+      expect(barrier.accepting).toBe(true);
+      expect(frozen).not.toHaveBeenCalled(); expect(freeze.isFrozen).toBe(false);
+      expect(close).not.toHaveBeenCalled(); expect(spawn).not.toHaveBeenCalled();
+      await barrier.withLease('cron:file-lifecycle',async()=> { await dataSource.query("INSERT INTO system_meta (key,value) VALUES ('resumed','yes')"); });
+      const retry = await coordinator.accept(Object.freeze({...receipt,prepared_id:randomUUID()}));
+      expect(retry.attempt_id).not.toBe(accepted.attempt_id);
+      expect((await AttemptJournal.inspect(root)).phase).toBe('PREPARED');
+    } finally { await coordinator.onModuleDestroy(); await (coordinator as any).ownership?.recoveryGuard.release(); jest.restoreAllMocks(); }
+  },15000);
 
   it('closes the verifier, syncs the snapshot and parent before returning a receipt', async () => {
     const durable = new NodeDurableFileSystem();

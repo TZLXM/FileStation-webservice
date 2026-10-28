@@ -30,7 +30,10 @@ export interface ShutdownCoordinatorOptions {
   exit?: (code: number) => never;
   drainDeadline?: () => number;
   now?: () => Date;
+  onProgress?: (phase: HandoffProgress) => void;
 }
+
+export type HandoffProgress = 'pre-freeze' | 'freeze-started' | 'close-started';
 
 function safeRelative(parent: string, candidate: string): boolean {
   const relative = path.relative(parent, candidate);
@@ -60,6 +63,7 @@ export class ShutdownCoordinator {
   }
 
   async handoff(attempt: MaintenanceAttempt): Promise<never> {
+    this.options.onProgress?.('pre-freeze');
     const owned = this.options.barrier.currentAttempt;
     if (
       !owned ||
@@ -87,6 +91,8 @@ export class ShutdownCoordinator {
       await this.options.snapshot.createVerifiedSnapshot(attempt);
     this.validateSnapshot(attempt, metadata);
 
+    // Even a rejected freeze may already have latched query-only/storage freeze.
+    this.options.onProgress?.('freeze-started');
     await this.options.snapshot.freezeSourceDatabase(attempt);
     const journal = this.options.journal;
     const snapshotIntent = await journal.appendIntent({
@@ -121,6 +127,7 @@ export class ShutdownCoordinator {
       action: 'close-application',
       phase: 'SNAPSHOT_READY',
     });
+    this.options.onProgress?.('close-started');
     await this.options.closeApplication();
     await journal.appendCompletion({
       attemptId: attempt.attemptId,
