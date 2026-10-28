@@ -6,6 +6,7 @@ import {
   AttemptJournal,
   AttemptJournalSnapshot,
   JsonValue,
+  JournalCorruptError,
 } from "../state/attempt-journal";
 import {
   PlatformBootIdentityProvider,
@@ -116,15 +117,19 @@ export class UpdateOrchestrator {
   async run(
     attempt: UpdateOrchestrationAttempt,
   ): Promise<UpdateOrchestrationResult> {
-    const initial = await this.hooks.inspect(attempt);
+    // Inherited continuation is launched before Nest closes. Only explicit
+    // operator recovery may dispatch pre-handoff phases into rollback.
+    const initial = attempt.recovery
+      ? await this.hooks.inspect(attempt)
+      : await this.hooks.waitForHandoff(attempt);
     if (recoveryActionFor(initial) === "restart-new") {
       return this.hooks.restartCommitted(attempt, initial);
     }
-    if (initial.phase !== 'HANDOFF_READY' || attempt.recovery) {
+    if (attempt.recovery) {
       if (!initial.initialized || initial.attemptId !== attempt.attemptId) throw new Error('recovery attempt is uninitialized or changed');
       return this.hooks.rollback(attempt, initial, 'interrupted update');
     }
-    const handoff = await this.hooks.waitForHandoff(attempt);
+    const handoff = initial;
     try {
       const forwarded = await this.hooks.forward(attempt, handoff);
       if (forwarded.state === "rolled_back") return forwarded;
@@ -311,8 +316,8 @@ export class ManagedUpdateHooks implements UpdateOrchestratorHooks {
     if(snapshot.attemptId!==attempt.attemptId || !snapshot.owner) throw new Error('recovery attempt changed');
     const boot=await this.identity.current();
     const actor={attemptId:attempt.attemptId,bootIdentity:boot.value,pid:process.pid,processCreatedAt:await this.identity.processCreatedAt(process.pid),heartbeatAt:new Date().toISOString(),currentVersion:snapshot.currentVersion!,targetVersion:snapshot.targetVersion!,previousVersion:snapshot.previousVersion,backupId:snapshot.backupId};
-    const journal=await AttemptJournal.open(attempt.installRoot,{fs:this.fs});
-    const recovery=await UpdateLock.acquireRecovery(attempt.installRoot,actor,{identityProvider:this.identity,journal,fs:this.fs,servicePort:attempt.servicePort,operatorAuthority:this.operatorAuthority});
+    const recovery=await UpdateLock.acquireRecovery(attempt.installRoot,actor,{identityProvider:this.identity,fs:this.fs,servicePort:attempt.servicePort,operatorAuthority:this.operatorAuthority});
+    const journal=recovery.journal;
     try {
       const lock=await recovery.recoverAttempt({owner:actor,expectedFence:snapshot.fence,handoffIdentity:this.handoffIdentity});
       this.ownership={journal,lock,recovery};
@@ -329,11 +334,37 @@ export class ManagedUpdateHooks implements UpdateOrchestratorHooks {
 
   private async stopRecordedChildren(attempt:UpdateOrchestrationAttempt):Promise<void> {
     const file=path.join(attempt.installRoot,'update.processes.json');
-    if(!(await this.fs.exists(file))) return;
-    const ledger=JSON.parse((await this.fs.readFile(file)).toString('utf8'));
-    if(ledger.attemptId!==attempt.attemptId || !Array.isArray(ledger.children)) throw new Error('child identity ledger mismatched');
+    const hasLedger=await this.fs.exists(file);
+    let children: Array<{pid:number;createdAt:string;boot:string}>;
+    if(hasLedger) {
+      const ledger=JSON.parse((await this.fs.readFile(file)).toString('utf8'));
+      if(ledger.attemptId!==attempt.attemptId || !Array.isArray(ledger.children)) throw new Error('child identity ledger mismatched');
+      children=ledger.children;
+    } else {
+      // Ledger retirement does not retire the durable, verified startup proof.
+      // Recover that exact child even if the updater died during lock release.
+      if(!this.ownership) throw new Error('terminal child recovery requires retained ownership');
+      await this.ownership.recovery.assertActive();
+      const snapshot=await this.ownership.journal.readSnapshot();
+      if(snapshot.attemptId!==attempt.attemptId) throw new Error('terminal child attempt changed');
+      if(!['COMMITTED','ROLLED_BACK','ABORTED'].includes(snapshot.phase ?? '')) return;
+      const action=snapshot.phase==='COMMITTED'?'verify-committed-restart':'launch-terminal';
+      const intents=new Map(snapshot.records.filter(record=>record.kind==='intent' && record.action===action).map(record=>[record.id,record]));
+      const completed=[...snapshot.records].reverse().find(record=>record.kind==='completion' && record.intentId && intents.has(record.intentId));
+      if(!completed) return;
+      const proof=completed.result;
+      const intent=intents.get(completed.intentId!)!;
+      const version=snapshot.phase==='COMMITTED'?snapshot.targetVersion:snapshot.previousVersion ?? snapshot.currentVersion;
+      const release=await this.fs.realpath(path.join(attempt.installRoot,'current'));
+      if(!isObject(proof) || !isObject(intent.payload) || completed.context.attemptId!==attempt.attemptId || completed.phase!==snapshot.phase ||
+        !Number.isSafeInteger(proof.pid) || Number(proof.pid)<1 || typeof proof.createdAt!=='string' || !proof.createdAt || typeof proof.boot!=='string' || !proof.boot ||
+        typeof proof.nonce!=='string' || proof.nonce.length<16 || proof.health!=='ok' || proof.version!==version || intent.payload.version!==version ||
+        typeof proof.release!=='string' || !within(path.join(attempt.installRoot,'releases'),proof.release) || path.relative(proof.release,release)!=='' || intent.payload.release!==proof.release)
+        throw new Error('durable terminal child identity/version proof mismatched');
+      children=[{pid:proof.pid as number,createdAt:proof.createdAt,boot:proof.boot}];
+    }
     const boot=await this.identity.current();
-    for(const record of ledger.children) {
+    for(const record of children) {
       if(record.boot!==boot.value) continue; // A different OS boot cannot retain that process.
       if(typeof record.pid!=='number' || typeof record.createdAt!=='string') throw new Error('child identity missing');
       if(await this.identity.isProcessAlive(record.pid,record.createdAt)) {
@@ -349,7 +380,7 @@ export class ManagedUpdateHooks implements UpdateOrchestratorHooks {
         }
       }
     }
-    await this.fs.unlink(file);
+    if(hasLedger) await this.fs.unlink(file);
   }
 
   private async recordChild(attempt:UpdateOrchestrationAttempt, child:ChildProcess):Promise<string> {
@@ -375,7 +406,17 @@ export class ManagedUpdateHooks implements UpdateOrchestratorHooks {
   ): Promise<AttemptJournalSnapshot> {
     const deadline = Date.now() + (attempt.timeoutMs ?? 120_000);
     while (Date.now() < deadline) {
-      const snapshot = await AttemptJournal.inspect(attempt.installRoot);
+      let snapshot: AttemptJournalSnapshot;
+      try { snapshot = await AttemptJournal.inspect(attempt.installRoot); }
+      catch(error) {
+        // A read-only waiter may catch the old writer between append and flush.
+        // Retry only an incomplete tail, bounded by the handoff deadline; never repair it.
+        if(error instanceof JournalCorruptError && /partial journal tail/.test(error.message)) {
+          await new Promise(resolve=>setTimeout(resolve,100));
+          continue;
+        }
+        throw error;
+      }
       if (
         snapshot.attemptId === attempt.attemptId &&
         snapshot.phase === "HANDOFF_READY" &&
@@ -440,13 +481,14 @@ export class ManagedUpdateHooks implements UpdateOrchestratorHooks {
       actor,
       {
         identityProvider: this.identity,
+        fs: this.fs,
         servicePort: attempt.servicePort,
       },
     );
     let lock: LockHandle | undefined;
     let running: RunningServer | undefined;
     let currentFence = snapshot.fence;
-    const journal = await AttemptJournal.open(attempt.installRoot);
+    const journal = recovery.journal;
     try {
       lock = await recovery.takeoverHandoff({
         owner: actor,

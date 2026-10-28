@@ -42,10 +42,7 @@ function hooks(
   current: AttemptJournalSnapshot,
 ): UpdateOrchestratorHooks {
   return {
-    inspect: jest
-      .fn()
-      .mockResolvedValueOnce(snapshot("HANDOFF_READY"))
-      .mockResolvedValue(current),
+    inspect: jest.fn().mockResolvedValue(current),
     waitForHandoff: jest.fn(async () => snapshot("HANDOFF_READY")),
     forward: jest.fn(async () => {
       throw new Error("forward failed");
@@ -66,9 +63,17 @@ function hooks(
 }
 
 describe("UpdateOrchestrator recovery policy", () => {
+  it.each(['PREPARED','MAINTENANCE','SNAPSHOT_READY'] as const)('normal inherited continuation waits through %s without taking recovery ownership',async phase=>{
+    const value=hooks(snapshot(phase)); value.inspect=async()=>snapshot(phase);
+    value.forward=jest.fn(async()=>({state:'rolled_back' as const,attemptId:attempt.attemptId,fence:6,reason:'fixture finished'}));
+    await new UpdateOrchestrator(value).run(attempt);
+    expect(value.waitForHandoff).toHaveBeenCalledTimes(1);
+    expect(value.forward).toHaveBeenCalled();
+    expect(value.rollback).not.toHaveBeenCalled();
+  });
   it.each(['PREPARED','MAINTENANCE','SNAPSHOT_READY','OLD_STOPPED','CURRENT_SWITCHED','MIGRATING','READY_TO_COMMIT','ROLLBACK_INTENT'] as const)('dispatches initial %s into real recovery rather than waiting for handoff',async phase=>{
     const value=hooks(snapshot(phase)); value.inspect=async()=>snapshot(phase);
-    await new UpdateOrchestrator(value).run(attempt);
+    await new UpdateOrchestrator(value).run({...attempt,recovery:true});
     expect(value.waitForHandoff).not.toHaveBeenCalled();
     expect(value.rollback).toHaveBeenCalled();
   });

@@ -107,6 +107,20 @@ async function prepareHandoff(
 }
 
 describe("UpdateLock", () => {
+  it('rejects a recovery contender before any private-directory protection or journal open',async()=>{
+    const temp=await createTempRoot();
+    const {acquireRecoveryGuard}=await import('../platform/recovery-guard');
+    const guard=await acquireRecoveryGuard(path.join(temp.path,'update.recovery.guard'));
+    try {
+      const provider=new TestIdentityProvider();
+      const fs=new InjectableDurableFs();
+      const ensure=jest.spyOn(fs,'ensurePrivateDirectory');
+      const protect=jest.spyOn(fs,'protect');
+      await expect(UpdateLock.acquireRecovery(temp.path,owner('attempt-01',provider.boot,200,'created-new'),{fs,identityProvider:provider})).rejects.toThrow(/guard/i);
+      expect(ensure).not.toHaveBeenCalled();expect(protect).not.toHaveBeenCalled();
+      expect(fs.calls).toEqual([]);
+    }finally{await guard.release();await temp.cleanup();}
+  });
   it('retains a valid checksum across repeated owner heartbeats and release',async()=>{
     const temp=await createTempRoot();
     try {

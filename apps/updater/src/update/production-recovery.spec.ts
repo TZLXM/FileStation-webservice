@@ -10,6 +10,7 @@ import {UpdateLock} from '../state/update-lock';
 import {PlatformBootIdentityProvider} from '../state/boot-identity';
 import {NodeDurableFileSystem} from '../platform/durable-fs';
 import {CurrentLinkSwitcher} from '../platform/current-link';
+import {UpdateCapabilityAuthority,encodeInheritedCapability} from './capability';
 
 jest.setTimeout(120_000);
 const compiled=path.resolve(__dirname,'../../dist');
@@ -22,8 +23,13 @@ async function port() {
   await new Promise<void>(r=>listener.close(()=>r())); return result;
 }
 async function exited(child:ChildProcess) {if(child.exitCode===null && child.signalCode===null) await once(child,'exit');}
+async function exitedWithin(child:ChildProcess,timeoutMs=10000) {
+  let timer:ReturnType<typeof setTimeout>;
+  try {await Promise.race([exited(child),new Promise<never>((_r,reject)=>{timer=setTimeout(()=>reject(new Error(`fixture child ${child.pid} exit exceeded ${timeoutMs}ms`)),timeoutMs);})]);}
+  finally{clearTimeout(timer!);}
+}
 
-async function fixture(phase:AttemptPhase,pending?:string, reboot=false) {
+async function fixture(phase:AttemptPhase,pending?:string, reboot=false, liveOld=false) {
   const root=await realpath(await mkdtemp(path.join(tmpdir(),'fs-production-recovery-')));
   const servicePort=await port();
   const paths={database:path.join(root,'runtime/db.sqlite'),storage:path.join(root,'runtime/storage'),temp:path.join(root,'runtime/temp')};
@@ -59,12 +65,33 @@ async function fixture(phase:AttemptPhase,pending?:string, reboot=false) {
   await durable.createJunction(previous,path.join(root,'current')).catch(()=>durable.symlink(previous,path.join(root,'current')));
   await durable.writeAtomic(path.join(root,'managed-install.json'),Buffer.from(JSON.stringify({schemaVersion:1,installId:'fixture',installRoot:root,currentPath:path.join(root,'current'),environmentPath:path.join(root,'.env'),paths,bootstrapBackupId:'bootstrap',bootstrapFingerprint:'a'.repeat(64),createdAt:new Date().toISOString(),productionEnvironment:{nodeEnv:'production',required:['NODE_ENV','JWT_SECRET'],source:'service'}})),{mode:0o600});
   await writeFile(path.join(root,'updater/dist/cli.js'),`process.on('exit',code=>require('fs').writeFileSync(${JSON.stringify(path.join(root,'fixture-launch-exit.txt'))},String(code)));process.on('uncaughtException',e=>{require('fs').writeFileSync(${JSON.stringify(path.join(root,'fixture-launch-error.txt'))},e.stack);process.exit(1);});require(${JSON.stringify(path.join(compiled,'cli.js'))}).main().catch(e=>{require('fs').writeFileSync(${JSON.stringify(path.join(root,'fixture-launch-error.txt'))},e.stack);process.exit(1);});`);
-  const old=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',windowsHide:true});
+  const pipeCapability=encodeInheritedCapability(new UpdateCapabilityAuthority());
+  const old=spawn(process.execPath,['-e',`
+    let guard,tailSize;
+    process.on('message',async message=>{
+      try {
+        const file=${JSON.stringify(path.join(root,'update-attempt.journal'))};
+        if(message==='hold') guard=await require(${JSON.stringify(path.join(compiled,'platform/recovery-guard.js'))}).acquireRecoveryGuard(${JSON.stringify(path.join(root,'update.recovery.guard'))});
+        if(message==='partial') {tailSize=require('fs').statSync(file).size;require('fs').appendFileSync(file,'{"in-flight":');}
+        if(message==='restore-tail' && tailSize!==undefined) require('fs').truncateSync(file,tailSize);
+        if(message==='handoff') {
+          await guard.assertActive();
+          const journal=await require(${JSON.stringify(path.join(compiled,'state/attempt-journal.js'))}).AttemptJournal.open(${JSON.stringify(root)});
+          const state=await journal.readSnapshot();
+          const intent=state.pending ?? await journal.appendIntent({attemptId:state.attemptId,fence:state.fence,action:'close-application',phase:'SNAPSHOT_READY'});
+          await journal.appendCompletion({attemptId:state.attemptId,fence:state.fence,intentId:intent.intentId ?? intent.id,phase:'HANDOFF_READY'});
+          process.exit(0); // Kernel retains the guard through this process's exit.
+        }
+        process.send({event:message});
+      }catch(error){process.send({error:error.message});}
+    });
+    setInterval(()=>{},1000);
+  `],{stdio:['ignore','ignore','ignore','ipc'],windowsHide:true});
   await once(old,'spawn');
   const createdAt=await identity.processCreatedAt(old.pid!);const boot=(await identity.current()).value;
   const journal=await AttemptJournal.open(root);
   const provider=reboot?{current:async()=>({provider:'linux-proc' as const,value:'fixture-previous-boot'}),processCreatedAt:(pid:number)=>identity.processCreatedAt(pid),isProcessAlive:(pid:number,created:string)=>identity.isProcessAlive(pid,created)}:identity;
-  const owner=await UpdateLock.acquire(root,{attemptId:'attempt-real',bootIdentity:reboot?'fixture-previous-boot':boot,pid:old.pid!,processCreatedAt:createdAt,heartbeatAt:new Date().toISOString(),handoffIdentityHash:createHash('sha256').update('fixture-handoff').digest('hex'),currentVersion:'0.2.0',targetVersion:'0.2.5',previousVersion:'0.2.0',backupId:'backup'},{journal,identityProvider:provider});
+  const owner=await UpdateLock.acquire(root,{attemptId:'attempt-real',bootIdentity:reboot?'fixture-previous-boot':boot,pid:old.pid!,processCreatedAt:createdAt,heartbeatAt:new Date().toISOString(),handoffIdentityHash:createHash('sha256').update(liveOld?pipeCapability:'fixture-handoff').digest('hex'),currentVersion:'0.2.0',targetVersion:'0.2.5',previousVersion:'0.2.0',backupId:'backup'},{journal,identityProvider:provider});
   const action=async(action:string,p:AttemptPhase,payload:object={})=>{
     const i=await journal.appendIntent({attemptId:'attempt-real',fence:owner.fence,action,phase:p,payload:payload as never});
     await journal.appendCompletion({attemptId:'attempt-real',fence:owner.fence,intentId:i.id,phase:p});
@@ -76,7 +103,14 @@ async function fixture(phase:AttemptPhase,pending?:string, reboot=false) {
   }
   if(!(await journal.readSnapshot()).pending) await action('fixture-stage',phase);
   if(pending && pending!=='interrupted-switch') await journal.appendIntent({attemptId:'attempt-real',fence:owner.fence,action:pending,phase,payload:{version:'0.2.5',release:next}});
-  old.kill('SIGKILL');await exited(old);
+  const oldRequest=async(message:string)=>{
+    let timer:ReturnType<typeof setTimeout>;
+    try {await new Promise<void>((resolve,reject)=>{
+      const receive=(reply:{event?:string;error?:string})=>{old.removeListener('message',receive);reply.error?reject(new Error(reply.error)):resolve();};
+      old.once('message',receive);timer=setTimeout(()=>{old.removeListener('message',receive);reject(new Error('old fixture IPC timeout: '+message));},10000);old.send(message);
+    });}finally{clearTimeout(timer!);}
+  };
+  if(liveOld) await oldRequest('hold'); else {old.kill('SIGKILL');await exited(old);}
   const worker=path.join(root,'worker.js');
   await writeFile(worker,`
     (async()=>{
@@ -85,29 +119,55 @@ async function fixture(phase:AttemptPhase,pending?:string, reboot=false) {
       const {AttemptJournal}=require(${JSON.stringify(path.join(compiled,'state/attempt-journal.js'))});
       const {NodeDurableFileSystem}=require(${JSON.stringify(path.join(compiled,'platform/durable-fs.js'))});
       class CrashFS extends NodeDurableFileSystem {
+        trace(operation){if(process.env.FIXTURE_GUARD_CONTENDER)console.log('UNOWNED_MUTATION:'+operation);}
+        async ensurePrivateDirectory(...args){this.trace('ensure');return super.ensurePrivateDirectory(...args);}
+        async protect(...args){this.trace('protect');return super.protect(...args);}
+        async writeAtomic(...args){this.trace('write');return super.writeAtomic(...args);}
+        async truncate(...args){this.trace('truncate');return super.truncate(...args);}
         async append(file,bytes,options){
+          this.trace('append');
           await super.append(file,bytes,options);
           const record=JSON.parse(bytes.toString());
           if(process.env.FIXTURE_CRASH===record.action+':intent' && record.kind==='intent')process.exit(73);
           if(process.env.FIXTURE_CRASH==='terminal:completion' && record.kind==='completion' && record.result && record.result.nonce)process.exit(73);
         }
         async rename(source,target,options){
+          this.trace('rename');
           await super.rename(source,target,options);
           if(process.env.FIXTURE_CRASH==='restore:publication' && target===${JSON.stringify(paths.database)})process.exit(73);
           if(process.env.FIXTURE_CRASH==='previous:detach' && require('path').basename(target).startsWith('.rollback-new-'))process.exit(73);
           if(process.env.FIXTURE_CRASH==='previous:attach' && require('path').basename(source).startsWith('.rollback-current-'))process.exit(73);
         }
+        async unlink(file){
+          this.trace('unlink');await super.unlink(file);
+          const name=require('path').basename(file);
+          if(process.env.FIXTURE_CRASH==='terminal:ledger-retired' && name==='update.processes.json')process.exit(73);
+          if(process.env.FIXTURE_CRASH==='terminal:owner-released' && name==='update.lock')process.exit(73);
+          if(process.env.FIXTURE_CRASH==='terminal:recovery-released' && name==='update.recovery.lock')process.exit(73);
+        }
       }
       const root=${JSON.stringify(root)};
       const snapshot=await AttemptJournal.inspect(root);
       const operatorAuthority=await OperatorRecoveryAuthority.authorize(root,'attempt-real',snapshot.fence);
-      const orchestrator=createManagedUpdateOrchestrator({handoffIdentity:process.env.FIXTURE_FORWARD?'fixture-handoff':'',operatorAuthority,fs:new CrashFS(),runtime:{NODE_ENV:'production',JWT_SECRET:'synthetic-service-secret',FILESTATION_PORT:'${servicePort}'}});
+      const {PlatformBootIdentityProvider}=require(${JSON.stringify(path.join(compiled,'state/boot-identity.js'))});
+      class InterleavedIdentity extends PlatformBootIdentityProvider {
+        async processCreatedAt(pid){
+          const result=await super.processCreatedAt(pid);
+          if(process.env.FIXTURE_GUARD_CONTENDER && pid===process.pid && !this.interleaved){
+            this.interleaved=true;process.send({event:'after-inspect'});
+            await new Promise(resolve=>process.once('message',resolve));
+          }
+          return result;
+        }
+      }
+      const orchestrator=createManagedUpdateOrchestrator({handoffIdentity:process.env.FIXTURE_FORWARD?'fixture-handoff':'',operatorAuthority,identity:new InterleavedIdentity(),fs:new CrashFS(),runtime:{NODE_ENV:'production',JWT_SECRET:'synthetic-service-secret',FILESTATION_PORT:'${servicePort}'}});
       const result=await orchestrator.run({attemptId:'attempt-real',installRoot:root,handoffIdentity:'',servicePort:${servicePort},timeoutMs:15000,recovery:!process.env.FIXTURE_FORWARD});
       console.log(JSON.stringify(result));
     })().catch(e=>{console.error(e.message);process.exitCode=1;});
   `);
-  const run=async(crash?:string,forward=false)=>{
-    const child=spawn(process.execPath,[worker],{cwd:root,windowsHide:true,env:{...process.env,FIXTURE_CRASH:crash,FIXTURE_FORWARD:forward?'1':undefined},stdio:['ignore','pipe','pipe']});
+  const run=async(crash?:string,forward=false,onMessage?:(child:ChildProcess,message:unknown)=>void)=>{
+    const child=spawn(process.execPath,[worker],{cwd:root,windowsHide:true,env:{...process.env,FIXTURE_CRASH:crash,FIXTURE_FORWARD:forward?'1':undefined,FIXTURE_GUARD_CONTENDER:onMessage?'1':undefined},stdio:['ignore','pipe','pipe','ipc']});
+    if(onMessage)child.on('message',message=>onMessage(child,message));
     let output='';child.stdout!.on('data',x=>output+=x);child.stderr!.on('data',x=>output+=x);
     let timer:ReturnType<typeof setTimeout>;
     let timedOut=false;
@@ -125,6 +185,7 @@ async function fixture(phase:AttemptPhase,pending?:string, reboot=false) {
     return {code:child.exitCode,output};
   };
   const cleanup=async()=>{
+    if(old.exitCode===null && old.signalCode===null){old.kill('SIGKILL');await exitedWithin(old);}
     const s=await AttemptJournal.inspect(root);
     const pids=new Set<number>();
     for(const r of s.records) if(r.kind==='completion' && r.result && typeof r.result==='object' && !Array.isArray(r.result) && typeof r.result.pid==='number') pids.add(r.result.pid);
@@ -132,10 +193,70 @@ async function fixture(phase:AttemptPhase,pending?:string, reboot=false) {
     for(const pid of pids) {try {process.kill(pid,'SIGKILL');}catch{}}
     await rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});
   };
-  return {root,servicePort,paths,previous,next,journal,run,cleanup};
+  return {root,servicePort,paths,previous,next,journal,run,cleanup,old,oldRequest,pipeCapability};
 }
 
 describe('production recovery entry and stable launcher',()=>{
+  it('F1-01 normal inherited pipe waits while the old guard is held and handoff is delayed',async()=>{
+    const v=await fixture('SNAPSHOT_READY','close-application',false,true);
+    let child:ChildProcess|undefined;
+    let tailPending=false;
+    try {
+      // Fail safely after OLD_STOPPED so the fixture need not wait for health.
+      await rm(v.next,{recursive:true,force:true});
+      const marker=path.join(v.root,'fixture-pipe-consumed');
+      child=spawn(process.execPath,['-e',`process.stdin.once('end',()=>require('fs').writeFileSync(${JSON.stringify(marker)},'received'));require(${JSON.stringify(path.join(compiled,'cli.js'))}).main(['continue','--attempt','attempt-real','--root',${JSON.stringify(v.root)}]).catch(e=>{console.error(e.message);process.exitCode=1;});`],{cwd:v.root,windowsHide:true,stdio:['pipe','pipe','pipe']});
+      let output='';child.stdout!.on('data',c=>output+=c);child.stderr!.on('data',c=>output+=c);
+      child.stdin!.end(JSON.stringify({...JSON.parse(v.pipeCapability.toString()),runtime:{NODE_ENV:'production',JWT_SECRET:'synthetic-service-secret',FILESTATION_PORT:String(v.servicePort)}}));
+      const deadline=Date.now()+10000;
+      while(!(await durable.exists(marker))){if(Date.now()>deadline)throw new Error('normal pipe was not consumed');await new Promise(r=>setTimeout(r,20));}
+      await new Promise(r=>setTimeout(r,4000));
+      expect(child.exitCode).toBeNull();expect(child.signalCode).toBeNull();
+      const waiting=await AttemptJournal.inspect(v.root);expect(waiting.phase).toBe('SNAPSHOT_READY');expect(waiting.pending?.action).toBe('close-application');expect(waiting.fence).toBe(1);
+      await v.oldRequest('partial');tailPending=true;
+      await new Promise(resolve=>setTimeout(resolve,250));
+      expect(child.exitCode).toBeNull();
+      await v.oldRequest('restore-tail');tailPending=false;
+      v.old.send('handoff');await exitedWithin(v.old);
+      let timer:ReturnType<typeof setTimeout>;
+      try {await Promise.race([exited(child),new Promise<never>((_r,reject)=>{timer=setTimeout(()=>reject(new Error('normal continuation exceeded 60s: '+output)),60000);})]);}finally{clearTimeout(timer!);}
+      expect({code:child.exitCode,output}).toMatchObject({code:0});
+      const done=await AttemptJournal.inspect(v.root);expect(done.phase).toBe('ROLLED_BACK');
+      const handoff=done.records.findIndex(r=>r.kind==='completion' && r.phase==='HANDOFF_READY');
+      const stopped=done.records.findIndex(r=>r.kind==='intent' && r.action==='record-old-stopped');
+      expect(handoff).toBeGreaterThan(-1);expect(stopped).toBeGreaterThan(handoff);
+      expect(await realpath(path.join(v.root,'current'))).toBe(v.previous);
+    }finally{if(child && child.exitCode===null && child.signalCode===null){child.kill('SIGKILL');await exitedWithin(child);}if(tailPending)await v.oldRequest('restore-tail');await v.cleanup();}
+  });
+  it('F1-02 rejected repair contender cannot protect/write or change an in-flight journal tail under the old guard',async()=>{
+    const v=await fixture('SNAPSHOT_READY',undefined,false,true);
+    const file=path.join(v.root,'update-attempt.journal');const before=await readFile(file);
+    let partial=false;
+    try {
+      const result=await v.run(undefined,false,(child,message)=>{void (async()=>{
+        if((message as {event:string}).event==='after-inspect'){await v.oldRequest('partial');partial=true;child.send('tail-published');}
+      })().catch(error=>{child.send({error:String(error)});});});
+      expect(partial).toBe(true);expect(result.code).toBe(1);expect(result.output).toMatch(/guard/);
+      expect(result.output).not.toContain('UNOWNED_MUTATION');
+      expect(await readFile(file)).toEqual(Buffer.concat([before,Buffer.from('{"in-flight":')]));
+    }finally{if(partial)await v.oldRequest('restore-tail');await v.cleanup();}
+  });
+  it.each((['COMMITTED','MIGRATING'] as const).flatMap(phase=>['terminal:ledger-retired','terminal:owner-released','terminal:recovery-released'].map(point=>[phase,point] as const)))('F1-03 recovers %s child identity after %s and proves exit before a fresh version launch',async(phase,point)=>{
+    const v=await fixture(phase,phase==='MIGRATING'?'validate-release':undefined);
+    try {
+      expect(await v.run(point)).toMatchObject({code:73});
+      const state=await AttemptJournal.inspect(v.root);
+      const prior=state.records.filter(r=>r.kind==='completion' && typeof (r.result as any)?.nonce==='string').at(-1)!.result as any;
+      expect(await durable.exists(path.join(v.root,'update.processes.json'))).toBe(false);
+      expect(await identity.isProcessAlive(prior.pid,prior.createdAt)).toBe(true);
+      const result=await v.run();if(result.code!==0)throw new Error(result.output);
+      expect(await identity.isProcessAlive(prior.pid,prior.createdAt)).toBe(false);
+      const after=await AttemptJournal.inspect(v.root);const proof=after.records.at(-1)!.result as any;
+      expect(proof.pid).not.toBe(prior.pid);expect(proof.version).toBe(phase==='COMMITTED'?'0.2.5':'0.2.0');expect(proof.health).toBe('ok');
+      expect(await identity.isProcessAlive(proof.pid,proof.createdAt)).toBe(true);expect(await identity.listeningPid!(v.servicePort)).toBe(proof.pid);
+      expect(await readFile(v.paths.database,'utf8')).toBe(phase==='COMMITTED'?'changed-db':'verified-db');
+    }finally{await v.cleanup();}
+  });
   it.each(['startup','health','gated-health'])('rolls back an actual failing validation %s with its forward intent pending',async failure=>{
     const v=await fixture('HANDOFF_READY');
     try {if(failure==='health')await writeFile(path.join(v.root,'fixture-health-failure'),'fail');if(failure==='gated-health')await writeFile(path.join(v.root,'fixture-gated-failure'),'fail');const result=await v.run(undefined,true);if(result.code!==0)throw new Error(result.output);expect(await realpath(path.join(v.root,'current'))).toBe(v.previous);expect(await readFile(v.paths.database,'utf8')).toBe('verified-db');const state=await AttemptJournal.inspect(v.root);expect(state.records.some(r=>r.kind==='intent' && r.action==='validate-release')).toBe(true);expect(state.pending).toBeNull();}

@@ -305,7 +305,7 @@ export class RecoveryLockHandle {
   constructor(
     private readonly root: string,
     private readonly fs: DurableFileSystem,
-    private readonly journal: AttemptJournal,
+    readonly journal: AttemptJournal,
     private readonly provider: ProcessIdentityProvider,
     private readonly recoveryRecord: LockRecord,
     private readonly guard: RecoveryGuard,
@@ -709,14 +709,15 @@ export class UpdateLock {
       options.identityProvider ?? new PlatformBootIdentityProvider();
     const now = options.now ?? (() => new Date());
     await verifyLocalActor(owner, provider);
-    await fs.ensurePrivateDirectory(root);
-    const journal =
-      options.journal ??
-      (await AttemptJournal.open(root, { fs, now }));
     let guard: RecoveryGuard;
     try { guard = await acquireRecoveryGuard(path.join(root, "update.recovery.guard")); }
     catch { throw new LockFailure("recovery OS guard is held or unavailable"); }
     try {
+    await guard.assertActive();
+    // Recovery may only open/protect/repair after kernel exclusion. In
+    // particular, a rejected contender must never touch the live writer's root.
+    await fs.ensurePrivateDirectory(root);
+    const journal = options.journal ?? await AttemptJournal.open(root, { fs, now });
     const snapshot = await journal.readSnapshot();
     options.operatorAuthority?.assert(root, owner.attemptId, snapshot.fence);
     const filename = path.join(root, RECOVERY_LOCK);
