@@ -80,6 +80,12 @@ jobs:
       - name: Build application
         run: npm run build
 
+      - name: Assert root and /fs/ Web deployment bundles
+        run: >-
+          node -e "const fs=require('node:fs');for(const directory of
+          ['apps/web/dist-root','apps/web/dist-fs']){if(!fs.existsSync(directory+'/index.html'))
+          throw new Error('missing '+directory+'/index.html')}"
+
       - name: Run controlled updater integration and artifact tests
         run: >-
           npm test --workspace=@filestation/updater --

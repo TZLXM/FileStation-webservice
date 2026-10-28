@@ -95,7 +95,8 @@ export function buildSafePublisherZip(version = '0.2.5'): Buffer {
     [
       'apps/server/dist/main.js',
       'apps/updater/dist/cli.js',
-      'apps/web/dist/index.html',
+      'apps/web/dist-root/index.html',
+      'apps/web/dist-fs/index.html',
       'packages/shared/dist/index.js',
       'packages/update-core/dist/index.js',
       'node_modules/runtime/index.js',
@@ -143,7 +144,7 @@ export function createSignedManifestFixture(
         filename: `filestation-v${version}-win-x64.zip`,
         url: `https://github.com/TZLXM/FileStation-webservice/releases/download/v${version}/filestation-v${version}-win-x64.zip`,
         archive_size: artifactBytes.length,
-        unpacked_size: 6 * 2,
+        unpacked_size: 7 * 2,
         sha256: createHash('sha256').update(artifactBytes).digest('hex'),
         format: 'zip',
       },

@@ -91,6 +91,18 @@ describe('ServeStatic (HTTP E2E)', () => {
       .map((line) => line.replace(/^\s*#\s?/, ''))
       .join('\n');
 
+    expect(configuration).toContain(
+      'root /opt/filestation/current/apps/web/dist-root;',
+    );
+    expect(configuration).toContain(
+      'alias /opt/filestation/current/apps/web/dist-fs/assets/;',
+    );
+    expect(configuration).toContain(
+      'alias /opt/filestation/current/apps/web/dist-fs/index.html;',
+    );
+    expect(configuration).toContain(
+      'alias /opt/filestation/current/apps/web/dist-fs/;',
+    );
     expect(configuration.match(/Cache-Control "no-store" always/g)).toHaveLength(4);
     for (const location of ['/', '/fs/']) {
       const escaped = location.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

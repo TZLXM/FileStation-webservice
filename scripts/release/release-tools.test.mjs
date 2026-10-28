@@ -717,7 +717,10 @@ async function createRepositoryFixture() {
     "apps/server/dist/main.js",
     "apps/updater/dist/cli.js",
     "apps/updater/dist/launcher.js",
-    "apps/web/dist/index.html",
+    "apps/web/dist-root/index.html",
+    "apps/web/dist-root/assets/root-0123456789ab.js",
+    "apps/web/dist-fs/index.html",
+    "apps/web/dist-fs/assets/fs-0123456789ab.js",
     "packages/shared/dist/index.js",
     "packages/update-core/dist/index.js",
     "scripts/release/smoke-artifact.mjs",
@@ -836,6 +839,33 @@ test("artifact staging includes the built updater and stable launcher scripts", 
   ]) {
     await stat(path.join(destination, required));
   }
+});
+
+test("artifact staging includes immutable root and /fs/ Web bundles", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  const destination = path.join(fixtureRoot, `stage-${crypto.randomUUID()}`);
+  await prepareArtifactDirectory({
+    repositoryRoot,
+    destination,
+    version: "0.2.0",
+    platform: "linux-x64",
+    productionNodeModulesDirectory: path.join(repositoryRoot, "node_modules"),
+  });
+
+  for (const required of [
+    "apps/web/dist-root/index.html",
+    "apps/web/dist-root/assets/root-0123456789ab.js",
+    "apps/web/dist-fs/index.html",
+    "apps/web/dist-fs/assets/fs-0123456789ab.js",
+  ]) {
+    assert.equal(
+      await readFile(path.join(destination, required), "utf8"),
+      `fixture:${required}\n`,
+    );
+  }
+  await assert.rejects(stat(path.join(destination, "apps/web/dist")), {
+    code: "ENOENT",
+  });
 });
 
 test("artifact staging rejects any FileStation workspace version mismatch", async () => {
@@ -1145,6 +1175,25 @@ test("platform workflows assert and upload/attest the exact archive and use ship
   assert.match(workflow, /subject-path: release-artifacts\/filestation-v.*matrix\.archive/);
   assert.match(workflow, /node "\$smoke_root\/scripts\/release\/smoke-artifact.mjs"/);
   assert.match(workflow, /Join-Path \$smokeRoot.FullName "scripts\/release\/smoke-artifact.mjs"/);
+});
+
+test("Web build and release workflow use the same root and /fs/ bundle paths", async () => {
+  const manifest = JSON.parse(
+    await readFile(
+      new URL("../../apps/web/package.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.match(manifest.scripts["build:root"], /--outDir dist-root/);
+  assert.match(manifest.scripts["build:fs"], /FILESTATION_BASE=\/fs\//);
+  assert.match(manifest.scripts["build:fs"], /--outDir dist-fs/);
+
+  const workflow = await readFile(
+    new URL("../../.github/workflows/release-platform.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(workflow, /apps\/web\/dist-root/);
+  assert.match(workflow, /apps\/web\/dist-fs/);
 });
 
 test("candidate and tag workflows bind exact source and run final platform integration", async () => {

@@ -180,7 +180,8 @@ function assertRelocatableLayout(root: string, files: string[]): void {
     "apps/server/dist/main.js",
     "apps/updater/dist/cli.js",
     "apps/updater/dist/launcher.js",
-    "apps/web/dist/index.html",
+    "apps/web/dist-root/index.html",
+    "apps/web/dist-fs/index.html",
     "packages/shared/dist/index.js",
     "packages/update-core/dist/index.js",
     "apps/server/package.json",
@@ -342,6 +343,22 @@ describe("relocatable release artifacts", () => {
       publicSettings: "ok",
       staticIndex: "ok",
       referencedAsset: "ok",
+      webBundles: {
+        root: {
+          index: "ok",
+          asset: "ok",
+          bootstrap: "ok",
+          cache: "ok",
+        },
+        fs: {
+          index: "ok",
+          asset: "ok",
+          api: "ok",
+          router: "ok",
+          bootstrap: "ok",
+          cache: "ok",
+        },
+      },
     });
   });
 

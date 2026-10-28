@@ -183,7 +183,7 @@ describe('UpdatePrepareService', () => {
         name: 'filestation-v0.2.5-win-x64/apps/server/dist/main.js',
       },
       {
-        name: 'filestation-v0.2.5-win-x64/apps/web/dist/index.html',
+        name: 'filestation-v0.2.5-win-x64/apps/web/dist-root/index.html',
       },
       {
         name: 'filestation-v0.2.5-win-x64/packages/shared/dist/index.js',

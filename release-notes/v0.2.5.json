@@ -48,7 +48,7 @@
         },
         {
           "id": "upgrade:nginx-docker",
-          "text": "Nginx 静态目录需切换到 current/apps/web/dist；Docker 内禁止自更新或挂载 Docker socket，只能按文档手动更新镜像。"
+          "text": "发布归档同时提供 current/apps/web/dist-root 与 dist-fs；Nginx 按根路径或 /fs/ 选择对应目录，Docker 内禁止自更新或挂载 Docker socket。"
         }
       ],
       "known_issues": [
@@ -100,7 +100,7 @@
         },
         {
           "id": "upgrade:nginx-docker",
-          "text": "Point Nginx at current/apps/web/dist. Docker installations must use documented manual image updates and must not self-update or mount the Docker socket."
+          "text": "Release archives include both current/apps/web/dist-root and dist-fs; point Nginx at the selected deployment path. Docker installations must use documented manual image updates and must not self-update or mount the Docker socket."
         }
       ],
       "known_issues": [

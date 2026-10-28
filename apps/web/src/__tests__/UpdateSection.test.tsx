@@ -3,6 +3,9 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../lib/api';
+import { execFile } from 'node:child_process';
+import path from 'node:path';
+import { promisify } from 'node:util';
 import UpdateSection from '../pages/settings/UpdateSection';
 import { useAuthStore } from '../stores/authStore';
 
@@ -275,7 +278,12 @@ describe('UpdateSection', () => {
     [true, true],
   ])('requires a password and conditionally TOTP when active=%s', async (totpActive, expectsTotp) => {
     mockedApi.get.mockResolvedValueOnce(response(available))
-      .mockResolvedValue(response(status({ phase: 'MAINTENANCE', attempt_id: 'attempt-01', fence: 2 })));
+      .mockResolvedValue(response(status({
+        phase: 'MAINTENANCE',
+        attempt_id: 'attempt-01',
+        fence: 2,
+        target_version: '0.2.5',
+      })));
     await openConfirmation(totpActive);
 
     expect(screen.getByLabelText('当前密码')).toHaveAttribute('type', 'password');
@@ -375,7 +383,7 @@ describe('UpdateSection', () => {
   });
   it.each([
     ['other-attempt', 2],
-    ['attempt-01', 3],
+    ['attempt-01', 1],
     [undefined, undefined],
   ])('does not attribute a mismatching terminal journal %s/%s to the accepted install', async (attempt_id, fence) => {
     mockedApi.get.mockResolvedValueOnce(response(available))
@@ -389,6 +397,36 @@ describe('UpdateSection', () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(mockedApi.get).toHaveBeenCalledTimes(calls);
   });
+  it.each([['committed', '更新完成'], ['rolledBack', '更新失败，已回滚到当前版本']])('follows actual server projection through same-attempt fence advancement to %s', async (terminal, message) => {
+    const { stdout } = await promisify(execFile)(process.execPath, [path.resolve(process.cwd(), 'src/__tests__/fixtures/update-status-projection.cjs')], { windowsHide: true });
+    const projected = JSON.parse(stdout);
+    const sequence = [available, ...[projected.maintenance, projected.handoff, projected[terminal]].map(value => status(value))];
+    mockedApi.get.mockImplementation(async () => response(sequence.shift()!));
+    await openConfirmation();
+    fireEvent.change(screen.getByLabelText('当前密码'), {target:{value:'fixture-password'}});
+    fireEvent.click(screen.getByRole('button', {name:'确认安装'}));
+    expect(await screen.findByText(message, {}, {timeout:2000})).toBeInTheDocument();
+    expect(screen.queryByText(/更新尝试已被替代/)).not.toBeInTheDocument();
+    expect(mockedApi.get).toHaveBeenCalledTimes(4);
+  }, 30000);
+
+  it.each([
+    {attempt_id:'other-attempt',fence:3,target_version:'0.2.5'},
+    {attempt_id:'attempt-01',fence:2,target_version:'0.2.5'},
+    {attempt_id:'attempt-01',fence:undefined,target_version:'0.2.5'},
+    {attempt_id:'attempt-01',fence:3,target_version:undefined},
+    {attempt_id:'attempt-01',fence:3,target_version:'0.2.6'},
+  ])('rejects missing/mismatched identity, target or regressing fence after ownership transfer: %j', async terminal => {
+    const sequence = [available, status({phase:'OLD_STOPPED',attempt_id:'attempt-01',fence:3,target_version:'0.2.5'}), status({phase:'COMMITTED',...terminal})];
+    mockedApi.get.mockImplementation(async()=>response(sequence.shift()!));
+    await openConfirmation();
+    fireEvent.change(screen.getByLabelText('当前密码'), {target:{value:'fixture-password'}});
+    fireEvent.click(screen.getByRole('button', {name:'确认安装'}));
+    expect(await screen.findByText(/更新尝试已被替代或身份无法确认/)).toBeInTheDocument();
+    expect(screen.queryByText('更新完成')).not.toBeInTheDocument();
+    expect(mockedApi.get).toHaveBeenCalledTimes(3);
+  });
+
   it('retires accepted install polling when the login session changes', async () => {
     let finish!: (value: unknown) => void;
     mockedApi.get.mockResolvedValueOnce(response(available))

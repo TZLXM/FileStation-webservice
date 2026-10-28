@@ -23,6 +23,16 @@ FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 
 - 本轮最终验证：updater focused **3 suites / 19 passed**（7-case composed integration、cleanup 2、volume-space 10；253.82s）；完整 server unit **52 suites / 311 passed / 20 todo**；full server E2E **16 suites / 117 passed**（52.239s）；release/bootstrap/gate/resolver scripts **110 passed / 2 skipped**；root typecheck/build 与 diff-check exit 0。受影响 server 小集另有 **5 suites / 34 passed**。Gate 0.2.5 仍因 `candidate.sourceCommit` 缺失按预期 exit 1。首次 stdio 错误、真实 accept 的 previousVersion/currentVersion 契约差异、receipt 新字段与 CI 命令的精确预期不符均保留原日志并修正对应 fixture/断言，未弱化 process/WAL/fence/restart 断言。既有 ts-jest/lifecycle/MCP 日志仍如实保留。
 - 未重跑未变更的 artifact 安装或完整 32 分钟 updater；原日志保留。Minor M1 expected legacy/progress noise 与 M2 extracted-CLI relocation proof 仍 open。Audit 仍为 full **4C/7H/25M/9L**、production **1C/5H/19M/0L**（均 exit 1），不构成风险接受；**0.2.5 / UNCONFIGURED / real evidence pending** 不变。无 subagents、push/PR/hosted trigger/tag/sign/release；Important I1–I4 待独立复审。
 
+## Task 11 fix round 2/5 — chapter I1/I2 and M3（2026-10-28）
+
+- I1 修正固定 fence 比较：Web 保留 accepted attempt、登录会话、目标版本和已观察 fence；同一 attempt 的 authenticated target 必须保持 `0.2.5`，fence 只能相等或单调前移。缺失/不同 attempt、缺失/不同 target、缺失或回退 fence 均 fail closed。真实 server projection fixture 从 `PREPARED/A/2` 推进到 `OLD_STOPPED/A/3`，COMMITTED 与 ROLLED_BACK 均正确归属。Focused RED 7 failed/19 passed，GREEN **26/26**；full Web no-cache **22 files / 242 passed**。
+- I2 让同一不可变归档同时携带 `apps/web/dist-root` 与 `apps/web/dist-fs`。Web build、packager、verified archive policy、release workflow、artifact smoke、server static default、Nginx aliases、bootstrap/update fixtures 和活动文档使用同一目录契约；`current` 整体切换 release，不重建或改写已验收 payload。
+- Actual host archive 首轮在 verified policy 仍要求单 `apps/web/dist/` 时 **4 个测试失败，43.706s**；修复后 extracted suite **4/4 passed，140.662s**，从 archive 内 `dist-root` 启动 server，并验证 root 与 `/fs/` 的 index、prefixed asset、router fallback、`/fs/api/v1/...` proxy、early bootstrap 和 cache。Direct shipped smoke 同一 payload 也通过。
+- M3 安装说明改为安装根运行 `node updater/dist/cli.js launch --root .`；M1 输出噪声与 M2 extracted managed CLI relocation proof 仍 open。
+- 验证：release tools **51/51**；update-core full **6 suites / 92 passed / 2 skipped**；server unit **52 suites / 311 passed / 20 todo**；serve-static E2E **4/4**；server full E2E **16 suites / 117 passed**；真实 process/WAL integration 单例 **1 passed / 6 filtered**（39.97s）；root typecheck/build exit 0；notes/version exit 0；release gate 按设计 exit 1（`candidate.sourceCommit is missing`）。未重跑未变更的 32 分钟 full updater。
+- 当前 audit 未刷新/修复：full **4C/7H/25M/9L**、production **1C/5H/19M/0L**，均 exit 1。多数 advisory 标记 fix available；body-parser/multer 涉及 `@nestjs/platform-express@12.3.2` major，Zod 需 4.x major。风险未接受，发布 blocked。
+- **0.2.5 / UNCONFIGURED / candidate run+digests / real platform acceptance pending** 不变。无 subagents、push/PR/trigger/tag/sign/release；I1/I2/M3 待 independent re-review。
+
 ## Task 9 / Chapter 7–9 fix round 3/5 — I1–I4
 
 - I1: scheduled install now carries explicit pre-freeze/freeze-started/close-started progress. A proved pre-freeze failure durably fails the exact attempt, retires its owner/OS guard and restores admission/background leases for a fresh confirmation. Freeze or partial close never thaws the source. Real coordinator/executor + SQLite regressions cover file/parent snapshot flush, drain, partial freeze and close failures.

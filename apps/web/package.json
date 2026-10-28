@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc && npm run build:root && npm run build:fs",
+    "build:root": "cross-env FILESTATION_BASE=/ vite build --outDir dist-root --emptyOutDir",
+    "build:fs": "cross-env FILESTATION_BASE=/fs/ vite build --outDir dist-fs --emptyOutDir",
     "preview": "vite preview",
     "test": "vitest",
     "test:ui": "vitest --ui",

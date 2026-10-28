@@ -180,7 +180,6 @@ export default function UpdateSection({
   const [totpCode, setTotpCode] = useState('');
   const [confirming, setConfirming] = useState(false);
   const [attemptId, setAttemptId] = useState('');
-  const [attemptFence, setAttemptFence] = useState<number>();
   const [installPhase, setInstallPhase] = useState('');
   const [installing, setInstalling] = useState(false);
   const [installMessage, setInstallMessage] = useState('');
@@ -189,6 +188,8 @@ export default function UpdateSection({
   const checkInFlight = useRef(false);
   const prepareInFlight = useRef(false);
   const installInFlight = useRef(false);
+  const attemptFence = useRef<number>();
+  const acceptedTargetVersion = useRef<string>();
 
   const loadStatus = useCallback(async () => {
     const response = await api.get<UpdateStatusView>('/updates/status');
@@ -232,12 +233,22 @@ export default function UpdateSection({
         );
         if (cancelled || controller.signal.aborted || !response.data) return;
         const latest = response.data;
-        if (latest.attempt_id !== attemptId || latest.fence !== attemptFence) {
+        const observedFence = attemptFence.current;
+        const targetVersion = acceptedTargetVersion.current;
+        if (
+          latest.attempt_id !== attemptId ||
+          typeof latest.fence !== 'number' ||
+          typeof observedFence !== 'number' ||
+          typeof targetVersion !== 'string' ||
+          latest.fence < observedFence ||
+          latest.target_version !== targetVersion
+        ) {
           setInstalling(false);
           setInstallPhase('SUPERSEDED');
           setInstallMessage('更新尝试已被替代或身份无法确认，请重新检查更新状态。');
           return;
         }
+        attemptFence.current = latest.fence;
         setStatus(latest);
         setInstallPhase(latest.phase ?? '');
         if (latest.phase && TERMINAL_PHASES.has(latest.phase)) {
@@ -262,7 +273,7 @@ export default function UpdateSection({
       controller.abort();
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [attemptId, attemptFence, installing, pollIntervalMs, accessToken, acceptedSession]);
+  }, [attemptId, installing, pollIntervalMs, accessToken, acceptedSession]);
 
   const checkUpdate = async () => {
     if (checkInFlight.current) return;
@@ -357,7 +368,8 @@ export default function UpdateSection({
         throw new Error('服务器未返回有效的更新尝试。');
       }
       setAttemptId(accepted.attempt_id);
-      setAttemptFence(accepted.fence);
+      attemptFence.current = accepted.fence;
+      acceptedTargetVersion.current = prepared.version;
       setAcceptedSession(accessToken);
       setInstallPhase(accepted.phase);
       setInstallMessage('更新安装已开始');

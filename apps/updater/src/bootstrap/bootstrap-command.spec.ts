@@ -45,7 +45,8 @@ async function sourceFixture(): Promise<SourceFixture> {
   const installRoot = path.join(root, "managed");
   await mkdir(path.join(legacyRoot, "apps/server/dist"), { recursive: true });
   await mkdir(path.join(legacyRoot, "apps/updater/dist"), { recursive: true });
-  await mkdir(path.join(legacyRoot, "apps/web/dist"), { recursive: true });
+  await mkdir(path.join(legacyRoot, "apps/web/dist-root"), { recursive: true });
+  await mkdir(path.join(legacyRoot, "apps/web/dist-fs"), { recursive: true });
   await mkdir(path.join(legacyRoot, "packages/shared/dist"), {
     recursive: true,
   });
@@ -75,8 +76,12 @@ async function sourceFixture(): Promise<SourceFixture> {
     "fixture updater\n",
   );
   await writeFile(
-    path.join(legacyRoot, "apps/web/dist/index.html"),
+    path.join(legacyRoot, "apps/web/dist-root/index.html"),
     "<html>fixture</html>\n",
+  );
+  await writeFile(
+    path.join(legacyRoot, "apps/web/dist-fs/index.html"),
+    "<html>fixture /fs/</html>\n",
   );
   await writeFile(
     path.join(legacyRoot, "packages/shared/dist/index.js"),

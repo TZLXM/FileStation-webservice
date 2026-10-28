@@ -5,6 +5,8 @@ node_modules/
 # Build outputs
 dist/
 **/dist/
+apps/web/dist-root/
+apps/web/dist-fs/
 build/
 **/build/
 

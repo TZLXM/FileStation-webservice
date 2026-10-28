@@ -258,7 +258,8 @@ class Counter {
     if (this.total !== this.limits.unpackedSize) fail("unpacked size mismatch");
     for (const prefix of [
       "apps/server/dist/",
-      "apps/web/dist/",
+      "apps/web/dist-root/",
+      "apps/web/dist-fs/",
       "packages/shared/dist/",
       "node_modules/",
     ])

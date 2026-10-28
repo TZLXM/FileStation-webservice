@@ -35,7 +35,8 @@ const files = [
   "apps/server/dist/main.js",
   "apps/updater/dist/cli.js",
   "apps/updater/dist/launcher.js",
-  "apps/web/dist/index.html",
+  "apps/web/dist-root/index.html",
+  "apps/web/dist-fs/index.html",
   "packages/shared/dist/index.js",
   "packages/update-core/dist/index.js",
   "packages/update-core/package.json",
@@ -110,7 +111,7 @@ const limits = (format = "zip") => ({
   format: format as "zip" | "tar.gz",
   version: "0.2.5",
   platform: format === "zip" ? "windows-x64" : "linux-x64",
-  unpackedSize: 26,
+  unpackedSize: files.length * 2,
   maxEntries: 32,
   maxFileBytes: 1024,
   maxTotalBytes: 4096,
@@ -125,7 +126,10 @@ describe("actual archive bytes, handle binding and controlled extraction", () =>
     ]);
     const h = await open(b);
     try {
-      const p = await inspectArchive(h, { ...limits(), unpackedSize: 28 });
+      const p = await inspectArchive(h, {
+        ...limits(),
+        unpackedSize: (files.length + 1) * 2,
+      });
       await mkdir(path.join(dir, "unrelated"));
       await writeFile(path.join(dir, "unrelated", "keep"), "keep");
       await expect(
@@ -144,6 +148,8 @@ describe("actual archive bytes, handle binding and controlled extraction", () =>
     async (f) => {
       for (const entries of [
         safe(f).slice(1),
+        safe(f).filter((entry) => !entry.name.endsWith("/apps/web/dist-root/index.html")),
+        safe(f).filter((entry) => !entry.name.endsWith("/apps/web/dist-fs/index.html")),
         [...safe(f), { name: "filestation-v9.9.9-linux-x64/a" }],
       ]) {
         const h = await open(f === "zip" ? zip(entries) : tar(entries));

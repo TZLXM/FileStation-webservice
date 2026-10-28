@@ -28,7 +28,7 @@ AppModule、mkdir 或打开数据库前验证。Bootstrap 必须明确提供原�
 操作员变量：`NODE_ENV`、`JWT_SECRET`；`FILESTATION_DB_PATH`、
 `FILESTATION_STORAGE_PATH`、`FILESTATION_TEMP_PATH`；`FILESTATION_PORT`
 （8080）、`FILESTATION_HOST`（127.0.0.1）、`FILESTATION_SERVE_STATIC`
-（true 启用静态托管）、`FILESTATION_WEB_DIST`（../web/dist）、
+（true 启用静态托管）、`FILESTATION_WEB_DIST`（`apps/web/dist-root`）、
 `FILESTATION_CORS_ORIGINS`（逗号分隔；默认同源或开发回环）、
 `FILESTATION_WEB_URL`（初始化页地址，默认本进程地址）。脚本可用
 `FILESTATION_NODE` 选择 Node 20.17+。`FILESTATION_DEBUG=1` 仅增加本地
@@ -69,8 +69,8 @@ tag 或 immutable digest、备份挂载的 DB/storage，并通过 Compose 手动
 更新；回滚改用先前记录的镜像 digest，旧、新容器不得同时挂载并写同一数据。
 
 ## 启动
-1. managed 安装从安装根运行 `scripts/start-filestation.ps1` 或
-   `bash scripts/start-filestation.sh --root <install-root>`。源码模式可运行
+1. managed 安装从安装根运行 `node updater/dist/cli.js launch --root .`。
+   源码模式可运行
    `node apps/server/dist/main.js`
 2. 控制台打印初始化 Token（10 分钟有效，仅本机）
 3. 本机浏览器访问 `/init` 完成管理员初始化
@@ -81,16 +81,15 @@ sudo cp deploy/nginx/filestation.conf /etc/nginx/sites-available/filestation
 sudo ln -s /etc/nginx/sites-available/filestation /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 
-# 根路径构建（默认）
+# 同时构建根路径与 /fs/ 发布产物
 npm run build --workspace=@filestation/web
 
-# 子路径 /fs/ 构建；随后启用配置中的 /fs/ 示例段
-npx cross-env FILESTATION_BASE=/fs/ npm run build --workspace=@filestation/web
 ```
 
-Managed 安装的 Nginx `root`/`alias` 必须指向
-`<install-root>/current/apps/web/dist`，不能继续指向源码目录。
-根路径与子路径部署二选一，分别使用各自的 Web 构建产物。子路径构建会生成
+Managed 安装的 Nginx `root` 必须指向
+`<install-root>/current/apps/web/dist-root`，`/fs/` 的 `alias` 必须指向
+`<install-root>/current/apps/web/dist-fs`，不能继续指向源码目录。
+同一发布归档包含根路径与子路径产物。子路径构建会生成
 `/fs/assets/...` 引用；浏览器中的 API 请求使用 `/fs/api/v1/...`，分享页使用
 `/fs/s/...`。Nginx 在 `location /fs/api/` 代理前去掉 `/fs`，所以后端仍只看到
 canonical `/api/v1/...` 路径。根路径与 `/fs/` 初始化端点都保留仅允许回环

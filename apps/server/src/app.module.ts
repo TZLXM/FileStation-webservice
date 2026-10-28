@@ -49,18 +49,18 @@ export function applyStaticCacheHeaders(
 const serveStaticImports =
   process.env.FILESTATION_SERVE_STATIC === 'true'
     ? (() => {
-        // 默认路径基于模块位置（apps/server/dist → 仓库根 → apps/web/dist），
+        // 默认路径基于模块位置（apps/server/dist → 仓库根 → apps/web/dist-root），
         // 与启动目录无关——npm run start（仓库根）和 cd apps/server && node dist/main.js
         // 解析结果一致。FILESTATION_WEB_DIST 可用绝对路径或相对仓库根的路径覆盖。
         const custom = process.env.FILESTATION_WEB_DIST;
         const rootPath = custom
           ? resolve(__dirname, '..', '..', '..', custom)
-          : resolve(__dirname, '..', '..', 'web', 'dist');
+          : resolve(__dirname, '..', '..', 'web', 'dist-root');
         if (!existsSync(rootPath)) {
           // 不抛错——API 仍可用，启动日志在 main.ts 里提示前端产物缺失
           console.warn(
             `[ServeStatic] FILESTATION_SERVE_STATIC=true 但未找到前端构建产物: ${rootPath}` +
-              `（先运行 npm run build 生成 apps/web/dist）`,
+              `（先运行 npm run build 生成 apps/web/dist-root 与 dist-fs）`,
           );
         }
         return [

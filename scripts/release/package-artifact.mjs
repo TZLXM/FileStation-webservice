@@ -48,7 +48,8 @@ const REQUIRED_ARTIFACT_FILES = [
   "apps/server/dist/main.js",
   "apps/updater/dist/cli.js",
   "apps/updater/dist/launcher.js",
-  "apps/web/dist/index.html",
+  "apps/web/dist-root/index.html",
+  "apps/web/dist-fs/index.html",
   "packages/shared/dist/index.js",
   "packages/update-core/dist/index.js",
   "scripts/release/smoke-artifact.mjs",
@@ -265,7 +266,8 @@ export async function prepareArtifactDirectory({
   for (const directory of [
     "apps/server/dist",
     "apps/updater/dist",
-    "apps/web/dist",
+    "apps/web/dist-root",
+    "apps/web/dist-fs",
     "packages/shared/dist",
     "packages/update-core/dist",
   ]) {

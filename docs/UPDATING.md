@@ -293,8 +293,8 @@ capability remains the authority even for loopback requests.
 4. Run the platform bootstrap command above with `relative-path-policy preserve`
    unless a reviewed absolute path migration has separate target data prepared.
 5. Verify the manifest, SQLite snapshot, legacy source backup, and current link.
-6. Start the managed release from the installation root through
-   `scripts/start-filestation.ps1` or `bash scripts/start-filestation.sh`.
+6. From the installation root, start the managed release through
+   `node updater/dist/cli.js launch --root .`.
 7. Run `updater status`, verify the UI and database, then perform one manual
    update and one pre-COMMITTED rollback drill before accepting the release.
 
@@ -321,10 +321,14 @@ a live WAL-mode `.db` file.
 
 ## Nginx manual changes
 
-Use `<install-root>/current/apps/web/dist` as the managed static root. For the
-root deployment, verify `/`, `/api/v1/...`, and that
+Each immutable release contains both `apps/web/dist-root` and
+`apps/web/dist-fs`. Use `<install-root>/current/apps/web/dist-root` as the
+managed root static root and `<install-root>/current/apps/web/dist-fs` for
+`/fs/`; the `current` link switches both together. The server's direct static
+mode defaults to `apps/web/dist-root` relative to the release root, or accepts
+an explicit `FILESTATION_WEB_DIST`. For the root deployment, verify `/`, `/api/v1/...`, and that
 `/api/v1/internal/update/health` and `/promote-ready` return 403 through Nginx.
-For `/fs/`, build Web with `FILESTATION_BASE=/fs/`, enable the `/fs/` locations,
+For `/fs/`, enable the `/fs/` locations already backed by `dist-fs`,
 verify `/fs/`, `/fs/api/v1/...`, `/fs/assets/...`, the two internal-route denials,
 and the canonical initialization restrictions. Run `nginx -t`, reload Nginx
 manually, and record separate root and `/fs/` acceptance evidence.
