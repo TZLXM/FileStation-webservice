@@ -9,6 +9,7 @@ import {
   UpdateCapabilityService,
 } from './update-capability.service';
 import { UpdateCheckService } from './update-check.service';
+import { WriteBarrierService } from '../maintenance/write-barrier.service';
 import {
   UPDATE_FETCH,
   UPDATE_NOW,
@@ -100,6 +101,7 @@ describe('UpdateCheckService', () => {
   let random: number;
   let trustedKey: KeyObject | null;
   let capability: UpdateCapability;
+  let barrier: { accepting: boolean };
   let fetchImpl: jest.MockedFunction<typeof fetch>;
   let service: UpdateCheckService;
 
@@ -109,6 +111,7 @@ describe('UpdateCheckService', () => {
     random = 0.5;
     trustedKey = fixture.publicKey;
     capability = readyCapability();
+    barrier = { accepting: true };
     fetchImpl = scriptedFetch([{ fixture }, { fixture }]);
 
     const module: TestingModule = await Test.createTestingModule({
@@ -118,6 +121,7 @@ describe('UpdateCheckService', () => {
           provide: UpdateCapabilityService,
           useValue: { inspect: jest.fn(async () => capability) },
         },
+        { provide: WriteBarrierService, useValue: barrier },
         {
           provide: ConfigService,
           useValue: { get: jest.fn() },
@@ -139,6 +143,11 @@ describe('UpdateCheckService', () => {
       ],
     }).compile();
     service = module.get(UpdateCheckService);
+  });
+
+  afterEach(() => {
+    (service as unknown as { onModuleDestroy?: () => void }).onModuleDestroy?.();
+    jest.useRealTimers();
   });
 
   it('returns the signed stable candidate with both bilingual summaries', async () => {
@@ -167,7 +176,8 @@ describe('UpdateCheckService', () => {
     expect(status).toEqual(
       expect.objectContaining({
         decision: 'updater_required',
-        available_version: null,
+        available_version: '0.2.5',
+        release_summaries: fixture.manifest.release_summaries,
         updater_version: '0.1.0',
       }),
     );
@@ -254,6 +264,12 @@ describe('UpdateCheckService', () => {
         error_code: 'UPDATE_CHECK_FAILED',
       }),
     );
+    expect(service.getCachedStatus()).toEqual(
+      expect.objectContaining({
+        available_version: '0.2.5',
+        error_code: 'UPDATE_CHECK_FAILED',
+      }),
+    );
   });
   it('throttles default retries after an expired success refresh fails', async () => {
     const original = await service.check({ force: false });
@@ -267,6 +283,107 @@ describe('UpdateCheckService', () => {
     now += 60_000;
     expect((await service.check({ force: false })).available_version).toBe('0.2.5');
     expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+
+  it.each([
+    ['docker', readyCapability({ mode: 'docker', reason: 'DOCKER_MANUAL_UPGRADE' })],
+    ['unmanaged', readyCapability({ mode: 'unmanaged', reason: 'UNMANAGED_INSTALL' })],
+    [
+      'updater metadata',
+      readyCapability({
+        updater_version: null,
+        reason: 'UPDATER_METADATA_INVALID',
+      }),
+    ],
+  ])(
+    'discovers signed release metadata for configured %s installations while install stays unavailable',
+    async (_name, unavailableCapability) => {
+      capability = unavailableCapability;
+
+      const status = await service.check({ force: true });
+
+      expect(fetchImpl).toHaveBeenCalledTimes(3);
+      expect(status).toEqual(
+        expect.objectContaining({
+          available_version: '0.2.5',
+          manifest_sha256: fixture.digest,
+          release_summaries: fixture.manifest.release_summaries,
+          capability: expect.objectContaining({
+            mode: unavailableCapability.mode,
+            reason: unavailableCapability.reason,
+          }),
+        }),
+      );
+      await expect(
+        service.resolveCandidate({
+          version: '0.2.5',
+          manifest_sha256: fixture.digest,
+          artifact_sha256: fixture.manifest.artifacts[0].sha256,
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'UPDATE_SELECTION_STALE' }),
+      });
+    },
+  );
+
+  it('runs a jittered lifecycle check after the startup cache window', async () => {
+    jest.useFakeTimers();
+    fetchImpl = scriptedFetch([{ fixture }, { fixture }]);
+
+    service.onApplicationBootstrap();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+
+    now += 6 * 60 * 60 * 1000;
+    await jest.advanceTimersByTimeAsync(6 * 60 * 60 * 1000);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(6);
+  });
+
+  it('retries a failed autonomous check with bounded backoff', async () => {
+    jest.useFakeTimers();
+    fetchImpl = scriptedFetch([
+      { fixture, fail: true },
+      { fixture },
+    ]);
+
+    service.onApplicationBootstrap();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    now += 60_000;
+    await jest.advanceTimersByTimeAsync(60_000);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(service.getCachedStatus().available_version).toBe('0.2.5');
+  });
+
+  it('defers scheduled discovery during maintenance and resumes after admission opens', async () => {
+    jest.useFakeTimers();
+    barrier.accepting = false;
+
+    service.onApplicationBootstrap();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    barrier.accepting = true;
+    now += 60_000;
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it('cancels scheduled checks at module shutdown', async () => {
+    jest.useFakeTimers();
+    service.onApplicationBootstrap();
+    await jest.advanceTimersByTimeAsync(0);
+    const calls = fetchImpl.mock.calls.length;
+    expect(calls).toBe(3);
+
+    (service as unknown as { onModuleDestroy: () => void }).onModuleDestroy();
+    now += 24 * 60 * 60 * 1000;
+    await jest.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(calls);
   });
 
 });

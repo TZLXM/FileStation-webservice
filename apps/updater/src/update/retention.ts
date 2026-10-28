@@ -250,6 +250,31 @@ export class RetentionService {
     if (!within(backupsRoot, backupRoot)) {
       throw new Error("bootstrap backup id escaped protected backups");
     }
+    const assertDirectory = async (directory:string) => {
+      const info=await this.fs.lstat(directory);
+      if(!info.isDirectory() || info.isSymbolicLink() || await this.fs.realpath(directory)!==directory)
+        throw new Error('bootstrap backup ancestry must be canonical link-free directory');
+      return `${info.dev}:${info.ino}`;
+    };
+    const ancestry=[path.resolve(this.root),backupsRoot,backupRoot];
+    const identities=await Promise.all(ancestry.map(assertDirectory));
+    const manifestPath=path.join(backupRoot,'MANIFEST.json');
+    const readIdentity=async () => {
+      const info=await this.fs.lstat(manifestPath);
+      if(!info.isFile() || info.isSymbolicLink() || await this.fs.realpath(manifestPath)!==manifestPath)
+        throw new Error('bootstrap backup manifest must be canonical');
+      const bytes=await this.fs.readFile(manifestPath);
+      const manifest=JSON.parse(bytes.toString('utf8'));
+      const managedPath=path.join(path.resolve(this.root),'managed-install.json');
+      const managedInfo=await this.fs.lstat(managedPath);
+      if(!managedInfo.isFile() || managedInfo.isSymbolicLink() || await this.fs.realpath(managedPath)!==managedPath)
+        throw new Error('bootstrap installation identity must be canonical');
+      const managed=JSON.parse((await this.fs.readFile(managedPath)).toString('utf8'));
+      if(manifest.schemaVersion!==1 || manifest.kind!=='bootstrap-backup' || manifest.backupId!==backupId || manifest.installRoot!==path.resolve(this.root) || !manifest.installId || manifest.installId!==managed.installId || managed.bootstrapBackupId!==backupId)
+        throw new Error('bootstrap backup identity mismatch');
+      return createHash('sha256').update(bytes).digest('hex');
+    };
+    const manifestIdentity=await readIdentity();
     const removed: string[] = [];
     for (const relative of ["env", "legacy-source"]) {
       const target = path.join(backupRoot, relative);
@@ -261,6 +286,16 @@ export class RetentionService {
         if (!info.isDirectory() || info.isSymbolicLink()) {
           throw new Error("bootstrap recovery asset is not a real directory");
         }
+        // Recheck every ancestor and exact selected backup immediately before
+        // recursive deletion; a real leaf under a redirected parent is unsafe.
+        for(let index=0;index<ancestry.length;index++) {
+          if(await assertDirectory(ancestry[index])!==identities[index]) throw new Error('bootstrap backup directory identity changed');
+        }
+        if(await readIdentity()!==manifestIdentity) throw new Error('bootstrap backup manifest changed');
+        const actual=await this.fs.realpath(target);
+        const latest=await this.fs.lstat(target);
+        if(actual!==target || !within(backupRoot,actual) || latest.isSymbolicLink() || !latest.isDirectory() || latest.dev!==info.dev || latest.ino!==info.ino)
+          throw new Error('bootstrap recovery asset identity changed');
         await rm(target, { recursive: true, force: false });
         removed.push(target);
       }

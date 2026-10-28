@@ -6,6 +6,7 @@ const { Test } = require('@nestjs/testing');
 require('ts-node').register({ project: path.join(__dirname, '../../tsconfig.json'), transpileOnly: true });
 const { PlatformBootIdentityProvider, NodeDurableFileSystem, acquireRecoveryGuard } = require('@filestation/updater');
 const { UpdateInstallCoordinator } = require('../../src/updates/update-install-coordinator');
+const { UpdateOperationReservationService } = require('../../src/updates/update-operation-reservation.service');
 const { WriteBarrierService } = require('../../src/maintenance/write-barrier.service');
 const { WriteFreezeService } = require('../../src/maintenance/write-freeze.service');
 const { registerMaintenanceRequestLease } = require('../../src/maintenance/maintenance-admission.guard');
@@ -42,7 +43,7 @@ process.on('message', async (message) => {
             intentId: intent.id, phase: 'HANDOFF_READY',
           });
           send({ event: 'handoff-ready' });
-        } }, identity, () => Date.now(), '0.2.0', randomUUID,
+        } }, identity, () => Date.now(), '0.2.0', randomUUID, new UpdateOperationReservationService(),
       );
       const module = await Test.createTestingModule({
         providers: [{ provide: UpdateInstallCoordinator, useValue: coordinator }],

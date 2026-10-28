@@ -24,6 +24,7 @@ import { AttemptJournal } from '@filestation/updater';
 import { AuditService } from '../audit/audit.service';
 import { registerMaintenanceRequestLease } from '../maintenance/maintenance-admission.guard';
 import { HandoffUpdateInstallExecutor, UpdateInstallCoordinator } from './update-install-coordinator';
+import { UpdateOperationReservationService } from './update-operation-reservation.service';
 import { UpdateCapabilityService } from './update-capability.service';
 import { ApplicationShutdownService } from './application-shutdown.service';
 
@@ -136,7 +137,7 @@ describe('DatabaseSnapshotService', () => {
     const execute=executor.execute.bind(executor);let executed=false;
     jest.spyOn(executor,'execute').mockImplementation(async context=>{try{await execute(context);}finally{executed=true;}});
     const identity = {current:async()=>({provider:'windows-cim' as const,value:'fixture-boot'}),processCreatedAt:async()=> 'fixture-created',isProcessAlive:async()=>true};
-    const coordinator = new UpdateInstallCoordinator(config, barrier, capability, {record:jest.fn()} as unknown as AuditService, executor, identity, Date.now, '0.2.0', randomUUID);
+    const coordinator = new UpdateInstallCoordinator(config, barrier, capability, {record:jest.fn()} as unknown as AuditService, executor, identity, Date.now, '0.2.0', randomUUID, new UpdateOperationReservationService());
     const receipt = Object.freeze({space_budget:Object.freeze({database_migration:false,migration_workspace_multiplier:0,migration_workspace_min_bytes:0}),prepared_id:randomUUID(),manifest_sha256:'a'.repeat(64),artifact_sha256:'b'.repeat(64),version:'0.2.5', platform:process.platform === 'win32' ? 'windows-x64' : 'linux-x64',arch:'x64',staging_path:await import('node:fs/promises').then(fs=>fs.realpath(staging)),verified_size:1,unpacked_size:1,expires_at:Date.now()+60000});
     try {
       const accepted = await coordinator.accept(receipt);
@@ -167,7 +168,14 @@ describe('DatabaseSnapshotService', () => {
       const retry = await coordinator.accept(Object.freeze({...receipt,prepared_id:randomUUID()}));
       expect(retry.attempt_id).not.toBe(accepted.attempt_id);
       expect((await AttemptJournal.inspect(root)).phase).toBe('PREPARED');
-    } finally { await coordinator.onModuleDestroy(); await (coordinator as any).ownership?.recoveryGuard.release(); jest.restoreAllMocks(); }
+    } finally {
+      await coordinator.onModuleDestroy();
+      // These fixtures model a failed post-freeze handoff without exiting this
+      // test process. Production intentionally retains both guards until exit.
+      await (coordinator as any).ownership?.recoveryGuard.release();
+      await (coordinator as any).operationReservation?.release();
+      jest.restoreAllMocks();
+    }
   },15000);
 
   it('closes the verifier, syncs the snapshot and parent before returning a receipt', async () => {

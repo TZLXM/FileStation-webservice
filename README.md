@@ -88,7 +88,7 @@ npx cross-env FILESTATION_BASE=/fs/ npm run build --workspace=@filestation/web
 | `FILESTATION_PORT` | `8080` | 监听端口 |
 | `FILESTATION_HOST` | `127.0.0.1` | 监听地址（`npm start` 脚本已设为 `0.0.0.0`） |
 | `FILESTATION_SERVE_STATIC` | 关闭 | `=true` 时由本进程托管前端构建产物（`npm start` 脚本已开启） |
-| `FILESTATION_WEB_DIST` | `apps/web/dist` | 前端构建产物路径（相对仓库根） |
+| `FILESTATION_WEB_DIST` | `apps/web/dist-root` | 前端构建产物路径（相对仓库根）；`/fs/` 使用 `apps/web/dist-fs` |
 | `FILESTATION_CORS_ORIGINS` | — | 逗号分隔的允许跨域来源；前后端同源部署时无需设置 |
 | `FILESTATION_WEB_URL` | 服务自身地址 | 开发模式下指向 vite 地址，用于打印正确的初始化 URL |
 | `FILESTATION_STORAGE_PATH` | `./data/storage` | 文件存储目录 |

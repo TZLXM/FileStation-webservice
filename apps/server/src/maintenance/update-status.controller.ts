@@ -118,33 +118,39 @@ export class UpdateStatusController {
     @Req() req: Request & { user: { id: string } },
     @Res({ passthrough: true }) response: Response,
   ) {
-    await this.reauth.verify(
+    const reservation = await this.installs.reserveInstall(() => this.reauth.verify(
       req.user.id,
       body.password,
       body.totp_code,
       req.ip ?? 'unknown',
-    );
-    const receipt = await this.prepareService.consume(body.prepared_id);
-    if (!receipt) {
-      throw new ConflictException({
-        code: 'UPDATE_RECEIPT_INVALID',
-        message: 'The prepared update receipt is missing, expired, or consumed',
-      });
-    }
-    let accepted;
+    ));
+    let transferred = false;
     try {
-      accepted = await this.installs.accept(receipt);
-    } catch (error) {
-      await this.prepareService.discard(receipt);
-      throw error;
+      const receipt = await this.prepareService.consume(body.prepared_id);
+      if (!receipt) {
+        throw new ConflictException({
+          code: 'UPDATE_RECEIPT_INVALID',
+          message: 'The prepared update receipt is missing, expired, or consumed',
+        });
+      }
+      let accepted;
+      try {
+        accepted = await this.installs.accept(receipt, reservation);
+        transferred = true;
+      } catch (error) {
+        await this.prepareService.discard(receipt);
+        throw error;
+      }
+      this.installs.scheduleAfterResponse(accepted.attempt, response);
+      return {
+        attempt_id: accepted.attempt_id,
+        prepared_id: accepted.prepared_id,
+        fence: accepted.fence,
+        phase: accepted.phase,
+        accepted_at: accepted.accepted_at,
+      };
+    } finally {
+      if (!transferred) await reservation.release();
     }
-    this.installs.scheduleAfterResponse(accepted.attempt, response);
-    return {
-      attempt_id: accepted.attempt_id,
-      prepared_id: accepted.prepared_id,
-      fence: accepted.fence,
-      phase: accepted.phase,
-      accepted_at: accepted.accepted_at,
-    };
   }
 }

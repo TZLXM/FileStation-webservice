@@ -4,6 +4,8 @@ import {
   Injectable,
   Logger,
   OnApplicationBootstrap,
+  OnModuleDestroy,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, KeyObject } from 'node:crypto';
@@ -13,6 +15,7 @@ import {
   VerifiedManifestV1,
 } from '@filestation/update-core';
 import { UpdateCapabilityService } from './update-capability.service';
+import { WriteBarrierService } from '../maintenance/write-barrier.service';
 import {
   UPDATE_FETCH,
   UPDATE_NODE_VERSION,
@@ -30,12 +33,20 @@ import {
 
 const CACHE_WINDOW_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_MANUAL_INTERVAL_MS = 60_000;
+const RETRY_BASE_MS = 60_000;
+const RETRY_MAX_MS = 30 * 60 * 1000;
+const MAINTENANCE_RECHECK_MS = 60_000;
 
 interface CacheEntry {
   status: UpdateCheckView;
   candidate: VerifiedUpdateCandidate | null;
   expiresAt: number;
   lastAttemptAt: number;
+  lastRefreshError?: {
+    error_code: string;
+    message: string;
+    checked_at: string;
+  };
 }
 
 function canonicalJson(value: unknown): string {
@@ -63,10 +74,15 @@ function cloneStatus(status: UpdateCheckView): UpdateCheckView {
 }
 
 @Injectable()
-export class UpdateCheckService implements OnApplicationBootstrap {
+export class UpdateCheckService
+  implements OnApplicationBootstrap, OnModuleDestroy
+{
   private readonly logger = new Logger(UpdateCheckService.name);
   private cache?: CacheEntry;
   private inFlight?: Promise<UpdateCheckView>;
+  private timer?: ReturnType<typeof setTimeout>;
+  private stopped = false;
+  private failedAttempts = 0;
 
   constructor(
     private readonly capabilityService: UpdateCapabilityService,
@@ -78,18 +94,32 @@ export class UpdateCheckService implements OnApplicationBootstrap {
     @Inject(UPDATE_RANDOM) private readonly random: () => number,
     @Inject(UPDATE_PRODUCT_VERSION) private readonly productVersion: string,
     @Inject(UPDATE_NODE_VERSION) private readonly nodeVersion: string,
+    @Optional()
+    private readonly barrier?: WriteBarrierService,
   ) {}
 
   onApplicationBootstrap(): void {
-    void this.check({ force: true }).catch(() => {
-      this.logger.warn('startup update check failed');
-    });
+    this.stopped = false;
+    this.failedAttempts = 0;
+    void this.runScheduledCheck();
+  }
+
+  onModuleDestroy(): void {
+    this.stopped = true;
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
   }
 
   getCachedStatus(): UpdateCheckView {
-    return this.cache
-      ? cloneStatus(this.cache.status)
-      : this.unavailableStatus(null, 'not checked', null);
+    if (!this.cache) return this.unavailableStatus(null, 'not checked', null);
+    const status = cloneStatus(this.cache.status);
+    if (this.cache.lastRefreshError) {
+      status.error_code = this.cache.lastRefreshError.error_code;
+      status.message = this.cache.lastRefreshError.message;
+    }
+    return status;
   }
 
   async check(options: { force: boolean }): Promise<UpdateCheckView> {
@@ -129,21 +159,8 @@ export class UpdateCheckService implements OnApplicationBootstrap {
       );
     }
 
-    if (
-      capability.mode !== 'managed' ||
-      !capability.supported ||
-      !capability.install_root ||
-      !capability.updater_version
-    ) {
-      return this.failWithoutFetch(
-        capability.reason ?? 'UPDATE_UNSUPPORTED',
-        this.capabilityMessage(capability),
-        capability,
-      );
-    }
-
     if (this.cache && !options.force && now < this.cache.expiresAt) {
-      return this.cache.status;
+      return this.getCachedStatus();
     }
     const manualInterval =
       this.config.get<number>('app.updateManualCheckIntervalMs') ??
@@ -152,7 +169,7 @@ export class UpdateCheckService implements OnApplicationBootstrap {
       this.cache &&
       now - this.cache.lastAttemptAt < manualInterval
     ) {
-      return this.cache.status;
+      return this.getCachedStatus();
     }
 
     const base = this.unavailableStatus(capability, 'checking', null);
@@ -162,43 +179,65 @@ export class UpdateCheckService implements OnApplicationBootstrap {
         trustedKey: key,
       });
       const digest = manifestDigest(manifest);
+      const canInstallAutomatically =
+        capability.mode === 'managed' &&
+        capability.supported &&
+        capability.install_root !== null &&
+        capability.updater_version !== null;
+      const selectionUpdaterVersion = canInstallAutomatically
+        ? capability.updater_version!
+        : capability.mode === 'managed' &&
+            capability.reason === 'UPDATER_METADATA_INVALID'
+          ? '0.0.0'
+          : manifest.min_updater_version;
       const decision = selectUpdate(
         manifest,
         this.productVersion,
         process.platform,
         process.arch,
-        capability.updater_version,
+        selectionUpdaterVersion,
         this.nodeVersion,
       );
+      const releaseFactsAvailable = ![
+        'same_version',
+        'downgrade',
+        'invalid_version',
+      ].includes(decision.status);
+      const matchingArtifact = manifest.artifacts.find((artifact) => {
+        const os = process.platform === 'win32' ? 'windows' : process.platform;
+        return artifact.os === os && artifact.arch === process.arch;
+      });
       const status: UpdateCheckView = {
         ...base,
         stage: 'idle',
         checked_at: new Date(now).toISOString(),
         decision: decision.status,
         available_version:
-          decision.status === 'available' ? manifest.version : null,
+          releaseFactsAvailable ? manifest.version : null,
         candidate_commit:
-          decision.status === 'available' ? manifest.commit : null,
+          releaseFactsAvailable ? manifest.commit : null,
         manifest_sha256: digest,
         artifact_sha256:
-          decision.status === 'available' ? decision.artifact.sha256 : null,
+          releaseFactsAvailable ? matchingArtifact?.sha256 ?? null : null,
         artifact_filename:
-          decision.status === 'available' ? decision.artifact.filename : null,
+          releaseFactsAvailable ? matchingArtifact?.filename ?? null : null,
         archive_size:
-          decision.status === 'available'
-            ? decision.artifact.archive_size
+          releaseFactsAvailable
+            ? matchingArtifact?.archive_size ?? null
             : null,
         unpacked_size:
-          decision.status === 'available'
-            ? decision.artifact.unpacked_size
+          releaseFactsAvailable
+            ? matchingArtifact?.unpacked_size ?? null
             : null,
         release_summaries: manifest.release_summaries,
         release_notes_url: manifest.release_notes_url,
         upgrade_guide_url: manifest.upgrade_guide_url,
-        message: this.decisionMessage(decision.status),
+        message: this.resultMessage(capability, decision.status),
       };
       const candidate: VerifiedUpdateCandidate | null =
-        decision.status === 'available'
+        decision.status === 'available' &&
+        decision.artifact !== undefined &&
+        canInstallAutomatically
           ? {
               manifest,
               artifact: decision.artifact,
@@ -213,16 +252,18 @@ export class UpdateCheckService implements OnApplicationBootstrap {
         candidate,
         expiresAt: now + ttl,
         lastAttemptAt: now,
+        lastRefreshError: undefined,
       };
       return status;
     } catch {
       if (this.cache) {
         this.cache.lastAttemptAt = now;
-        return {
-          ...this.cache.status,
+        this.cache.lastRefreshError = {
           error_code: 'UPDATE_CHECK_FAILED',
           message: 'Update check failed; using the cached result',
+          checked_at: new Date(now).toISOString(),
         };
+        return this.getCachedStatus();
       }
       const failed: UpdateCheckView = {
         ...base,
@@ -344,5 +385,65 @@ export class UpdateCheckService implements OnApplicationBootstrap {
       default:
         return 'No update is available';
     }
+  }
+
+  private resultMessage(
+    capability: UpdateCapability,
+    decision: string,
+  ): string {
+    const decisionMessage = this.decisionMessage(decision);
+    const installAvailable =
+      capability.mode === 'managed' &&
+      capability.supported &&
+      capability.install_root !== null &&
+      capability.updater_version !== null;
+    return installAvailable
+      ? decisionMessage
+      : `${decisionMessage}. ${this.capabilityMessage(capability)}`;
+  }
+
+  private async runScheduledCheck(): Promise<void> {
+    if (this.stopped) return;
+    if (this.barrier && !this.barrier.accepting) {
+      this.schedule(MAINTENANCE_RECHECK_MS);
+      return;
+    }
+
+    try {
+      const status = await this.check({ force: true });
+      if (status.error_code === 'UPDATE_CHECK_FAILED') {
+        this.failedAttempts += 1;
+        this.schedule(this.retryDelay());
+      } else {
+        this.failedAttempts = 0;
+        this.schedule(this.periodicDelay());
+      }
+    } catch {
+      this.failedAttempts += 1;
+      this.logger.warn('scheduled update check failed');
+      this.schedule(this.retryDelay());
+    }
+  }
+
+  private schedule(delay: number): void {
+    if (this.stopped) return;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      void this.runScheduledCheck();
+    }, Math.max(0, delay));
+    this.timer.unref?.();
+  }
+
+  private periodicDelay(): number {
+    return Math.round(CACHE_WINDOW_MS * (0.9 + 0.2 * this.random()));
+  }
+
+  private retryDelay(): number {
+    const backoff = Math.min(
+      RETRY_MAX_MS,
+      RETRY_BASE_MS * 2 ** Math.max(0, this.failedAttempts - 1),
+    );
+    return Math.round(backoff * (0.9 + 0.2 * this.random()));
   }
 }

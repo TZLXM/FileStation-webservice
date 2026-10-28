@@ -26,7 +26,7 @@ reviewed facts.
 #### 升级说明
 
 - 旧式源码部署必须先停止全部旧进程并按 UPDATING.md 手动 bootstrap；升级不得让旧、新版本同时写同一数据库或存储。
-- Nginx 静态目录需切换到 `current/apps/web/dist`；Docker 内禁止自更新或挂载 Docker socket，只能按文档手动更新镜像。
+- Nginx 静态目录：根路径使用 `<install-root>/current/apps/web/dist-root`，`/fs/` 子路径使用 `<install-root>/current/apps/web/dist-fs`；Docker 内禁止自更新或挂载 Docker socket，只能按文档手动更新镜像。
 
 #### 已知问题
 
@@ -53,7 +53,7 @@ reviewed facts.
 #### Upgrade Notes
 
 - Legacy source deployments must stop every old process and follow UPDATING.md for a one-time bootstrap; old and new versions must never write the same database or storage concurrently.
-- Point Nginx at `current/apps/web/dist`. Docker installations must use documented manual image updates and must not self-update or mount the Docker socket.
+- Point Nginx at `<install-root>/current/apps/web/dist-root` for the root path or `<install-root>/current/apps/web/dist-fs` for `/fs/`. Docker installations must use documented manual image updates and must not self-update or mount the Docker socket.
 
 #### Known Issues
 
@@ -85,7 +85,7 @@ reviewed facts.
 
 #### 已知问题
 
-- 发布前仍需使用同一候选制品完成 375px、TOTP/恢复码和刷新后续传的人工验收。
+- 发布门要求使用同一候选制品提供 375px、TOTP/恢复码和刷新后续传的人工验收证据。
 - 现有 Moderate/Low 依赖审计告警仍需按 CURRENT-STATE 的风险记录继续处理。
 
 ### English
@@ -111,5 +111,5 @@ reviewed facts.
 
 #### Known Issues
 
-- The same candidate artifact still requires manual acceptance at 375px, for TOTP/recovery, and for resume after refresh before publication.
+- The release gate requires manual acceptance evidence from the same candidate artifact at 375px, for TOTP/recovery, and for resume after refresh.
 - Existing Moderate/Low dependency audit advisories remain tracked in CURRENT-STATE.

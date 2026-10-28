@@ -28,6 +28,10 @@ import { UpdateCapabilityService } from './update-capability.service';
 import { ApplicationShutdownService } from './application-shutdown.service';
 import { DatabaseSnapshotService } from './database-snapshot.service';
 import { UpdateSpacePreflightService } from './update-space-preflight.service';
+import {
+  UpdateOperationLease,
+  UpdateOperationReservationService,
+} from './update-operation-reservation.service';
 import { HANDOFF_SPAWNER, HandoffSpawner } from './handoff-spawner';
 import { HandoffProgress, ShutdownCoordinator } from './shutdown-coordinator';
 import {
@@ -231,6 +235,7 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
   private handedOff = false;
   private readonly scheduled = new Set<string>();
   private accepting?: Promise<InstallAcceptance>;
+  private operationReservation?: UpdateOperationLease;
 
   async onModuleDestroy(): Promise<void> {
     this.stopped = true;
@@ -238,6 +243,10 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
     // The durable owner record stays for manual/fenced recovery after restart.
     // An executor may call app.close(); its writer guard must survive that call.
     if (!this.handedOff) await this.ownership?.recoveryGuard.release();
+    if (!this.handedOff && this.operationReservation) {
+      await this.operationReservation.release();
+      this.operationReservation = undefined;
+    }
   }
 
   constructor(
@@ -252,9 +261,48 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
     @Inject(UPDATE_NOW) private readonly now: () => number,
     @Inject(UPDATE_PRODUCT_VERSION) private readonly productVersion: string,
     @Inject(UPDATE_RANDOM_ID) private readonly randomId: () => string,
+    @Optional()
+    private readonly operations?: UpdateOperationReservationService,
   ) {}
 
-  async accept(receipt: PreparedUpdateReceipt): Promise<InstallAcceptance> {
+  async reserveInstall(reauthenticate: () => Promise<void>): Promise<UpdateOperationLease> {
+    if (!this.operations) {
+      throw ioFailure(
+        'UPDATE_OPERATION_IN_PROGRESS',
+        'Installation reservation is unavailable',
+      );
+    }
+    const capability = await this.capability.inspect();
+    if (
+      capability.mode !== 'managed' ||
+      !capability.supported ||
+      !capability.install_root
+    ) {
+      // There is no install root to allocate or reserve. Preserve the HTTP
+      // reauthentication contract before returning deployment guidance.
+      await reauthenticate();
+      throw ioFailure(
+        capability.reason ?? 'UPDATE_UNSUPPORTED',
+        'This installation cannot start an update',
+      );
+    }
+    const reservation = await this.operations.acquire(
+      path.resolve(capability.install_root),
+      'install',
+    );
+    try {
+      await reauthenticate();
+      return reservation;
+    } catch (error) {
+      await reservation.release();
+      throw error;
+    }
+  }
+
+  async accept(
+    receipt: PreparedUpdateReceipt,
+    reservation?: UpdateOperationLease,
+  ): Promise<InstallAcceptance> {
     if (
       this.changing || this.stopped ||
       (this.ownership && !this.abandonedAttempts.has(this.ownership.attemptId))
@@ -262,7 +310,7 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
       throw ioFailure('UPDATE_IN_PROGRESS', 'Update ownership is unavailable');
     }
     this.changing = true;
-    const pending = this.acceptOwned(receipt);
+    const pending = this.acceptOwned(receipt, reservation);
     this.accepting = pending;
     try {
       return await pending;
@@ -274,6 +322,7 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
 
   private async acceptOwned(
     receipt: PreparedUpdateReceipt,
+    reservation?: UpdateOperationLease,
   ): Promise<InstallAcceptance> {
     if (!Object.isFrozen(receipt)) {
       throw ioFailure(
@@ -290,7 +339,33 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
     const capability = await this.capability.inspect();
     const root = await this.validateCapability(capability, receipt);
     await this.validateStaging(root, receipt);
+    let operation = reservation;
+    let acquiredOperation = false;
+    if (!operation) {
+      if (!this.operations) {
+        throw ioFailure(
+          'UPDATE_OPERATION_IN_PROGRESS',
+          'Installation reservation is unavailable',
+        );
+      }
+      operation = await this.operations.acquire(root, 'install');
+      acquiredOperation = true;
+    }
+    if (operation.kind !== 'install' || operation.root !== root) {
+      if (acquiredOperation) await operation.release();
+      throw ioFailure(
+        'UPDATE_IN_PROGRESS',
+        'Update operation reservation changed',
+      );
+    }
+    try {
+      await operation.assertActive();
+    } catch (error) {
+      if (acquiredOperation) await operation.release();
+      throw error;
+    }
     if (!this.barrier.accepting) {
+      if (acquiredOperation) await operation.release();
       throw ioFailure(
         'UPDATE_IN_PROGRESS',
         'Another update attempt already owns maintenance',
@@ -318,6 +393,7 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
         );
       }
     } catch {
+      if (acquiredOperation) await operation.release();
       throw ioFailure(
         'UPDATE_IN_PROGRESS',
         'Exclusive update ownership is unavailable',
@@ -395,6 +471,7 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
       };
     } catch {
       if (!this.ownership) await recoveryGuard.release();
+      if (acquiredOperation) await operation.release();
       throw ioFailure(
         'UPDATE_IN_PROGRESS',
         'Update ownership requires manual recovery or is already held',
@@ -412,6 +489,11 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
         artifact_sha256: receipt.artifact_sha256,
       },
     });
+    if (!this.operationReservation) {
+      this.operationReservation = operation;
+    } else if (this.operationReservation !== operation) {
+      await operation.release();
+    }
     return {
       attempt,
       attempt_id: attemptId,
@@ -646,6 +728,10 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
     // Durable cancellation precedes retiring the exact owner and reopening.
     await ownership.lock.release();
     await ownership.recoveryGuard.release();
+    if (this.operationReservation) {
+      await this.operationReservation.release();
+      this.operationReservation = undefined;
+    }
     this.ownership = undefined;
     this.receipts.delete(attempt.attemptId);
     this.scheduled.delete(attempt.attemptId);

@@ -1,6 +1,6 @@
 import { ConflictException, Inject, Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { stat } from 'node:fs/promises';
+import { lstat, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { DataSource } from 'typeorm';
 import {
@@ -25,6 +25,32 @@ async function fileBytes(filename: string): Promise<number> {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
     throw error;
   }
+}
+
+async function verifiedSnapshotFloor(root: string): Promise<number> {
+  const backups = path.join(root, 'backups');
+  let entries;
+  try {
+    entries = await readdir(backups, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+    throw error;
+  }
+
+  let floor = 0;
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const snapshot = path.join(backups, entry.name, 'update-snapshot.sqlite');
+    try {
+      const info = await lstat(snapshot);
+      if (info.isFile() && !info.isSymbolicLink()) {
+        floor = Math.max(floor, info.size);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  return floor;
 }
 
 @Injectable()
@@ -71,13 +97,22 @@ export class UpdateSpacePreflightService {
         Record<string, unknown>
       >
     )[0];
+    const pageCountValue = Number(pageCount?.page_count ?? 0);
+    const pageSizeValue = Number(pageSize?.page_size ?? 0);
+    const dbFileBytes = await fileBytes(database);
+    const logicalPageBytes = pageCountValue * pageSizeValue;
+    const existingVerifiedSnapshotBytes = await verifiedSnapshotFloor(root);
     const metrics: SqliteMetrics = {
-      pageCount: Number(pageCount?.page_count ?? 0),
-      pageSize: Number(pageSize?.page_size ?? 0),
-      dbFileBytes: await fileBytes(database),
+      pageCount: pageCountValue,
+      pageSize: pageSizeValue,
+      dbFileBytes,
       walBytes: await fileBytes(`${database}-wal`),
       shmBytes: await fileBytes(`${database}-shm`),
-      snapshotBytes: await fileBytes(database),
+      snapshotBytes: Math.max(
+        logicalPageBytes,
+        dbFileBytes,
+        existingVerifiedSnapshotBytes,
+      ),
     };
     const paths: VolumePathSet = {
       installRoot: root,
@@ -90,7 +125,7 @@ export class UpdateSpacePreflightService {
       temp,
       backups: path.join(root, 'backups'),
       snapshot: path.join(root, 'backups', 'preflight', 'update-snapshot.sqlite'),
-      restoreTemp: path.join(temp, 'update-restore'),
+      restoreTemp: `${database}.restore-preflight`,
     };
     const plans = await planRequiredSpace(
       paths,

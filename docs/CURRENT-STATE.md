@@ -1,8 +1,23 @@
 # Current State
 
-Updated: 2026-10-28
+Updated: 2026-10-29
 
-FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 2 实现/自动化验证已完成；Task 10 复审 clean，Task 11 正在形成 `v0.2.5` 本地候选。** 发布候选、真实 Windows/Linux bootstrap/update/rollback、Docker/Nginx、hosted workflow 与人工验收仍未完成。代码测试通过不能替代真实部署验收；fresh registry audit 仍有 Critical/High，不得描述为全绿或当前已清零。
+FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 2 实现/自动化验证已完成；release-auto-update 的 11 个任务及 chapter review 已完成，当前为同一个最终修复波次，待 scoped 最终复审。** 产品版本为 `0.2.5`；发布候选、真实 Windows/Linux bootstrap/update/rollback、Docker/Nginx、hosted workflow 与人工验收仍未完成。代码测试通过不能替代真实部署验收；fresh registry audit 仍有 Critical/High，不得描述为全绿或当前已清零。
+
+## Final review 修复波次（2026-10-29）
+
+- FR-I01：公共 `recover` 与 operator authority 先只读验证完整 journal prefix；持有 native recovery guard、核对 attempt/fence 并证明原 writer 已退出后，才允许截断 torn tail，然后严格重读再接管。完整损坏记录、活跃 writer 和错误 fence 均拒绝且不改 journal；COMMITTED 恢复只启动新版本，不回滚数据库。
+- FR-I02：snapshot 预算使用 `max(page_count × page_size, main DB bytes, retained snapshot bytes)`，覆盖 WAL 尚未 checkpoint 的逻辑页；restore 临时发布空间计入数据库所在卷，不再误计 upload temp 卷。
+- FR-I03/I04/M05：生命周期负责带 jitter 的六小时周期检查、从一分钟开始且有上限的失败重试、维护期延后和 shutdown 取消后续 timer。签名元数据发现独立于自动安装能力，Docker/unmanaged/需升级 updater 的安装可看到版本、双语摘要及手动操作指引，但不持有自动安装 candidate；无 publisher key 仍不发请求。刷新失败保留 verified cache 并持续在 GET status 展示最近错误。
+- FR-I05：prepare/install 共用安装根 reservation 与 native `update.operation.guard`。prepare 在 staging/下载/提取前占用；install reservation 不创建 attempt，并保持真实密码/TOTP 重认证。失败释放 reservation；shutdown 取消正在进行的下载并等待 staging 清理；冻结后的 handoff 保留 authority 到进程退出。测试 fixture 显式清理其模拟保留的句柄，真实跨进程 exclusion 与 journal/fence 断言保留。
+- FR-I06：bootstrap backup 清理验证 canonical install/backups/selected-backup 祖先、目录身份、exact manifest/install identity 和删除目标；递归删除前再次验证。Windows junction 外部 sentinel 回归通过；Linux symlink 路径仍需平台执行。
+- FR-I07：audit retention 通过注入 clock 在异步 lease admission 前采样一次，精确验证 90 天 `LessThan`，不再依赖相邻真实时间采样或容差。
+- FR-I08/M06：双语 CHANGELOG 与 README 使用实际随制品发布的 `dist-root` / `dist-fs`；历史 v0.2.0 发布说明改为永久适用的同候选验收证据要求。
+- 本波次 required gates：server unit **54 suites / 325 passed / 20 todo**（109.525s）；server full E2E **16 suites / 117 passed**（50.420s）；Web no-cache **22 files / 242 passed**（15.52s）；root typecheck/build exit 0，构建包含 root 与 `/fs/` 两个 bundle。初次 unit 的 freeze/close fixture EBUSY、E2E 的 guard/auth/child wiring 失败及接续复测的 handoff fixture 缺失 import 均保留失败日志；以上 full pass 覆盖并取代这些失败结果。
+- 公共 CLI/生产恢复扩展子集 **18 passed / 23 filtered**（569.456s），覆盖 MAINTENANCE/MIGRATING/COMMITTED torn tail、活跃 writer/完整损坏/错误 fence 无修改拒绝、F1-01/F1-02、六个 F1-03、previous-boot、终态 OS exclusion 与两个 pending COMMITTED。使用最新 emitted dist；fixture detached-child 清理复用 boot/createdAt/PID 身份校验 helper（另有 **2/2** native 进程回归），不按日志裸 PID 终止进程。
+- 修改过的 old-writer fixture 另经 fresh 生产组合 integration **7/7**（248.282s），覆盖真实 WAL snapshot/fenced handoff/独立 COMMITTED restart、旧 PID 拒绝接管、drain 后空间不足 durable abort、migration/health failure rollback、终态启动失败后恢复及 crashed-updater recovery。业务服务/迁移仍为受控端口，不能当作真实部署验收。最终 `git diff --check` 通过。
+- 同波次此前 fresh 证据：update-core **6 suites / 92 passed / 2 platform skips**；release/bootstrap/gate Node tests **117 passed / 2 platform skips**；updater state/authority/orchestration/rollback/retention **6 suites / 83 passed**（171.558s），含 native Windows junction 的 retention **9/9**。完整 updater **19 suites / 249 passed / 2 skipped / 1911.25s** 是较早 revision 的历史证据，未在最终修复后重跑，不代表当前全量 updater 通过。
+- 此波次不关闭 Minor FR-M01–M04/M07：staging 自动回收、extracted managed CLI 证据缺口、dense transitions、预期测试日志噪声及更广 composed negative/disconnect 演练仍保留。publisher key **UNCONFIGURED**，audit full **4C/7H/25M/9L**、production **1C/5H/19M/0L** 未接受风险；发布仍 **blocked**。无真实 key、push/PR/tag/sign/deploy/GitHub 操作；真实双平台、Docker、Nginx root/`/fs/` 与人工验收仍 pending。
 
 ## Task 11: v0.2.5 local candidate closure（2026-10-28）
 
@@ -74,7 +89,7 @@ FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 
 |------|------|
 | 设计文档 | v2.3 as-built 更新；Phase 1 实施计划迭代至 v1.7（经两轮外部评审） |
 | 项目管理 | AGENTS.md 已建立 |
-| 代码实现 | Phase 1/2 已完成；Task 2–8 已建立可签名发布基础、只读更新核心、durable updater、managed launcher、全局写栅栏/快照、内部验证门和管理员确认更新 API。Task 9 已接入继承匿名管道能力、pre-import startup authority、health/promote 协议、handoff executor、`continue --attempt`、回滚、重启验证、gated retention 与延迟审计对账。Task 10 已接入管理员更新面板、202 尝试轮询、全局维护遮罩与只读 status 轮询、一次性 hashed-asset 恢复，以及 ServeStatic/Nginx index/fallback `no-store` 与 hashed asset immutable 策略。Task 11 正在收口 0.2.5 制品、集成测试、发布门、文档与候选工作流。仍有明确 pending：无真实 managed upgrade/断电演练、无 hosted Windows/Linux/Node 20.17 结果、无真实 Nginx/FRP 验收；更新面板/缓存恢复仍需真实浏览器与 375px 人工验收；活跃崩溃状态的人工 `recover` 仍 fail closed |
+| 代码实现 | Phase 1/2 与 release-auto-update Task 1–11 的本地实现及 task/chapter review 已完成。包括签名发布基础、managed launcher、写栅栏/快照、真实重认证、排他 handoff、guarded 人工恢复/回滚/重启验证、retention、审计对账、管理员更新 UI、缓存恢复、双 base 制品及发布门；本节顶部记录最终同波次修复与待 scoped 复审状态。真实 managed upgrade/断电、hosted Windows/Linux/Node 20.17、Docker/Nginx/FRP、浏览器与 375px 人工验收仍 pending；未知身份与无法证明 writer 退出的恢复继续 fail closed |
 | 自动化 | Task 11 initial serial baseline（pre-handoff/disk 覆盖缺口由 I1/I2 修正）：server unit **52 suites / 311 passed / 20 todo**；full E2E **16/117**；Web no-cache **22 files / 235 passed**；update-core **6 suites / 92 passed / 2 skipped**；full updater **19 suites / 249 passed / 2 skipped**（含 7-case integration 与 host artifact suite）；release/bootstrap/gate scripts **109 passed / 2 skipped**；root typecheck/build、expected-node 0.2.5 built-in smoke 与 diff-check 通过。一次并行 artifact+server-unit 运行出现 Win32 journal sharing error，该 case isolated 通过；最终 serial server unit 全绿，因此仅记录为并发负载症状，不宣称单次复跑已证明通用根因。Expected ts-jest/lifecycle/MCP logs、PageErrorBoundary test log 仍存在；root `npm test` 与 lint 仍不可用，未以其代替门禁。 |
 | 用户手动验收 | **Partial**：真实 MCP 客户端已通过 `server_info`、上传、列表、分享、浏览器下载/读回、审计查询及 Token 吊销；直接 MCP `download_file` 工具当前不存在。375px 小屏、TOTP/恢复码真实流程及页面刷新后的断点续传仍 Pending |
 | 发布安全门 | **Blocked by fresh audit**：2026-10-28 full **4C/7H/25M/9L**、production **1C/5H/19M/0L**，两条 audit 均 exit 1。此前 `7a5ba50` 的零 Critical/High 是历史快照，不能代表当前依赖图。多数 findings 标记可修复，但 `body-parser` 需 Nest Platform Express 12 major、`zod` 需 4.x major；Task 11 未自行跨 major 修复或接受风险。真实客户端、小屏、认证、续传、双平台/Docker/Nginx 验收也仍 pending |

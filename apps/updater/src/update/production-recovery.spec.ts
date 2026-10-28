@@ -11,6 +11,7 @@ import {PlatformBootIdentityProvider} from '../state/boot-identity';
 import {NodeDurableFileSystem} from '../platform/durable-fs';
 import {CurrentLinkSwitcher} from '../platform/current-link';
 import {UpdateCapabilityAuthority,encodeInheritedCapability} from './capability';
+import {DetachedIdentity,stopDetachedChild} from '../../test/fixtures/cleanup-process';
 
 jest.setTimeout(120_000);
 const compiled=path.resolve(__dirname,'../../dist');
@@ -187,16 +188,74 @@ async function fixture(phase:AttemptPhase,pending?:string, reboot=false, liveOld
   const cleanup=async()=>{
     if(old.exitCode===null && old.signalCode===null){old.kill('SIGKILL');await exitedWithin(old);}
     const s=await AttemptJournal.inspect(root);
-    const pids=new Set<number>();
-    for(const r of s.records) if(r.kind==='completion' && r.result && typeof r.result==='object' && !Array.isArray(r.result) && typeof r.result.pid==='number') pids.add(r.result.pid);
-    try {const ledger=JSON.parse(await readFile(path.join(root,'update.processes.json'),'utf8'));ledger.children.forEach((c:{pid:number})=>pids.add(c.pid));}catch{}
-    for(const pid of pids) {try {process.kill(pid,'SIGKILL');}catch{}}
+    const children=new Map<string,DetachedIdentity>();
+    for(const r of s.records) {
+      if(r.kind==='completion' && r.result && typeof r.result==='object' && !Array.isArray(r.result) &&
+        typeof r.result.pid==='number' && typeof r.result.createdAt==='string' && typeof r.result.boot==='string') {
+        const child=r.result as unknown as DetachedIdentity;
+        children.set(`${child.pid}:${child.createdAt}:${child.boot}`,child);
+      }
+    }
+    try {
+      const ledger=JSON.parse(await readFile(path.join(root,'update.processes.json'),'utf8'));
+      for(const child of ledger.children ?? []) {
+        if(child && typeof child==='object') children.set(`${child.pid}:${child.createdAt}:${child.boot}`,child);
+      }
+    }catch{}
+    for(const child of children.values()) await stopDetachedChild(child,identity);
     await rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});
   };
-  return {root,servicePort,paths,previous,next,journal,run,cleanup,old,oldRequest,pipeCapability};
+  return {root,servicePort,paths,previous,next,journal,run,cleanup,old,oldRequest,pipeCapability,fence:owner.fence};
+}
+
+async function publicRecover(v:Awaited<ReturnType<typeof fixture>>, fence?:number) {
+  const child=spawn(process.execPath,[path.join(compiled,'cli.js'),'recover','--root',v.root,'--attempt','attempt-real','--expected-fence',String(fence??v.fence)],{
+    cwd:v.root,windowsHide:true,env:{...process.env,NODE_ENV:'production',JWT_SECRET:'synthetic-service-secret',FILESTATION_PORT:String(v.servicePort)},stdio:['ignore','pipe','pipe'],
+  });
+  let output='';child.stdout!.on('data',bytes=>output+=bytes);child.stderr!.on('data',bytes=>output+=bytes);
+  try {await exitedWithin(child,60000);} catch(error) {
+    child.kill('SIGKILL');await exitedWithin(child);throw new Error(`${error}: ${output}`);
+  }
+  try {output+=await readFile(path.join(v.root,'fixture-launch-error.txt'),'utf8');}catch{}
+  return {code:child.exitCode,output};
 }
 
 describe('production recovery entry and stable launcher',()=>{
+  it.each([
+    ['MAINTENANCE', '{"kind":"intent"'],
+    ['MIGRATING', '{"kind":"completion"'],
+    ['COMMITTED', '{"kind":"intent"'],
+  ] as const)('public recover repairs dead-writer %s torn tail under retained exclusion',async (phase, tail)=>{
+    const v=await fixture(phase);
+    const filename=path.join(v.root,'update-attempt.journal');
+    const prefix=await readFile(filename);
+    try {
+      await writeFile(filename,Buffer.concat([prefix,Buffer.from(tail)]));
+      const result=await publicRecover(v);
+      if(result.code!==0) throw new Error(result.output);
+      expect(await realpath(path.join(v.root,'current'))).toBe(phase==='COMMITTED'?v.next:v.previous);
+      expect(await readFile(v.paths.database,'utf8')).toBe(phase==='MIGRATING'?'verified-db':'changed-db');
+      const state=await AttemptJournal.inspect(v.root);
+      expect(state.pending).toBeNull();
+      if(phase==='COMMITTED') expect(state.records.some(r=>r.action==='rollback-database')).toBe(false);
+    } finally {
+      const bytes=await readFile(filename);
+      if(bytes.at(-1)!==10) await writeFile(filename,prefix);
+      await v.cleanup();
+    }
+  });
+  it.each(['live','corrupt','wrong-fence'] as const)('public recover refuses %s without changing journal bytes',async mode=>{
+    const v=await fixture('MAINTENANCE',undefined,false,mode==='live');
+    const filename=path.join(v.root,'update-attempt.journal');
+    const prefix=await readFile(filename);
+    const bytes=Buffer.concat([prefix,Buffer.from(mode==='corrupt'?'{}\n':'{"torn":')]);
+    try {
+      await writeFile(filename,bytes);
+      const result=await publicRecover(v,mode==='wrong-fence'?999:undefined);
+      expect(result.code).toBe(1);
+      expect(await readFile(filename)).toEqual(bytes);
+    } finally {await writeFile(filename,prefix);await v.cleanup();}
+  });
   it('F1-01 normal inherited pipe waits while the old guard is held and handoff is delayed',async()=>{
     const v=await fixture('SNAPSHOT_READY','close-application',false,true);
     let child:ChildProcess|undefined;

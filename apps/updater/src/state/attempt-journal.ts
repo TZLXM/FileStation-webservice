@@ -499,6 +499,14 @@ export class AttemptJournal {
   }
 
   /** Strict read-only inspection: unlike recovery reads, never discards a torn tail. */
+  static async inspectRecoverable(root: string, options: AttemptJournalOptions = {}): Promise<AttemptJournalSnapshot> {
+    const fs = options.fs ?? new NodeDurableFileSystem();
+    const journal = new AttemptJournal(root, path.join(root, JOURNAL_FILENAME), fs, options.now ?? (() => new Date()), options.id ?? randomUUID);
+    // Decode every complete record without changing any bytes. This grants no
+    // mutation authority; guarded repair must still prove all writers exited.
+    return summarize(await journal.loadAndRepair());
+  }
+
   static async inspect(root: string, options: AttemptJournalOptions = {}): Promise<AttemptJournalSnapshot> {
     const fs = options.fs ?? new NodeDurableFileSystem();
     const filename = path.join(root, JOURNAL_FILENAME);
@@ -721,7 +729,7 @@ export class AttemptJournal {
 
   async repairTail(ownership: RecoveryLockHandle): Promise<void> {
     await this.withWrite(async () => {
-      await ownership.assertJournalRepairAllowed();
+      await ownership.assertActive();
       await this.loadAndRepair();
       if (!(await this.fs.exists(this.filename))) return;
       const raw = await this.fs.readFile(this.filename);

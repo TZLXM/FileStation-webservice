@@ -18,6 +18,7 @@ import {
 } from './update-capability.service';
 import { UpdateCheckService } from './update-check.service';
 import { UpdatePrepareService } from './update-prepare.service';
+import { UpdateOperationReservationService } from './update-operation-reservation.service';
 import { UpdateSpacePreflightService } from './update-space-preflight.service';
 import {
   UPDATE_FETCH,
@@ -45,6 +46,8 @@ describe('UpdatePrepareService', () => {
   let now: number;
   let candidate: VerifiedUpdateCandidate;
   let capability: UpdateCapability;
+  let resolveCandidate: jest.Mock;
+  let artifactBytes: Buffer;
   let fetchImpl: jest.MockedFunction<typeof fetch>;
   let preflight: { assertSufficient: jest.Mock };
   let service: UpdatePrepareService;
@@ -52,7 +55,7 @@ describe('UpdatePrepareService', () => {
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), 'filestation-prepare-'));
     now = Date.parse('2026-10-28T00:00:00.000Z');
-    const artifactBytes = buildSafePublisherZip();
+    artifactBytes = buildSafePublisherZip();
     const fixture = createSignedManifestFixture(artifactBytes);
     candidate = {
       manifest: fixture.manifest,
@@ -60,6 +63,7 @@ describe('UpdatePrepareService', () => {
       manifest_sha256: fixture.digest,
     };
     capability = readyCapability(root);
+    resolveCandidate = jest.fn(async () => candidate);
     fetchImpl = jest.fn(async () =>
       new Response(artifactBytes, {
         status: 200,
@@ -75,7 +79,7 @@ describe('UpdatePrepareService', () => {
         UpdatePrepareService,
         {
           provide: UpdateCheckService,
-          useValue: { resolveCandidate: jest.fn(async () => candidate) },
+          useValue: { resolveCandidate },
         },
         {
           provide: UpdateCapabilityService,
@@ -85,6 +89,7 @@ describe('UpdatePrepareService', () => {
           provide: UpdateSpacePreflightService,
           useValue: preflight,
         },
+        UpdateOperationReservationService,
         {
           provide: ConfigService,
           useValue: {
@@ -160,6 +165,58 @@ describe('UpdatePrepareService', () => {
 
     expect(await service.consume(receipt.prepared_id)).toEqual(receipt);
     expect(await service.consume(receipt.prepared_id)).toBeNull();
+  });
+
+  it('admits one prepare at a time before staging allocation or network work', async () => {
+    let releaseDownload!: () => void;
+    let enteredDownload!: () => void;
+    const downloadStarted = new Promise<void>((resolve) => {
+      enteredDownload = resolve;
+    });
+    const downloadGate = new Promise<void>((resolve) => {
+      releaseDownload = resolve;
+    });
+    fetchImpl.mockImplementation(async () => {
+      enteredDownload();
+      await downloadGate;
+      return new Response(artifactBytes, {
+        status: 200,
+        headers: { 'content-length': String(artifactBytes.length) },
+      });
+    });
+    const selection = {
+      version: candidate.manifest.version,
+      manifest_sha256: candidate.manifest_sha256,
+      artifact_sha256: candidate.artifact.sha256,
+    };
+
+    const first = service.prepare(selection);
+    await downloadStarted;
+    const competing = service.prepare(selection).then(
+      (value) => ({ status: 'fulfilled' as const, value }),
+      (reason) => ({ status: 'rejected' as const, reason }),
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    releaseDownload();
+    const [firstResult, competingResult] = await Promise.all([
+      first.then(
+        (value) => ({ status: 'fulfilled' as const, value }),
+        (reason) => ({ status: 'rejected' as const, reason }),
+      ),
+      competing,
+    ]);
+
+    expect(competingResult).toMatchObject({
+      status: 'rejected',
+      reason: {
+        response: expect.objectContaining({
+          code: 'UPDATE_OPERATION_IN_PROGRESS',
+        }),
+      },
+    });
+    expect(preflight.assertSufficient).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(firstResult).toMatchObject({ status: 'fulfilled' });
   });
 
   it('rejects stale manifest or artifact selections before network work', async () => {
@@ -288,5 +345,25 @@ describe('UpdatePrepareService', () => {
     expect(await readdir(path.join(root, '.filestation-update-staging'))).toEqual(
       [],
     );
+  });
+
+  it('shutdown cancels an active download, releases reservation and refuses new allocation', async () => {
+    let entered!:()=>void;
+    const downloading=new Promise<void>(resolve=>{entered=resolve;});
+    fetchImpl.mockImplementation(async (_url, options) => new Promise((_resolve,reject)=>{
+      entered();
+      options!.signal!.addEventListener('abort',()=>reject(new Error('shutdown aborted download')),{once:true});
+    }));
+    const selection={version:candidate.manifest.version,manifest_sha256:candidate.manifest_sha256,artifact_sha256:candidate.artifact.sha256};
+    const pending=service.prepare(selection);
+    const outcome=expect(pending).rejects.toThrow();
+    await downloading;
+    await service.onModuleDestroy();
+    await outcome;
+    expect(await readdir(path.join(root,'.filestation-update-staging'))).toEqual([]);
+    const lease=await new UpdateOperationReservationService().acquire(root,'install');
+    await lease.release();
+    await expect(service.prepare(selection)).rejects.toThrow(/shutting down/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

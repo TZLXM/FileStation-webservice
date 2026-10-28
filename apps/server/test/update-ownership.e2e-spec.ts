@@ -64,7 +64,7 @@ describe('update coordinator OS ownership (real children)', () => {
       owner.child.send({ command: 'accept', pauseAppend: true });
       await owner.event('append-paused');
       contender.child.send({ command: 'accept' });
-      expect(await contender.event('refused')).toMatchObject({ code: 'UPDATE_IN_PROGRESS' });
+      expect(await contender.event('refused')).toMatchObject({ code: 'UPDATE_OPERATION_IN_PROGRESS' });
       owner.child.send({ command: 'resume-append' });
       const accepted = await owner.event('accepted');
       const prepared = await AttemptJournal.inspect(root);
@@ -77,7 +77,7 @@ describe('update coordinator OS ownership (real children)', () => {
         contender.child.send({ command: 'probe-guard' });
         await contender.event('guard-refused');
         contender.child.send({ command: 'accept' });
-        expect(await contender.event('refused')).toMatchObject({ code: 'UPDATE_IN_PROGRESS' });
+        expect(await contender.event('refused')).toMatchObject({ code: 'UPDATE_OPERATION_IN_PROGRESS' });
         owner.child.send({ command: 'resume-handoff' });
         await owner.event('handoff-ready');
       }

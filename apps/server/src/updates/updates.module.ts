@@ -22,6 +22,7 @@ import { UpdateCheckService } from './update-check.service';
 import { UpdatePrepareService } from './update-prepare.service';
 import { UpdateReauthService } from './update-reauth.service';
 import { UpdateSpacePreflightService } from './update-space-preflight.service';
+import { UpdateOperationReservationService } from './update-operation-reservation.service';
 import { UpdateAuditReconciler } from './update-audit-reconciler';
 import { DatabaseSnapshotService } from './database-snapshot.service';
 import {
@@ -59,6 +60,7 @@ function trustedKey(): KeyObject | null {
     UpdateCheckService,
     UpdateSpacePreflightService,
     UpdatePrepareService,
+    UpdateOperationReservationService,
     UpdateReauthService,
     UpdateAuditReconciler,
     ApplicationShutdownService,

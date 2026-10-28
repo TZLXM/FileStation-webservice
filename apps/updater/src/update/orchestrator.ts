@@ -312,13 +312,19 @@ export class ManagedUpdateHooks implements UpdateOrchestratorHooks {
 
   private async own(attempt:UpdateOrchestrationAttempt):Promise<AttemptJournal> {
     if(this.ownership) {await this.ownership.recovery.assertActive(); await this.ownership.lock.assertActive(); return this.ownership.journal;}
-    const snapshot=await AttemptJournal.inspect(attempt.installRoot);
+    const snapshot=await AttemptJournal.inspectRecoverable(attempt.installRoot);
     if(snapshot.attemptId!==attempt.attemptId || !snapshot.owner) throw new Error('recovery attempt changed');
     const boot=await this.identity.current();
     const actor={attemptId:attempt.attemptId,bootIdentity:boot.value,pid:process.pid,processCreatedAt:await this.identity.processCreatedAt(process.pid),heartbeatAt:new Date().toISOString(),currentVersion:snapshot.currentVersion!,targetVersion:snapshot.targetVersion!,previousVersion:snapshot.previousVersion,backupId:snapshot.backupId};
     const recovery=await UpdateLock.acquireRecovery(attempt.installRoot,actor,{identityProvider:this.identity,fs:this.fs,servicePort:attempt.servicePort,operatorAuthority:this.operatorAuthority});
     const journal=recovery.journal;
     try {
+      // Retain kernel exclusion and exact operator authority across repair and
+      // strict reread. repairJournalTail proves old/replacement writer exit.
+      await recovery.repairJournalTail();
+      const strict=await AttemptJournal.inspect(attempt.installRoot,{fs:this.fs});
+      if(strict.attemptId!==snapshot.attemptId || strict.fence!==snapshot.fence || strict.sequence!==snapshot.sequence)
+        throw new Error('recovery prefix changed before ownership');
       const lock=await recovery.recoverAttempt({owner:actor,expectedFence:snapshot.fence,handoffIdentity:this.handoffIdentity});
       this.ownership={journal,lock,recovery};
       return journal;
@@ -398,6 +404,7 @@ export class ManagedUpdateHooks implements UpdateOrchestratorHooks {
   }
 
   async inspect(_attempt: UpdateOrchestrationAttempt) {
+    if(_attempt.recovery) return (await this.own(_attempt)).readSnapshot();
     return AttemptJournal.inspect(_attempt.installRoot);
   }
 

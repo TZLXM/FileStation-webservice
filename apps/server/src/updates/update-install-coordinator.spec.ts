@@ -28,6 +28,10 @@ import {
 } from './update-install-coordinator';
 import { UpdateInstallCoordinator } from './update-install-coordinator';
 import {
+  UPDATE_OPERATION_GUARD,
+  UpdateOperationReservationService,
+} from './update-operation-reservation.service';
+import {
   UPDATE_JOURNAL_IDENTITY,
   UPDATE_INSTALL_EXECUTOR,
   UPDATE_NOW,
@@ -69,6 +73,10 @@ describe('UpdateInstallCoordinator', () => {
   let audit: { record: jest.Mock };
   let service: UpdateInstallCoordinator;
   let receipt: PreparedUpdateReceipt;
+  const memoryGuard = async () => ({
+    assertActive: jest.fn(async () => undefined),
+    release: jest.fn(async () => undefined),
+  });
 
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), 'filestation-install-'));
@@ -139,6 +147,8 @@ describe('UpdateInstallCoordinator', () => {
             isProcessAlive: async () => true,
           },
         },
+        { provide: UPDATE_OPERATION_GUARD, useValue: memoryGuard },
+        UpdateOperationReservationService,
       ],
     }).compile();
     service = module.get(UpdateInstallCoordinator);
@@ -288,6 +298,8 @@ describe('UpdateInstallCoordinator', () => {
             isProcessAlive: async () => true,
           },
         },
+        { provide: UPDATE_OPERATION_GUARD, useValue: memoryGuard },
+        UpdateOperationReservationService,
       ],
     }).compile();
     const refusing = module.get(UpdateInstallCoordinator);
@@ -336,6 +348,7 @@ describe('UpdateInstallCoordinator', () => {
       { current: async () => ({ provider: 'windows-cim', value: 'win32:fixture' }),
         processCreatedAt: async () => 'win32:process', isProcessAlive: async () => true },
       () => now, '0.2.0', () => 'competing-attempt',
+      new UpdateOperationReservationService(memoryGuard),
     );
     let resume!: () => void;
     let entered!: () => void;
@@ -356,7 +369,10 @@ describe('UpdateInstallCoordinator', () => {
     const results = [...await Promise.allSettled([first]), ...second];
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
-    expect(second[0]).toMatchObject({ status: 'rejected', reason: { response: { code: 'UPDATE_IN_PROGRESS' } } });
+    expect(second[0]).toMatchObject({
+      status: 'rejected',
+      reason: { response: { code: 'UPDATE_IN_PROGRESS' } },
+    });
     const snapshot = await AttemptJournal.inspect(root);
     expect(snapshot.phase).toBe('PREPARED');
     expect(snapshot.records).toHaveLength(1);

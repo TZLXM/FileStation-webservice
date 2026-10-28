@@ -34,7 +34,7 @@ export class OperatorRecoveryAuthority {
         throw new Error('operator boundary must be private and owned by this account');
       }
     }
-    const snapshot = await AttemptJournal.inspect(root);
+    const snapshot = await AttemptJournal.inspectRecoverable(root);
     if (snapshot.attemptId !== attemptId || snapshot.fence !== fence) throw new Error('operator authority attempt/fence changed');
     return new OperatorRecoveryAuthority(root, attemptId, fence, issuer);
   }

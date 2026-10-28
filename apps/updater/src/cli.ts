@@ -320,7 +320,7 @@ export async function main(
     return 0;
   }
   if (command === "recover") {
-    const snapshot=await AttemptJournal.inspect(installRoot);
+    const snapshot=await AttemptJournal.inspectRecoverable(installRoot);
     if(snapshot.initialized) {
       const attemptId=required(values,'attempt');
       const authority=await OperatorRecoveryAuthority.authorize(installRoot,attemptId,integer(values,'expected-fence',1,Number.MAX_SAFE_INTEGER));

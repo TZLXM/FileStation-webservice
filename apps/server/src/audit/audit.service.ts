@@ -66,6 +66,8 @@ export class AuditService {
     private readonly writeBarrier?: WriteBarrierService,
     @Optional()
     private readonly writeFreeze?: WriteFreezeService,
+    @Optional()
+    private readonly now: () => number = Date.now,
   ) {}
 
   /** Audit persistence must never change the outcome of a business operation. */
@@ -82,7 +84,7 @@ export class AuditService {
           details: entry.details ? JSON.stringify(entry.details) : null,
           ipAddress: entry.ip ? this.anonymizeIp(entry.ip) : null,
           userAgent: entry.userAgent ? entry.userAgent.slice(0, 256) : null,
-          createdAt: Date.now(),
+          createdAt: this.now(),
         });
       };
       if (this.writeBarrier) {
@@ -119,10 +121,11 @@ export class AuditService {
 
   @Cron('0 4 * * *')
   async purgeExpired(): Promise<number> {
+    const cutoff = this.now() - RETENTION_MS;
     const purge = async () => {
       this.writeFreeze?.assertWritable();
       const result = await this.auditRepository.delete({
-        createdAt: LessThan(Date.now() - RETENTION_MS),
+        createdAt: LessThan(cutoff),
       });
       return result.affected ?? 0;
     };

@@ -4,6 +4,7 @@ import {
   readFile,
   rm,
   writeFile,
+  symlink,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -87,6 +88,21 @@ async function committedFixture() {
 }
 
 describe("RetentionService", () => {
+  it.each(['backups', 'selected'])(`refuses native linked %s ancestry without touching outside assets`, async level => {
+    const root = await mkdtemp(path.join(tmpdir(), 'retention-link-'));
+    const outside = await mkdtemp(path.join(tmpdir(), 'retention-sentinel-'));
+    try {
+      const backup = level === 'backups' ? path.join(outside, 'exact') : outside;
+      await mkdir(path.join(backup, 'env'), {recursive:true});
+      await writeFile(path.join(backup, 'env', 'sentinel'), 'preserve');
+      await mkdir(path.join(root, 'backups'), {recursive:true});
+      const link = level === 'backups' ? path.join(root, 'backups') : path.join(root, 'backups', 'exact');
+      if(level === 'backups') await rm(link, {recursive:true});
+      await symlink(outside, link, process.platform === 'win32' ? 'junction' : 'dir');
+      await expect(new RetentionService(root).cleanupBootstrapRecoveryAssets('exact')).rejects.toThrow(/canonical|link|directory/);
+      expect(await readFile(path.join(backup, 'env', 'sentinel'), 'utf8')).toBe('preserve');
+    } finally {await rm(root,{recursive:true,force:true});await rm(outside,{recursive:true,force:true});}
+  });
   it('retains and exact-ID acknowledges journal-bound DB-volume diagnostics through backup references',async()=>{
     const v=await committedFixture();
     const directories:string[]=[];
@@ -231,6 +247,8 @@ describe("RetentionService", () => {
       await mkdir(legacy, { recursive: true });
       await writeFile(path.join(env, "legacy.env"), "JWT_SECRET=fixture");
       await writeFile(path.join(legacy, "package.json"), "{}");
+      await writeFile(path.join(bootstrap, 'MANIFEST.json'), JSON.stringify({schemaVersion:1,kind:'bootstrap-backup',backupId:'bootstrap-fixture',installRoot:value.root,installId:'retention-fixture'}));
+      await writeFile(path.join(value.root, 'managed-install.json'), JSON.stringify({installId:'retention-fixture',bootstrapBackupId:'bootstrap-fixture'}));
       const service = new RetentionService(value.root);
 
       await expect(

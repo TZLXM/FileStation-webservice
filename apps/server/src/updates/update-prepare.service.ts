@@ -26,6 +26,7 @@ import {
 import { UpdateCapabilityService } from './update-capability.service';
 import { UpdateCheckService } from './update-check.service';
 import { UpdateSpacePreflightService } from './update-space-preflight.service';
+import { UpdateOperationReservationService } from './update-operation-reservation.service';
 import {
   UPDATE_FETCH,
   UPDATE_NOW,
@@ -88,11 +89,15 @@ function downloadUrl(value: string, initial: URL): URL {
 @Injectable()
 export class UpdatePrepareService implements OnModuleDestroy {
   private readonly prepared = new Map<string, PreparedEntry>();
+  private readonly preparing = new Set<Promise<PreparedUpdateReceipt>>();
+  private readonly downloads = new Set<AbortController>();
+  private stopped = false;
 
   constructor(
     private readonly checks: UpdateCheckService,
     private readonly capability: UpdateCapabilityService,
     private readonly space: UpdateSpacePreflightService,
+    private readonly operations: UpdateOperationReservationService,
     private readonly config: ConfigService,
     @Inject(UPDATE_FETCH) private readonly fetchImpl: typeof fetch,
     @Inject(UPDATE_NOW) private readonly now: () => number,
@@ -100,6 +105,13 @@ export class UpdatePrepareService implements OnModuleDestroy {
   ) {}
 
   async prepare(selection: UpdateSelection): Promise<PreparedUpdateReceipt> {
+    if(this.stopped) throw new ConflictException('Update preparation is shutting down');
+    const pending=this.prepareOwned(selection);
+    this.preparing.add(pending);
+    try {return await pending;} finally {this.preparing.delete(pending);}
+  }
+
+  private async prepareOwned(selection: UpdateSelection): Promise<PreparedUpdateReceipt> {
     const capability = await this.capability.inspect();
     if (
       capability.mode !== 'managed' ||
@@ -140,99 +152,106 @@ export class UpdatePrepareService implements OnModuleDestroy {
         message: 'The managed install root is not canonical',
       });
     }
-    const stagingRoot = path.join(root, '.filestation-update-staging');
-    await mkdir(stagingRoot, { recursive: true, mode: 0o700 });
-    const stagingStat = await lstat(stagingRoot);
-    if (!stagingStat.isDirectory() || stagingStat.isSymbolicLink()) {
-      throw new ConflictException({
-        code: 'UPDATE_STAGING_UNSAFE',
-        message: 'The update staging root is unsafe',
-      });
-    }
-    if ((await realpath(stagingRoot)) !== stagingRoot) {
-      throw new ConflictException({
-        code: 'UPDATE_STAGING_UNSAFE',
-        message: 'The update staging root escapes the managed installation',
-      });
-    }
-
-    const stageDirectory = await mkdtemp(
-      path.join(stagingRoot, 'prepare-'),
-    );
-    let completed = false;
+    const operation = await this.operations.acquire(root, 'prepare');
     try {
-      await this.space.assertSufficient(root, stageDirectory, candidate);
-      const archivePath = path.join(
-        stageDirectory,
-        candidate.artifact.filename,
-      );
-      await this.downloadArtifact(candidate, archivePath);
-      const archiveInfo = await stat(archivePath);
-      if (archiveInfo.size !== candidate.artifact.archive_size) {
-        throw new BadGatewayException({
-          code: 'UPDATE_DOWNLOAD_SIZE_MISMATCH',
-          message: 'The downloaded update archive size is invalid',
+      if(this.stopped) throw new ConflictException('Update preparation is shutting down');
+      const stagingRoot = path.join(root, '.filestation-update-staging');
+      await mkdir(stagingRoot, { recursive: true, mode: 0o700 });
+      const stagingStat = await lstat(stagingRoot);
+      if (!stagingStat.isDirectory() || stagingStat.isSymbolicLink()) {
+        throw new ConflictException({
+          code: 'UPDATE_STAGING_UNSAFE',
+          message: 'The update staging root is unsafe',
+        });
+      }
+      if ((await realpath(stagingRoot)) !== stagingRoot) {
+        throw new ConflictException({
+          code: 'UPDATE_STAGING_UNSAFE',
+          message: 'The update staging root escapes the managed installation',
         });
       }
 
-      const handle = await openVerifiedArchive(
-        archivePath,
-        candidate.artifact.sha256,
+      const stageDirectory = await mkdtemp(
+        path.join(stagingRoot, 'prepare-'),
       );
-      const payloadPath = path.join(stageDirectory, 'payload');
+      let completed = false;
       try {
-        const plan = await inspectArchive(handle, {
-          format: candidate.artifact.format,
+        await this.space.assertSufficient(root, stageDirectory, candidate);
+        const archivePath = path.join(
+          stageDirectory,
+          candidate.artifact.filename,
+        );
+        await this.downloadArtifact(candidate, archivePath);
+        const archiveInfo = await stat(archivePath);
+        if (archiveInfo.size !== candidate.artifact.archive_size) {
+          throw new BadGatewayException({
+            code: 'UPDATE_DOWNLOAD_SIZE_MISMATCH',
+            message: 'The downloaded update archive size is invalid',
+          });
+        }
+
+        const handle = await openVerifiedArchive(
+          archivePath,
+          candidate.artifact.sha256,
+        );
+        const payloadPath = path.join(stageDirectory, 'payload');
+        try {
+          const plan = await inspectArchive(handle, {
+            format: candidate.artifact.format,
+            version: candidate.manifest.version,
+            platform: candidate.artifact.platform,
+            unpackedSize: candidate.artifact.unpacked_size,
+            maxArchiveBytes: candidate.artifact.archive_size,
+            maxTotalBytes: candidate.artifact.unpacked_size,
+          });
+          if (plan.unpackedSize !== candidate.artifact.unpacked_size) {
+            throw new Error('Unpacked size does not match the signed manifest');
+          }
+          await extractVerifiedArchive(handle, plan, payloadPath);
+        } finally {
+          await handle.close();
+        }
+
+        const verifiedPayload = await realpath(payloadPath);
+        if(this.stopped) throw new ConflictException('Update preparation is shutting down');
+        if (!within(stageDirectory, verifiedPayload)) {
+          throw new Error('Extracted payload escaped its staging tree');
+        }
+        const preparedId = this.randomId();
+        if (this.prepared.has(preparedId)) {
+          throw new Error('Prepared update identifier collision');
+        }
+        const expiresAt =
+          this.now() +
+          (this.config.get<number>('app.updatePreparedTtlMs') ??
+            DEFAULT_PREPARED_TTL_MS);
+        const receipt: PreparedUpdateReceipt = Object.freeze({
+          space_budget: Object.freeze({
+            database_migration: candidate.manifest.database_migration,
+            migration_workspace_multiplier: candidate.manifest.migration_workspace_multiplier,
+            migration_workspace_min_bytes: candidate.manifest.migration_workspace_min_bytes,
+          }),
+          prepared_id: preparedId,
+          manifest_sha256: candidate.manifest_sha256,
+          artifact_sha256: candidate.artifact.sha256,
           version: candidate.manifest.version,
           platform: candidate.artifact.platform,
-          unpackedSize: candidate.artifact.unpacked_size,
-          maxArchiveBytes: candidate.artifact.archive_size,
-          maxTotalBytes: candidate.artifact.unpacked_size,
+          arch: candidate.artifact.arch,
+          staging_path: verifiedPayload,
+          verified_size: archiveInfo.size,
+          unpacked_size: planSize(candidate),
+          expires_at: expiresAt,
         });
-        if (plan.unpackedSize !== candidate.artifact.unpacked_size) {
-          throw new Error('Unpacked size does not match the signed manifest');
-        }
-        await extractVerifiedArchive(handle, plan, payloadPath);
+        this.prepared.set(preparedId, { receipt, stageDirectory });
+        completed = true;
+        return receipt;
       } finally {
-        await handle.close();
+        if (!completed) {
+          await rm(stageDirectory, { recursive: true, force: true });
+        }
       }
-
-      const verifiedPayload = await realpath(payloadPath);
-      if (!within(stageDirectory, verifiedPayload)) {
-        throw new Error('Extracted payload escaped its staging tree');
-      }
-      const preparedId = this.randomId();
-      if (this.prepared.has(preparedId)) {
-        throw new Error('Prepared update identifier collision');
-      }
-      const expiresAt =
-        this.now() +
-        (this.config.get<number>('app.updatePreparedTtlMs') ??
-          DEFAULT_PREPARED_TTL_MS);
-      const receipt: PreparedUpdateReceipt = Object.freeze({
-        space_budget: Object.freeze({
-          database_migration: candidate.manifest.database_migration,
-          migration_workspace_multiplier: candidate.manifest.migration_workspace_multiplier,
-          migration_workspace_min_bytes: candidate.manifest.migration_workspace_min_bytes,
-        }),
-        prepared_id: preparedId,
-        manifest_sha256: candidate.manifest_sha256,
-        artifact_sha256: candidate.artifact.sha256,
-        version: candidate.manifest.version,
-        platform: candidate.artifact.platform,
-        arch: candidate.artifact.arch,
-        staging_path: verifiedPayload,
-        verified_size: archiveInfo.size,
-        unpacked_size: planSize(candidate),
-        expires_at: expiresAt,
-      });
-      this.prepared.set(preparedId, { receipt, stageDirectory });
-      completed = true;
-      return receipt;
     } finally {
-      if (!completed) {
-        await rm(stageDirectory, { recursive: true, force: true });
-      }
+      await operation.release();
     }
   }
 
@@ -260,6 +279,9 @@ export class UpdatePrepareService implements OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
+    this.stopped = true;
+    for(const download of this.downloads) download.abort();
+    await Promise.allSettled([...this.preparing]);
     const entries = [...this.prepared.values()];
     this.prepared.clear();
     await Promise.all(
@@ -275,6 +297,8 @@ export class UpdatePrepareService implements OnModuleDestroy {
   ): Promise<void> {
     const initial = validateReleaseAssetUrl(candidate.artifact.url);
     const controller = new AbortController();
+    this.downloads.add(controller);
+    if(this.stopped) controller.abort();
     const timeout = setTimeout(
       () => controller.abort(),
       this.config.get<number>('app.updateDownloadTimeoutMs') ??
@@ -357,6 +381,7 @@ export class UpdatePrepareService implements OnModuleDestroy {
       throw error;
     } finally {
       clearTimeout(timeout);
+      this.downloads.delete(controller);
     }
   }
 }

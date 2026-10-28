@@ -15,6 +15,7 @@ const { registerMaintenanceRequestLease } = require(path.join(server, 'maintenan
 const { DatabaseSnapshotService } = require(path.join(server, 'updates/database-snapshot.service.js'));
 const { UpdateSpacePreflightService } = require(path.join(server, 'updates/update-space-preflight.service.js'));
 const { UpdatePrepareService } = require(path.join(server, 'updates/update-prepare.service.js'));
+const { UpdateOperationReservationService } = require(path.join(server, 'updates/update-operation-reservation.service.js'));
 const { UpdateInstallCoordinator, HandoffUpdateInstallExecutor } = require(path.join(server, 'updates/update-install-coordinator.js'));
 const { ApplicationShutdownService } = require(path.join(server, 'updates/application-shutdown.service.js'));
 const root = process.argv[2], database = process.argv[3];
@@ -55,7 +56,8 @@ async function main() {
     evidence.preflights.push({ walBytes, active: barrier.activeLeaseCount, accepting: barrier.accepting, lowCapacity });
     return assertSpace(...args);
   };
-  const prepare = new UpdatePrepareService({ resolveCandidate: async () => candidate }, capability, space, config,
+  const operations = new UpdateOperationReservationService();
+  const prepare = new UpdatePrepareService({ resolveCandidate: async () => candidate }, capability, space, operations, config,
     async () => new Response(await fs.readFile(path.join(root, 'fixture-archive')), { status: 200 }), Date.now, () => 'prepared-task11');
   const snapshot = new DatabaseSnapshotService(source, config, barrier, freeze);
   const create = snapshot.createVerifiedSnapshot.bind(snapshot);
@@ -102,7 +104,7 @@ async function main() {
       emit('maintenance', { attempt: context.attempt, active: barrier.activeLeaseCount, accepting: barrier.accepting });
       return realExecutor.execute(context);
     },
-  }, new PlatformBootIdentityProvider(), Date.now, '0.2.5', () => serial++ === 0 ? 'attempt-task11-real-wal' : 'backup-01');
+  }, new PlatformBootIdentityProvider(), Date.now, '0.2.5', () => serial++ === 0 ? 'attempt-task11-real-wal' : 'backup-01', operations);
   process.on('message', async command => {
     try {
       if (command === 'install') {

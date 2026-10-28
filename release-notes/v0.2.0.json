@@ -50,7 +50,7 @@
       "known_issues": [
         {
           "id": "known:manual-acceptance",
-          "text": "发布前仍需使用同一候选制品完成 375px、TOTP/恢复码和刷新后续传的人工验收。"
+          "text": "发布门要求使用同一候选制品提供 375px、TOTP/恢复码和刷新后续传的人工验收证据。"
         },
         {
           "id": "known:audit-advisories",
@@ -98,7 +98,7 @@
       "known_issues": [
         {
           "id": "known:manual-acceptance",
-          "text": "The same candidate artifact still requires manual acceptance at 375px, for TOTP/recovery, and for resume after refresh before publication."
+          "text": "The release gate requires manual acceptance evidence from the same candidate artifact at 375px, for TOTP/recovery, and for resume after refresh."
         },
         {
           "id": "known:audit-advisories",

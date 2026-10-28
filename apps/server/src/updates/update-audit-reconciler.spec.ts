@@ -13,6 +13,7 @@ import { WriteFreezeService } from '../maintenance/write-freeze.service';
 import { registerMaintenanceRequestLease } from '../maintenance/maintenance-admission.guard';
 import { DatabaseSnapshotService } from './database-snapshot.service';
 import { HandoffUpdateInstallExecutor, UpdateInstallCoordinator } from './update-install-coordinator';
+import { UpdateOperationReservationService } from './update-operation-reservation.service';
 import { AuditService } from '../audit/audit.service';
 import { UpdateCapabilityService } from './update-capability.service';
 import { ApplicationShutdownService } from './application-shutdown.service';
@@ -103,7 +104,7 @@ describe('UpdateAuditReconciler', () => {
     const snapshot=new DatabaseSnapshotService(db,config,barrier,freeze,durable);
     const capture=jest.spyOn(snapshot,'createVerifiedSnapshot');
     const executor=new HandoffUpdateInstallExecutor(config,capability,snapshot,barrier,{close:jest.fn()} as unknown as ApplicationShutdownService,{startWaiting:jest.fn()}, new UpdateSpacePreflightService(db, config, {resolveVolumeId:async()=> 'fixture-volume',readAvailableBytes:async()=>1024**4}));
-    const coordinator=new UpdateInstallCoordinator(config,barrier,capability,{record:jest.fn()} as unknown as AuditService,executor,{current:async()=>({provider:'windows-cim',value:'fixture'}),processCreatedAt:async()=> 'fixture-created',isProcessAlive:async()=>true},Date.now,'0.2.5',randomUUID);
+    const coordinator=new UpdateInstallCoordinator(config,barrier,capability,{record:jest.fn()} as unknown as AuditService,executor,{current:async()=>({provider:'windows-cim',value:'fixture'}),processCreatedAt:async()=> 'fixture-created',isProcessAlive:async()=>true},Date.now,'0.2.5',randomUUID,new UpdateOperationReservationService());
     const replay = reconciler.reconcile(root);
     try {
       await paused;

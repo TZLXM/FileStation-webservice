@@ -47,6 +47,25 @@ const fixtureRoot = await mkdtemp(path.join(tmpdir(), "filestation-release-tools
 const sourceCommit = "0123456789abcdef0123456789abcdef01234567";
 const tagCommit = "abcdef0123456789abcdef0123456789abcdef01";
 
+test('bilingual changelog preserves reviewed dual-bundle paths and timeless acceptance gate', async () => {
+  const changelog = await readFile(new URL('../../CHANGELOG.md', import.meta.url), 'utf8');
+  const notes = JSON.parse(await readFile(new URL('../../release-notes/v0.2.5.json', import.meta.url), 'utf8'));
+  for (const language of ['zh-CN', 'en']) {
+    const upgrades = notes.release_summaries[language].upgrades.map(item => item.text).join('\n');
+    for (const bundle of ['dist-root', 'dist-fs']) {
+      assert.ok(upgrades.includes(bundle));
+      assert.equal(changelog.split(`current/apps/web/${bundle}`).length - 1, 2);
+    }
+  }
+  assert.ok(!changelog.includes('current/apps/web/dist`'));
+  const oldNotes = await readFile(new URL('../../release-notes/v0.2.0.json', import.meta.url), 'utf8');
+  for (const text of [changelog, oldNotes]) {
+    assert.ok(!text.includes('still requires manual acceptance'));
+    assert.ok(!text.includes('发布前仍需使用'));
+    assert.ok(text.includes('375px'));
+  }
+});
+
 after(async () => {
   await rm(fixtureRoot, { recursive: true, force: true });
 });

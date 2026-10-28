@@ -19,6 +19,7 @@ import { StorageService } from '../src/files/storage.service';
 import { WriteBarrierService } from '../src/maintenance/write-barrier.service';
 import { UpdateCapabilityService } from '../src/updates/update-capability.service';
 import {
+  UpdateInstallCoordinator,
   UpdateInstallContext,
 } from '../src/updates/update-install-coordinator';
 import { UpdatePrepareService } from '../src/updates/update-prepare.service';
@@ -140,6 +141,8 @@ describe('update install response handoff (e2e)', () => {
   afterAll(async () => {
     await app.close();
     await execute.mock.calls[0]?.[0].ownership.recoveryGuard.release();
+    // The synthetic executor retains ownership without exiting this process.
+    await (app.get(UpdateInstallCoordinator) as any).operationReservation?.release();
     delete process.env.FILESTATION_DB_PATH;
     delete process.env.FILESTATION_STORAGE_PATH;
     delete process.env.FILESTATION_TEMP_PATH;
