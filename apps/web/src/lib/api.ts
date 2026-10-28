@@ -1,5 +1,9 @@
 import { ApiResponse } from '@filestation/shared';
 import { apiPath } from './base-url';
+import {
+  isMaintenanceFailure,
+  maintenanceStore,
+} from './maintenance';
 
 export type UploadApiStatus = 'initiated' | 'uploading' | 'verifying' | 'completed' | 'aborted' | 'expired' | 'failed';
 
@@ -8,15 +12,38 @@ const UPLOAD_API_STATUSES = new Set<UploadApiStatus>([
 ]);
 
 export class ApiError extends Error {
+  readonly retryAfterSeconds?: number;
+  readonly targetVersion?: string;
+  readonly attemptId?: string;
+
   constructor(
     readonly status: number,
     message: string,
     readonly code?: string,
     readonly currentStatus?: UploadApiStatus,
+    metadata: {
+      retryAfterSeconds?: number;
+      targetVersion?: string;
+      attemptId?: string;
+    } = {},
   ) {
     super(message);
     this.name = 'ApiError';
+    this.retryAfterSeconds = metadata.retryAfterSeconds;
+    this.targetVersion = metadata.targetVersion;
+    this.attemptId = metadata.attemptId;
   }
+}
+
+function retryAfterSeconds(response: Response): number | undefined {
+  const value = response.headers?.get('Retry-After');
+  if (!value || !/^\d+$/.test(value)) return undefined;
+  const seconds = Number(value);
+  return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : undefined;
+}
+
+function maintenanceStatusRequest(path: string): boolean {
+  return path.split(/[?#]/, 1)[0] === '/updates/status';
 }
 
 class ApiClient {
@@ -37,6 +64,17 @@ class ApiClient {
     headers: Record<string, string> = {},
     signal?: AbortSignal,
   ): Promise<ApiResponse<T>> {
+    const maintenance = maintenanceStore.getState();
+    if (maintenance.active && !maintenanceStatusRequest(path)) {
+      throw new ApiError(
+        503,
+        'FileStation is temporarily unavailable while an update is prepared',
+        'UPDATE_MAINTENANCE',
+        undefined,
+        { retryAfterSeconds: maintenance.retryAfterSeconds },
+      );
+    }
+
     const url = apiPath(path);
     const requestHeaders: Record<string, string> = { ...headers };
 
@@ -70,7 +108,15 @@ class ApiClient {
       const current = typeof body.current === 'string' && UPLOAD_API_STATUSES.has(body.current as UploadApiStatus)
         ? body.current as UploadApiStatus
         : undefined;
-      throw new ApiError(response.status, message, code, current);
+      const error = new ApiError(response.status, message, code, current, {
+        retryAfterSeconds: retryAfterSeconds(response),
+        targetVersion:
+          typeof body.target_version === 'string' ? body.target_version : undefined,
+        attemptId:
+          typeof body.attempt_id === 'string' ? body.attempt_id : undefined,
+      });
+      if (isMaintenanceFailure(error)) maintenanceStore.getState().activate(error);
+      throw error;
     }
     return response.json();
   }
@@ -97,6 +143,16 @@ class ApiClient {
 
   /** v1.6 新增：管理员直接下载（GET /files/:id/content，fetch blob + a[download]） */
   async downloadFile(fileId: string, filename: string): Promise<void> {
+    const maintenance = maintenanceStore.getState();
+    if (maintenance.active) {
+      throw new ApiError(
+        503,
+        'FileStation is temporarily unavailable while an update is prepared',
+        'UPDATE_MAINTENANCE',
+        undefined,
+        { retryAfterSeconds: maintenance.retryAfterSeconds },
+      );
+    }
     const headers: Record<string, string> = {};
     if (this.accessToken) {
       headers['Authorization'] = `Bearer ${this.accessToken}`;
@@ -106,8 +162,21 @@ class ApiClient {
       credentials: 'include',
     });
     if (!response.ok) {
-      const error = await response.json().catch(() => ({ message: 'Download failed' }));
-      throw new Error(error.message || 'Download failed');
+      const payload = await response.json().catch(() => null);
+      const body = typeof payload === 'object' && payload !== null
+        ? payload as Record<string, unknown>
+        : {};
+      const error = new ApiError(
+        response.status,
+        typeof body.message === 'string' && body.message
+          ? body.message
+          : 'Download failed',
+        typeof body.code === 'string' ? body.code : undefined,
+        undefined,
+        { retryAfterSeconds: retryAfterSeconds(response) },
+      );
+      if (isMaintenanceFailure(error)) maintenanceStore.getState().activate(error);
+      throw error;
     }
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);

@@ -168,7 +168,9 @@ describe('SettingsPage Phase 2 sections', () => {
     expect(screen.queryByText('synthetic-secret-placeholder')).not.toBeInTheDocument();
     expect(mockedApi.post).toHaveBeenNthCalledWith(1, '/auth/totp/setup', {});
     expect(mockedApi.post).toHaveBeenNthCalledWith(2, '/auth/totp/confirm', { code: '123456' });
-    expect(mockedApi.get).toHaveBeenCalledTimes(3);
+    expect(mockedApi.get.mock.calls.filter(([path]) => path === '/settings')).toHaveLength(2);
+    expect(mockedApi.get.mock.calls.filter(([path]) => path === '/api-tokens')).toHaveLength(1);
+    expect(mockedApi.get.mock.calls.filter(([path]) => path === '/updates/status')).toHaveLength(1);
     expect(required).toBeChecked();
 
     mockedApi.put.mockResolvedValue({ data: null } as never);
@@ -462,7 +464,9 @@ describe('SettingsPage Phase 2 sections', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('验证码错误');
     expect(screen.getByText('temporary-secret-placeholder')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '确认启用' })).toBeInTheDocument();
-    expect(mockedApi.get).toHaveBeenCalledTimes(2);
+    expect(mockedApi.get.mock.calls.filter(([path]) => path === '/settings')).toHaveLength(1);
+    expect(mockedApi.get.mock.calls.filter(([path]) => path === '/api-tokens')).toHaveLength(1);
+    expect(mockedApi.get.mock.calls.filter(([path]) => path === '/updates/status')).toHaveLength(1);
   });
 
   it('ignores a stale setup response without unlocking a newer setup request', async () => {
@@ -544,7 +548,11 @@ describe('SettingsPage Phase 2 sections', () => {
       password: 'password-placeholder', code: '654321',
     });
     await act(async () => resolveDisable({ data: null }));
-    await waitFor(() => expect(mockedApi.get).toHaveBeenCalledTimes(3));
+    await waitFor(() => {
+      expect(mockedApi.get.mock.calls.filter(([path]) => path === '/settings')).toHaveLength(2);
+      expect(mockedApi.get.mock.calls.filter(([path]) => path === '/api-tokens')).toHaveLength(1);
+      expect(mockedApi.get.mock.calls.filter(([path]) => path === '/updates/status')).toHaveLength(1);
+    });
     expect(await screen.findByRole('button', { name: '启用 TOTP' })).toBeInTheDocument();
   });
 

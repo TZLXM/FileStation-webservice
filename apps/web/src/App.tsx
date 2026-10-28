@@ -8,6 +8,7 @@ import SharePage from './pages/SharePage';
 import SettingsPage from './pages/SettingsPage';
 import AuditPage from './pages/AuditPage';
 import PageErrorBoundary from './components/PageErrorBoundary';
+import MaintenanceOverlay from './components/MaintenanceOverlay';
 import { RecoveryGenerationProvider } from './contexts/RecoveryGenerationContext';
 import { routerBasename } from './lib/base-url';
 
@@ -34,37 +35,40 @@ function App() {
   return (
     <RecoveryGenerationProvider>
       <BrowserRouter basename={routerBasename()}>
-        <Routes>
-          <Route path="/init" element={<InitPage />} />
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="/s/:id" element={<SharePage />} />
-          <Route
-            path="/"
-            element={
-              <ProtectedRoute>
-                <FilesPage />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/settings"
-            element={
-              <ProtectedRoute>
-                <SettingsPage />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/audit"
-            element={
-              <ProtectedRoute>
-                <PageErrorBoundary>
-                  <AuditPage />
-                </PageErrorBoundary>
-              </ProtectedRoute>
-            }
-          />
-        </Routes>
+        <>
+          <Routes>
+            <Route path="/init" element={<InitPage />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/s/:id" element={<SharePage />} />
+            <Route
+              path="/"
+              element={
+                <ProtectedRoute>
+                  <FilesPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/settings"
+              element={
+                <ProtectedRoute>
+                  <SettingsPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/audit"
+              element={
+                <ProtectedRoute>
+                  <PageErrorBoundary>
+                    <AuditPage />
+                  </PageErrorBoundary>
+                </ProtectedRoute>
+              }
+            />
+          </Routes>
+          <MaintenanceOverlay />
+        </>
       </BrowserRouter>
     </RecoveryGenerationProvider>
   );
