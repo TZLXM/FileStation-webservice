@@ -86,6 +86,47 @@ async function committedFixture() {
 }
 
 describe("RetentionService", () => {
+  it('preserves a release referenced only by a previous attempt in the durable journal',async()=>{
+    const v=await committedFixture();
+    try {
+      const ref=await v.journal.appendIntent({attemptId:'attempt-retention-01',fence:7,action:'snapshot-reference',phase:'COMMITTED',payload:{releasePath:v.unusedRelease}});
+      await v.journal.appendCompletion({attemptId:'attempt-retention-01',fence:7,intentId:ref.id,phase:'COMMITTED'});
+      const {context}=await import('../test-support');
+      await v.journal.beginAttempt(context({attemptId:'attempt-retention-02',fence:8,phase:'COMMITTED',currentVersion:'0.2.5',targetVersion:'0.2.5'}));
+      const proof=await v.journal.appendIntent({attemptId:'attempt-retention-02',fence:8,action:'verify-committed-restart',phase:'COMMITTED'});
+      await v.journal.appendCompletion({attemptId:'attempt-retention-02',fence:8,intentId:proof.id,phase:'COMMITTED',result:{version:'0.2.5',health:'ok',pid:1234,createdAt:'fixture-created',boot:'fixture-boot',nonce:'fixture-nonce-0123456789',release:v.currentRelease}});
+      expect((await new RetentionService(v.root).cleanup(await v.journal.readSnapshot())).deleted).not.toContain(v.unusedRelease);
+    }finally{await rm(v.root,{recursive:true,force:true});}
+  });
+  it('rejects a legacy generic-200 record without independent process proof',async()=>{
+    const v=await committedFixture();
+    try {
+      const intent=await v.journal.appendIntent({attemptId:'attempt-retention-01',fence:7,action:'verify-committed-restart',phase:'COMMITTED'});
+      await v.journal.appendCompletion({attemptId:'attempt-retention-01',fence:7,intentId:intent.id,phase:'COMMITTED',result:{version:'0.2.5',health:'ok'}});
+      expect((await new RetentionService(v.root).cleanup(await v.journal.readSnapshot())).eligible).toBe(false);
+    }finally{await rm(v.root,{recursive:true,force:true});}
+  });
+  it('retains releases referenced only by backup metadata and bounds other diagnostics',async()=>{
+    const v=await committedFixture();
+    try {
+      const verify=await v.journal.appendIntent({attemptId:'attempt-retention-01',fence:7,action:'verify-committed-restart',phase:'COMMITTED'});
+      await v.journal.appendCompletion({attemptId:'attempt-retention-01',fence:7,intentId:verify.id,phase:'COMMITTED',result:{version:'0.2.5',health:'ok',pid:1234,createdAt:'fixture-created',boot:'fixture-boot',nonce:'fixture-nonce-0123456789',release:v.currentRelease}});
+      await writeFile(path.join(v.root,'backups','bootstrap-fixture','manifest.json'),JSON.stringify({releasePath:v.unusedRelease}));
+      for(let i=0;i<5;i++) {
+        const dir=path.join(v.root,'backups','bootstrap-fixture','diagnostics','failed-'+i);
+        await mkdir(dir,{recursive:true}); await writeFile(path.join(dir,'manifest.json'),JSON.stringify({attemptId:'failed-'+i,createdAt:new Date(2026,0,i+1).toISOString()}));
+      }
+      const result=await new RetentionService(v.root).cleanup(await v.journal.readSnapshot());
+      expect(result.deleted).not.toContain(v.unusedRelease);
+      const {readdir}=await import('node:fs/promises');
+      expect(await readdir(path.join(v.root,'backups','bootstrap-fixture','diagnostics'))).toEqual(['failed-2','failed-3','failed-4']);
+      await expect(new RetentionService(v.root).acknowledgeDiagnostic('../failed-4')).rejects.toThrow(/exact/);
+      await new RetentionService(v.root).acknowledgeDiagnostic('failed-4');
+      await new RetentionService(v.root).cleanup(await v.journal.readSnapshot());
+      expect(await readdir(path.join(v.root,'backups','bootstrap-fixture','diagnostics'))).toEqual(['failed-2','failed-3']);
+      expect(await readFile(path.join(v.root,'backups','bootstrap-fixture','update-snapshot.sqlite'),'utf8')).toBe('snapshot');
+    } finally {await rm(v.root,{recursive:true,force:true});}
+  });
   it("does not delete assets before durable post-commit restart verification", async () => {
     const value = await committedFixture();
     try {
@@ -118,7 +159,7 @@ describe("RetentionService", () => {
         fence: 7,
         intentId: verify.id,
         phase: "COMMITTED",
-        result: { version: "0.2.5", health: "ok" },
+        result: { version: "0.2.5", health: "ok", pid:1234,createdAt:'fixture-created',boot:'fixture-boot',nonce:'fixture-nonce-0123456789',release:value.currentRelease },
       });
       const service = new RetentionService(value.root);
       const result = await service.cleanup(

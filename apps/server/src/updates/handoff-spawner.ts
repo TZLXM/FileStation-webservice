@@ -67,6 +67,7 @@ export class AnonymousPipeHandoffSpawner implements HandoffSpawner {
     AnonymousPipeHandoffSpawnerOptions["spawn"]
   >;
   private readonly environment: NodeJS.ProcessEnv;
+  private readonly runtime: Record<string, string> = {};
 
   constructor(options: AnonymousPipeHandoffSpawnerOptions = {}) {
     this.spawnProcess =
@@ -76,6 +77,10 @@ export class AnonymousPipeHandoffSpawner implements HandoffSpawner {
     this.environment = minimalEnvironment(
       options.environment ?? process.env,
     );
+    const source = options.environment ?? process.env;
+    for (const key of ['NODE_ENV', 'JWT_SECRET', 'FILESTATION_PORT', 'FILESTATION_HOST', 'FILESTATION_DB_PATH', 'FILESTATION_STORAGE_PATH', 'FILESTATION_TEMP_PATH', 'FILESTATION_SERVE_STATIC', 'FILESTATION_WEB_URL', 'FILESTATION_WEB_DIST', 'FILESTATION_CORS_ORIGINS', 'FILESTATION_CONTAINER', 'FILESTATION_DEPLOYMENT_MODE']) {
+      if (source[key] !== undefined) this.runtime[key] = source[key]!;
+    }
   }
 
   async startWaiting(
@@ -90,6 +95,10 @@ export class AnonymousPipeHandoffSpawner implements HandoffSpawner {
     ) {
       throw new Error("inherited update capability is absent or unbounded");
     }
+    const envelope = JSON.parse(inheritedCapability.toString('utf8'));
+    const transport = Object.keys(this.runtime).length
+      ? Buffer.from(JSON.stringify({...envelope, runtime:this.runtime})) : Buffer.from(inheritedCapability);
+    if (transport.length > 4096) throw new Error('inherited runtime configuration is unbounded');
     const root = path.resolve(attempt.installRoot);
     const updaterCli = path.join(root, "updater/dist/cli.js");
     const child = this.spawnProcess(
@@ -117,7 +126,7 @@ export class AnonymousPipeHandoffSpawner implements HandoffSpawner {
       await new Promise<void>((resolve, reject) => {
         const onError = (error: Error) => reject(error);
         child.stdin!.once("error", onError);
-        child.stdin!.end(inheritedCapability, () => {
+        child.stdin!.end(transport, () => {
           child.stdin!.removeListener("error", onError);
           resolve();
         });
@@ -126,6 +135,8 @@ export class AnonymousPipeHandoffSpawner implements HandoffSpawner {
     } catch (error) {
       child.kill();
       throw error;
+    } finally {
+      transport.fill(0);
     }
   }
 }

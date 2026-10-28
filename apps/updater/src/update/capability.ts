@@ -257,6 +257,10 @@ export function decodeInheritedCapability(bytes: Buffer): UpdateCapabilityAuthor
 export async function readInheritedCapability(
   source: AsyncIterable<Uint8Array>,
 ): Promise<UpdateCapabilityAuthority> {
+  return (await readInheritedEnvelope(source)).authority;
+}
+
+export async function readInheritedEnvelope(source: AsyncIterable<Uint8Array>): Promise<{authority: UpdateCapabilityAuthority; runtime: NodeJS.ProcessEnv; launch?: Record<string, JsonValue>}> {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of source) {
@@ -267,7 +271,21 @@ export async function readInheritedCapability(
     }
     chunks.push(bytes);
   }
-  return decodeInheritedCapability(Buffer.concat(chunks, total));
+  const bytes = Buffer.concat(chunks, total);
+  try {
+    const authority = decodeInheritedCapability(bytes);
+    const parsed = JSON.parse(bytes.toString('utf8'));
+    const runtime: NodeJS.ProcessEnv = {};
+    const allowed = new Set(['NODE_ENV', 'JWT_SECRET', 'FILESTATION_PORT', 'FILESTATION_HOST', 'FILESTATION_DB_PATH', 'FILESTATION_STORAGE_PATH', 'FILESTATION_TEMP_PATH', 'FILESTATION_SERVE_STATIC', 'FILESTATION_WEB_URL', 'FILESTATION_WEB_DIST', 'FILESTATION_CORS_ORIGINS', 'FILESTATION_CONTAINER', 'FILESTATION_DEPLOYMENT_MODE']);
+    if (parsed.runtime !== undefined) {
+      if (!parsed.runtime || typeof parsed.runtime !== 'object' || Array.isArray(parsed.runtime)) throw new Error('invalid inherited runtime');
+      for (const [key,value] of Object.entries(parsed.runtime)) {
+        if (!allowed.has(key) || typeof value !== 'string' || value.includes('\0')) throw new Error('invalid inherited runtime key');
+        runtime[key] = value;
+      }
+    }
+    return {authority,runtime,...(parsed.launch ? {launch:parsed.launch} : {})};
+  } finally { bytes.fill(0); for(const chunk of chunks) chunk.fill(0); }
 }
 
 export async function writeInheritedCapability(

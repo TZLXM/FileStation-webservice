@@ -216,7 +216,21 @@ async function bootstrapNormal() {
     logger.log('（输入上面的初始化 Token + 设置管理员用户名/密码）');
     logger.log('================================');
   }
-  return { app, prepared, configService, initToken };
+  const { DataSource } = await import('typeorm');
+  const db = app.get(DataSource);
+  const integrity = await db.query('PRAGMA integrity_check');
+  const foreignKeys = await db.query('PRAGMA foreign_key_check');
+  const runtimeVersion = (await import('../package.json')).version;
+  return { app, prepared, configService, initToken, reconcileUpdateAudit: async () => {
+    if(prepared.mode==='managed') {
+      const {UpdateAuditReconciler}=await import('./updates/update-audit-reconciler');
+      await app.get(UpdateAuditReconciler).reconcile(prepared.root);
+    }
+  }, restartHealth: {
+    version: runtimeVersion,
+    release: prepared.releaseRealpath,
+    health: integrity.length===1 && integrity[0].integrity_check==='ok' && foreignKeys.length===0 && app.getHttpServer().listening ? 'ok' : 'failed',
+  } };
 }
 
 async function bootstrapUpdate(

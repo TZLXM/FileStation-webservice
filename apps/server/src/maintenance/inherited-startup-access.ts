@@ -1,4 +1,4 @@
-import { AttemptJournal, UpdateCapabilityAuthority } from '@filestation/updater';
+import { AttemptJournal, UpdateCapabilityAuthority, readInheritedEnvelope } from '@filestation/updater';
 import {
   TrustedStartupAccess,
   UpdateProtocolCredentials,
@@ -33,19 +33,10 @@ export class InheritedTrustedStartupAccess
     source: AsyncIterable<Uint8Array>,
     now: () => number = () => Date.now(),
   ): Promise<InheritedTrustedStartupAccess> {
-    const chunks: Buffer[] = [];
-    let total = 0;
-    for await (const chunk of source) {
-      const bytes = Buffer.from(chunk);
-      total += bytes.length;
-      if (total > 4096) {
-        throw new Error('inherited update capability size is not bounded');
-      }
-      chunks.push(bytes);
-    }
-    const { decodeInheritedCapability } = await import('@filestation/updater');
+    const {authority,runtime}=await readInheritedEnvelope(source);
+    Object.assign(process.env,runtime);
     return new InheritedTrustedStartupAccess(
-      decodeInheritedCapability(Buffer.concat(chunks, total)),
+      authority,
       now,
     );
   }

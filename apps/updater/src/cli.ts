@@ -21,10 +21,13 @@ import {
 } from "./state/boot-identity";
 import {
   encodeInheritedCapability,
-  readInheritedCapability,
+  readInheritedEnvelope,
 } from "./update/capability";
 import { createManagedUpdateOrchestrator } from "./update/orchestrator";
 import { RetentionService } from "./update/retention";
+import { acceptTerminalLaunch } from './update/terminal-launch';
+import { OperatorRecoveryAuthority } from './update/operator-authority';
+import { AttemptJournal } from './state/attempt-journal';
 
 const execFileAsync = promisify(execFile);
 const MINIMUM_NODE = [20, 17, 0] as const;
@@ -40,9 +43,11 @@ Usage:
 
   filestation-updater launch --root <managed-root> [--dry-run]
   filestation-updater status --root <managed-root>
-  filestation-updater recover --root <managed-root>
+  filestation-updater recover --root <managed-root> --attempt <id> --expected-fence <fence>
   filestation-updater continue --attempt <id> --root <managed-root>
   filestation-updater cleanup --bootstrap-backup <exact-id> --root <managed-root>
+  filestation-updater cleanup --acknowledge-diagnostic <exact-id> --root <managed-root>
+    --attempt <id> --expected-fence <fence>
 
 Manual operation:
   1. Stop and drain the old FileStation process. Bootstrap never stops a process.
@@ -59,8 +64,8 @@ Run it with the original deployment environment; do not infer a missing mode.
 Production requires NODE_ENV and JWT_SECRET. If they are process-only, securely
 configure the same values in restricted .env or the new service environment, then
 acknowledge --production-env-resolution service. Shell secrets are never persisted.
-The CLI never prints .env values. Active update recovery is fail closed until the
-authenticated update orchestrator is available.
+The CLI never prints .env values. Active recovery requires the protected OS
+installation boundary, exact attempt/fence and proof that prior writers exited.
 `;
 
 function assertNodeVersion(): void {
@@ -192,6 +197,9 @@ export async function main(
       "dry-run": { type: "boolean" },
       attempt: { type: "string" },
       "bootstrap-backup": { type: "string" },
+      "expected-fence": {type:'string'},
+      "inherited-launch": {type:'boolean'},
+      "acknowledge-diagnostic": {type:'string'},
     },
   });
   const values = parsed.values as Record<
@@ -257,12 +265,13 @@ export async function main(
   );
   if (command === "continue") {
     const attemptId = required(values, "attempt");
-    const authority = await readInheritedCapability(process.stdin);
+    const inherited = await readInheritedEnvelope(process.stdin);
+    const authority = inherited.authority;
     const encoded = encodeInheritedCapability(authority);
     const handoffIdentity = encoded.toString("utf8");
     encoded.fill(0);
     const configuredPort =
-      (await loadInstallEnvironment(installRoot)).values.FILESTATION_PORT;
+      (await loadInstallEnvironment(installRoot, {processEnvironment:{...process.env,...inherited.runtime}})).values.FILESTATION_PORT;
     const servicePort =
       configuredPort && /^\d+$/.test(configuredPort)
         ? Number(configuredPort)
@@ -273,6 +282,7 @@ export async function main(
     const orchestrator = createManagedUpdateOrchestrator({
       handoffIdentity,
       identity: dependencies.identityProvider,
+      runtime: inherited.runtime,
     });
     const result = await orchestrator.run({
       attemptId,
@@ -284,6 +294,16 @@ export async function main(
     return 0;
   }
   if (command === "cleanup") {
+    if(typeof values['acknowledge-diagnostic']==='string') {
+      const snapshot=await AttemptJournal.inspect(installRoot);
+      const authority=await OperatorRecoveryAuthority.authorize(installRoot,required(values,'attempt'),integer(values,'expected-fence',1,Number.MAX_SAFE_INTEGER));
+      if(snapshot.pending || snapshot.attemptId!==values.attempt) throw new Error('diagnostic acknowledgment requires a quiescent matching attempt');
+      const {acquireRecoveryGuard}=await import('./platform/recovery-guard');
+      const guard=await acquireRecoveryGuard(path.join(installRoot,'update.recovery.guard'));
+      try {const current=await AttemptJournal.inspect(installRoot);authority.assert(installRoot,current.attemptId!,current.fence);if(current.pending)throw new Error('attempt is active');await new RetentionService(installRoot).acknowledgeDiagnostic(values['acknowledge-diagnostic']);}
+      finally {await guard.release();}
+      return 0;
+    }
     const backupId = required(values, "bootstrap-backup");
     const removed =
       await new RetentionService(installRoot).cleanupBootstrapRecoveryAssets(
@@ -300,11 +320,31 @@ export async function main(
     return 0;
   }
   if (command === "recover") {
+    const snapshot=await AttemptJournal.inspect(installRoot);
+    if(snapshot.initialized) {
+      const attemptId=required(values,'attempt');
+      const authority=await OperatorRecoveryAuthority.authorize(installRoot,attemptId,integer(values,'expected-fence',1,Number.MAX_SAFE_INTEGER));
+      const environment=await loadInstallEnvironment(installRoot);
+      const port=Number(environment.values.FILESTATION_PORT ?? 8080);
+      if(!Number.isSafeInteger(port)||port<1||port>65535) throw new Error('invalid recovery service port');
+      const orchestrator=createManagedUpdateOrchestrator({handoffIdentity:'',operatorAuthority:authority,runtime:process.env,identity:dependencies.identityProvider});
+      const result=await orchestrator.run({attemptId,installRoot,handoffIdentity:'',servicePort:port,recovery:true});
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+      return 0;
+    }
     const result = await recoverManagedUpdate(installRoot);
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return 0;
   }
 
+  let inherited:Awaited<ReturnType<typeof readInheritedEnvelope>> | undefined;
+  if(values['inherited-launch']===true) {
+    if(!process.send) throw new Error('terminal launch requires inherited OS IPC');
+    inherited=await readInheritedEnvelope(process.stdin);
+    if(!inherited.launch) throw new Error('terminal launch claims absent');
+    Object.assign(process.env,inherited.runtime);
+    await acceptTerminalLaunch(installRoot,inherited.launch,inherited.authority);
+  }
   const environment = await loadInstallEnvironment(installRoot);
   const metadata = await loadManagedInstallMetadata(installRoot);
   const currentRealpath = await import("node:fs/promises").then(({ realpath }) =>
@@ -333,7 +373,7 @@ export async function main(
     );
     return 0;
   }
-  await launchManagedInstall({
+  const launched=await launchManagedInstall({
     root: installRoot,
     cwd: process.cwd(),
     currentRealpath,
@@ -341,6 +381,23 @@ export async function main(
     metadata,
     importer: dependencies.importer,
   });
+  const imported=launched.imported as {bootstrap?:()=>Promise<{app?:{getHttpServer:()=>{listening:boolean}};restartHealth?:{version:string;release:string;health:string};reconcileUpdateAudit?:()=>Promise<void>}>};
+  if(typeof imported?.bootstrap==='function') {
+    const handle=await imported.bootstrap();
+    if(inherited) {
+      if(!handle.app?.getHttpServer().listening || !handle.restartHealth || handle.restartHealth.health!=='ok') throw new Error('terminal startup health is not ready');
+      const identity=new PlatformBootIdentityProvider();
+      const proof={...handle.restartHealth,pid:process.pid,createdAt:await identity.processCreatedAt(process.pid),boot:(await identity.current()).value,attemptId:inherited.launch!.attemptId,fence:inherited.launch!.fence,nonce:inherited.launch!.nonce};
+      process.send!({proof,receipt:inherited.authority.receipt(proof as never)});
+      process.once('message',async message=>{
+        if((message as {event?:string}).event==='verification-durable') {
+          // The normal app has already activated. A bounded, explicit callback
+          // catches the verification event appended after initial reconciliation.
+          await handle.reconcileUpdateAudit?.();
+        }
+      });
+    }
+  } else if(inherited) throw new Error('stable launcher server has no bootstrap entry');
   return 0;
 }
 

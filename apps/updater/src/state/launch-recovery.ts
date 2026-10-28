@@ -2,28 +2,31 @@ import path from "node:path";
 import { AttemptJournal } from "./attempt-journal";
 import { pathWithin, sameCanonicalPath } from "../bootstrap/path-plan";
 import { DurableFileSystem } from "../platform/durable-fs";
+import { terminalLaunchAllowed } from '../update/terminal-launch';
 
 /** No recovery orchestration here: refuse every state without a safe launch proof. */
 export async function assertLaunchRecoverySafe(root: string, release: string, fs: DurableFileSystem): Promise<void> {
+  if(await terminalLaunchAllowed(root,release)) return;
   const marker = await unresolvedRecoveryMarker(root, fs);
   if (marker) throw new Error(`Task 9 recovery required: unresolved ${marker}`);
   let snapshot;
   try { snapshot = await AttemptJournal.inspect(root, { fs }); }
   catch { throw new Error("Task 9 recovery required: uncertain or truncated journal"); }
   if (!snapshot.initialized) return;
-  if (snapshot.pending || snapshot.phase !== "COMMITTED")
+  if (snapshot.pending || !['COMMITTED','ROLLED_BACK','ABORTED'].includes(snapshot.phase ?? ''))
     throw new Error(`Task 9 recovery required: journal phase ${snapshot.phase} or pending action`);
   // COMMITTED is authoritative only for its target version, never the old tree.
   let version: unknown;
   try { version = JSON.parse((await fs.readFile(path.join(release, "package.json"))).toString("utf8")).version; }
   catch { throw new Error("COMMITTED authority cannot verify current release version; recovery required"); }
-  const switched = [...snapshot.records].reverse().find(record => record.kind === "intent" && ["attach-current", "replace-current"].includes(record.action ?? ""));
+  const terminalRollback=snapshot.phase!=='COMMITTED';
+  const switched = [...snapshot.records].reverse().find(record => record.kind === "intent" && (terminalRollback ? record.action==='complete-rollback' : ["attach-current", "replace-current"].includes(record.action ?? "")));
   const payload = switched?.payload as { target?: unknown } | undefined;
   if (!switched || typeof payload?.target !== "string" ||
       !pathWithin(path.join(root, "releases"), payload.target) ||
       !sameCanonicalPath(await fs.realpath(payload.target), release))
     throw new Error("COMMITTED switch target differs from current release; recovery required");
-  if (version !== snapshot.targetVersion)
+  if (version !== (terminalRollback ? snapshot.previousVersion ?? snapshot.currentVersion : snapshot.targetVersion))
     throw new Error("COMMITTED authority differs from current release; recovery required");
 }
 

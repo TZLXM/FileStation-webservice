@@ -194,3 +194,22 @@ describe("UpdateRollbackService", () => {
     }
   });
 });
+
+describe('rollback filesystem crash boundaries', () => {
+  it.each(['after-move-db', 'after-move-wal', 'after-move-shm', 'after-move-journal', 'before-publication', 'after-publication'])('resumes %s without losing diagnostics or mixing sidecars', async (point) => {
+    const v=await fixture();
+    const input={...v, attemptId:'attempt-rollback-01', fence:5};
+    try {
+      await expect(new UpdateRollbackService({crashAt:point as never}).restoreDatabase(input)).rejects.toBeInstanceOf(InjectedRollbackCrash);
+      await new UpdateRollbackService().restoreDatabase(input);
+      expect(await readFile(v.databasePath,'utf8')).toBe('verified-snapshot');
+      const diagnostics=path.join(path.dirname(v.snapshotPath),'diagnostics','attempt-rollback-01-5');
+      expect(await readFile(path.join(diagnostics,'filestation.db'),'utf8')).toBe('new-database');
+      for(const suffix of ['-wal','-shm','-journal']) {
+        expect(await readFile(path.join(diagnostics,'filestation.db'+suffix),'utf8')).toBe('new'+suffix);
+        await expect(readFile(v.databasePath+suffix)).rejects.toMatchObject({code:'ENOENT'});
+      }
+      expect((await v.journal.readSnapshot()).pending).toBeNull();
+    } finally {await rm(v.root,{recursive:true,force:true});}
+  });
+});

@@ -1,5 +1,4 @@
 import { ChildProcess, spawn } from "node:child_process";
-import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
@@ -12,7 +11,9 @@ import {
   PlatformBootIdentityProvider,
   ProcessIdentityProvider,
 } from "../state/boot-identity";
-import { LockHandle, UpdateLock } from "../state/update-lock";
+import { LockHandle, RecoveryLockHandle, UpdateLock } from "../state/update-lock";
+import { OperatorRecoveryAuthority } from './operator-authority';
+import { randomUUID } from 'node:crypto';
 import {
   CurrentLinkSwitcher,
 } from "../platform/current-link";
@@ -34,6 +35,7 @@ export interface UpdateOrchestrationAttempt {
   handoffIdentity: string;
   servicePort?: number;
   timeoutMs?: number;
+  recovery?: boolean;
 }
 
 export interface CommittedUpdate {
@@ -118,6 +120,10 @@ export class UpdateOrchestrator {
     if (recoveryActionFor(initial) === "restart-new") {
       return this.hooks.restartCommitted(attempt, initial);
     }
+    if (initial.phase !== 'HANDOFF_READY' || attempt.recovery) {
+      if (!initial.initialized || initial.attemptId !== attempt.attemptId) throw new Error('recovery attempt is uninitialized or changed');
+      return this.hooks.rollback(attempt, initial, 'interrupted update');
+    }
     const handoff = await this.hooks.waitForHandoff(attempt);
     try {
       const forwarded = await this.hooks.forward(attempt, handoff);
@@ -154,6 +160,7 @@ interface RunningServer {
   baseUrl: string;
   stage: "validate" | "gated";
   stopped: boolean;
+  processCreatedAt: string;
 }
 
 function isObject(
@@ -227,20 +234,28 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-async function stopServer(server: RunningServer | undefined): Promise<void> {
-  if (!server || server.stopped || server.child.exitCode !== null) return;
-  server.stopped = true;
-  try {
-    server.child.kill("SIGTERM");
-    await Promise.race([
-      once(server.child, "exit"),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("server did not stop")), 15_000),
-      ),
-    ]);
-  } catch {
-    server.child.kill("SIGKILL");
+export async function stopServer(server: RunningServer | undefined, identity: ProcessIdentityProvider = new PlatformBootIdentityProvider(), timeoutMs = 15_000): Promise<void> {
+  if (!server || server.stopped) return;
+  const pid = server.child.pid;
+  if (!pid || !server.processCreatedAt) throw new Error("server exit identity unavailable");
+  const gone = () => identity.isProcessAlive(pid, server.processCreatedAt).then(alive => !alive);
+  if (await gone()) { server.stopped = true; return; }
+  const signalAndWait = async (signal: NodeJS.Signals) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const exited = new Promise<void>(resolve => {
+      const done = () => { clearTimeout(timer); server.child.removeListener("exit", done); resolve(); };
+      server.child.once("exit", done);
+      timer = setTimeout(done, timeoutMs);
+    });
+    server.child.kill(signal);
+    await exited;
+  };
+  await signalAndWait("SIGTERM");
+  if (!(await gone())) {
+    await signalAndWait("SIGKILL");
+    if (!(await gone())) throw new Error("server exit not proven after SIGKILL");
   }
+  server.stopped = true;
 }
 
 async function waitForJson(
@@ -268,19 +283,87 @@ async function waitForJson(
   throw lastError ?? new Error("update health timed out");
 }
 
-class ManagedUpdateHooks implements UpdateOrchestratorHooks {
+export class ManagedUpdateHooks implements UpdateOrchestratorHooks {
   private readonly identity: ProcessIdentityProvider;
   private readonly fs: DurableFileSystem;
+  private ownership?: {journal:AttemptJournal; lock:LockHandle; recovery:RecoveryLockHandle};
+  private readonly runtime: NodeJS.ProcessEnv;
+  private readonly operatorAuthority?: OperatorRecoveryAuthority;
 
   constructor(
     private readonly handoffIdentity: string,
     options: {
       identity?: ProcessIdentityProvider;
       fs?: DurableFileSystem;
+      runtime?: NodeJS.ProcessEnv;
+      operatorAuthority?: OperatorRecoveryAuthority;
     } = {},
   ) {
     this.identity = options.identity ?? new PlatformBootIdentityProvider();
     this.fs = options.fs ?? new NodeDurableFileSystem();
+    this.runtime = options.runtime ?? {};
+    this.operatorAuthority = options.operatorAuthority;
+  }
+
+  private async own(attempt:UpdateOrchestrationAttempt):Promise<AttemptJournal> {
+    if(this.ownership) {await this.ownership.recovery.assertActive(); await this.ownership.lock.assertActive(); return this.ownership.journal;}
+    const snapshot=await AttemptJournal.inspect(attempt.installRoot);
+    if(snapshot.attemptId!==attempt.attemptId || !snapshot.owner) throw new Error('recovery attempt changed');
+    const boot=await this.identity.current();
+    const actor={attemptId:attempt.attemptId,bootIdentity:boot.value,pid:process.pid,processCreatedAt:await this.identity.processCreatedAt(process.pid),heartbeatAt:new Date().toISOString(),currentVersion:snapshot.currentVersion!,targetVersion:snapshot.targetVersion!,previousVersion:snapshot.previousVersion,backupId:snapshot.backupId};
+    const journal=await AttemptJournal.open(attempt.installRoot,{fs:this.fs});
+    const recovery=await UpdateLock.acquireRecovery(attempt.installRoot,actor,{identityProvider:this.identity,journal,fs:this.fs,servicePort:attempt.servicePort,operatorAuthority:this.operatorAuthority});
+    try {
+      const lock=await recovery.recoverAttempt({owner:actor,expectedFence:snapshot.fence,handoffIdentity:this.handoffIdentity});
+      this.ownership={journal,lock,recovery};
+      return journal;
+    } catch(error) {await recovery.release(); throw error;}
+  }
+
+  private async releaseOwnership():Promise<void> {
+    if(!this.ownership) return;
+    await this.ownership.lock.release();
+    await this.ownership.recovery.release();
+    this.ownership=undefined;
+  }
+
+  private async stopRecordedChildren(attempt:UpdateOrchestrationAttempt):Promise<void> {
+    const file=path.join(attempt.installRoot,'update.processes.json');
+    if(!(await this.fs.exists(file))) return;
+    const ledger=JSON.parse((await this.fs.readFile(file)).toString('utf8'));
+    if(ledger.attemptId!==attempt.attemptId || !Array.isArray(ledger.children)) throw new Error('child identity ledger mismatched');
+    const boot=await this.identity.current();
+    for(const record of ledger.children) {
+      if(record.boot!==boot.value) continue; // A different OS boot cannot retain that process.
+      if(typeof record.pid!=='number' || typeof record.createdAt!=='string') throw new Error('child identity missing');
+      if(await this.identity.isProcessAlive(record.pid,record.createdAt)) {
+        const deadline=Date.now()+(attempt.timeoutMs ?? 15_000);
+        // Never signal a reused PID. Every signal is preceded by identity proof.
+        process.kill(record.pid,'SIGTERM');
+        while(Date.now()<deadline && await this.identity.isProcessAlive(record.pid,record.createdAt)) await new Promise(r=>setTimeout(r,50));
+        if(await this.identity.isProcessAlive(record.pid,record.createdAt)) {
+          process.kill(record.pid,'SIGKILL');
+          const forced=Date.now()+(attempt.timeoutMs ?? 15_000);
+          while(Date.now()<forced && await this.identity.isProcessAlive(record.pid,record.createdAt)) await new Promise(r=>setTimeout(r,50));
+          if(await this.identity.isProcessAlive(record.pid,record.createdAt)) throw new Error('recorded child exit not proven');
+        }
+      }
+    }
+    await this.fs.unlink(file);
+  }
+
+  private async recordChild(attempt:UpdateOrchestrationAttempt, child:ChildProcess):Promise<string> {
+    const createdAt=await this.identity.processCreatedAt(child.pid!);
+    const boot=(await this.identity.current()).value;
+    const file=path.join(attempt.installRoot,'update.processes.json');
+    let children:unknown[]=[];
+    if(await this.fs.exists(file)) {
+      const previous=JSON.parse((await this.fs.readFile(file)).toString('utf8'));
+      if(previous.attemptId!==attempt.attemptId) throw new Error('foreign child ledger');
+      children=previous.children;
+    }
+    await this.fs.writeAtomic(file,Buffer.from(JSON.stringify({attemptId:attempt.attemptId,children:[...children,{pid:child.pid,createdAt,boot}]})+'\n'),{mode:0o600});
+    return createdAt;
   }
 
   async inspect(_attempt: UpdateOrchestrationAttempt) {
@@ -370,6 +453,7 @@ class ManagedUpdateHooks implements UpdateOrchestratorHooks {
         handoffIdentity: this.handoffIdentity,
       });
       currentFence = lock.fence;
+      this.ownership={journal,lock,recovery};
       await this.appendAction(
         journal,
         attempt.attemptId,
@@ -457,7 +541,7 @@ class ManagedUpdateHooks implements UpdateOrchestratorHooks {
           Date.now() + (attempt.timeoutMs ?? 120_000),
           (status) => status === 200,
         );
-        await stopServer(running);
+        await stopServer(running, this.identity);
         running = undefined;
         await journal.appendCompletion({
           attemptId: attempt.attemptId,
@@ -551,13 +635,9 @@ class ManagedUpdateHooks implements UpdateOrchestratorHooks {
           (status, value) =>
             status === 200 && value.status === "committed",
         );
-        await stopServer(running);
+        await stopServer(running, this.identity);
         running = undefined;
-        if (lock) {
-          await lock.release();
-          lock = undefined;
-        }
-      await recovery.release();
+        // Keep both authorities through independent restart and retention.
       return {
         state: "committed",
         attemptId: attempt.attemptId,
@@ -565,11 +645,9 @@ class ManagedUpdateHooks implements UpdateOrchestratorHooks {
         version: prepared.targetVersion,
       };
     } catch (error) {
-      await stopServer(running);
+      await stopServer(running, this.identity);
       const current = await AttemptJournal.inspect(attempt.installRoot);
       if (current.phase === "COMMITTED") {
-        if (lock) await lock.release().catch(() => undefined);
-        await recovery.release().catch(() => undefined);
         throw error;
       }
       try {
@@ -578,8 +656,6 @@ class ManagedUpdateHooks implements UpdateOrchestratorHooks {
           current,
           error instanceof Error ? error.message : "update failed",
         );
-        if (lock) await lock.release().catch(() => undefined);
-        await recovery.release().catch(() => undefined);
         return rolledBack;
       } catch {
         // Keep both owner records when rollback cannot be proven complete.
@@ -593,42 +669,66 @@ class ManagedUpdateHooks implements UpdateOrchestratorHooks {
     snapshot: AttemptJournalSnapshot,
     reason: string,
   ): Promise<RolledBackUpdate> {
-    const journal = await AttemptJournal.open(attempt.installRoot);
-    const current = snapshot;
-    const prepared = preparedUpdate(current);
-    const snapshotPayload = latestPayload(snapshot, "snapshot-database");
-    if (typeof snapshotPayload.path !== "string") {
-      throw new Error("rollback snapshot path is unavailable");
+    const journal = await this.own(attempt);
+    await this.stopRecordedChildren(attempt);
+    let current=await journal.readSnapshot();
+    if(current.phase==='COMMITTED') throw new Error('COMMITTED cannot roll back');
+    const early=['PREPARED','MAINTENANCE','SNAPSHOT_READY','HANDOFF_READY','ABORTED'].includes(current.phase!) || current.records.some(r=>(r.kind==='completion' && isObject(r.result) && r.result.rollbackRequired===false) || (r.kind==='intent' && r.action==='rollback-plan' && isObject(r.payload) && r.payload.restoreRequired===false));
+    const linkActions=['stage-current-link','detach-current','attach-current','replace-current','cleanup-staged-link','restore-previous'];
+    // Resolve the forward operation first. Completion records preserve the
+    // original intent and explicitly state interruption, never claim success.
+    if(current.pending && linkActions.includes(current.pending.action)) {
+      await new CurrentLinkSwitcher(attempt.installRoot,journal,{fs:this.fs}).recover(current);
+    } else if(current.pending && !['rollback-database','select-previous','complete-rollback','launch-terminal'].includes(current.pending.action)) {
+      if(!['prepare-update','enter-maintenance','snapshot-database','bind-handoff-identity','close-application','record-old-stopped','install-release','validate-release','ready-to-commit','commit-update','rollback-plan'].includes(current.pending.action)) throw new Error('unknown pending recovery action');
+      await journal.appendCompletion({attemptId:attempt.attemptId,fence:current.fence,intentId:current.pending.intentId,phase:early?'ROLLBACK_INTENT':'ROLLBACK_INTENT',result:{interrupted:true,rollbackRequired:!early}});
     }
-    await new UpdateRollbackService().restoreDatabase({
-      root: attempt.installRoot,
-      journal,
-      attemptId: attempt.attemptId,
-      fence: current.fence,
-      databasePath: prepared.databasePath,
-      snapshotPath: snapshotPayload.path,
-    });
-    try {
-      await new CurrentLinkSwitcher(
-        attempt.installRoot,
-        journal,
-        { fs: this.fs },
-      ).recover(await journal.readSnapshot());
-    } catch (error) {
-      if (!/no recoverable link history/i.test(
-        error instanceof Error ? error.message : "",
-      )) {
-        throw error;
+    current=await journal.readSnapshot();
+    if(!current.records.some(r=>r.kind==='intent' && r.action==='rollback-plan') && !['ROLLED_BACK','ABORTED'].includes(current.phase!)) {
+      const plan=await journal.appendIntent({attemptId:attempt.attemptId,fence:current.fence,action:'rollback-plan',phase:'ROLLBACK_INTENT',payload:{restoreRequired:!early}});
+      await journal.appendCompletion({attemptId:attempt.attemptId,fence:current.fence,intentId:plan.id,phase:'ROLLBACK_INTENT',result:{rollbackRequired:!early}});
+      current=await journal.readSnapshot();
+    }
+    const terminal=current.records.some(r=>r.kind==='completion' && isObject(r.result) && typeof r.result.reason==='string' && ['ROLLED_BACK','ABORTED'].includes(r.phase!));
+    const alreadyRestored=current.records.some(r=>r.kind==='completion' && isObject(r.result) && r.result.restored===true && typeof r.result.snapshotPath==='string');
+    if(!early && !terminal && !alreadyRestored) {
+      const prepared=preparedUpdate(current);
+      const backup=latestPayload(current,'snapshot-database');
+      if(typeof backup.path!=='string') throw new Error('rollback snapshot path unavailable');
+      await new UpdateRollbackService({fs:this.fs}).restoreDatabase({root:attempt.installRoot,journal,attemptId:attempt.attemptId,fence:current.fence,databasePath:prepared.databasePath,snapshotPath:backup.path});
+    }
+    current=await journal.readSnapshot();
+    // The earliest switch describes the pre-update release. A recover() result
+    // is never used as an instruction to select that release.
+    const firstSwitch=current.records.find(r=>r.kind==='intent' && linkActions.includes(r.action ?? '') && isObject(r.payload) && typeof r.payload.originalTarget==='string');
+    const oldTarget=firstSwitch && isObject(firstSwitch.payload) ? firstSwitch.payload.originalTarget as string : await this.fs.realpath(path.join(attempt.installRoot,'current'));
+    if(!within(path.join(attempt.installRoot,'releases'),oldTarget)) throw new Error('previous release escaped install');
+    if(!(await this.fs.exists(path.join(attempt.installRoot,'current'))) || await this.fs.realpath(path.join(attempt.installRoot,'current'))!==oldTarget) {
+      // Use a distinct operation identity so Windows staging paths from the
+      // forward switch cannot collide with this deliberate reverse switch.
+      const select=current.pending?.action==='select-previous' ? current.pending : await journal.appendIntent({attemptId:attempt.attemptId,fence:current.fence,action:'select-previous',phase:'ROLLBACK_INTENT',payload:{target:oldTarget,stage:path.join(attempt.installRoot,`.rollback-current-${current.fence}`),detached:path.join(attempt.installRoot,`.rollback-new-${current.fence}`)}});
+      if(!isObject(select.payload) || typeof select.payload.stage!=='string' || typeof select.payload.detached!=='string') throw new Error('previous-selection intent malformed');
+      const stage=select.payload.stage;
+      if(!(await this.fs.exists(stage))) {
+        if(process.platform==='win32') await this.fs.createJunction(oldTarget,stage); else await this.fs.symlink(oldTarget,stage);
+      } else if(await this.fs.realpath(stage)!==oldTarget) throw new Error('rollback staging target differs');
+      if(process.platform==='win32') {
+        const detached=select.payload.detached;
+        if(await this.fs.exists(path.join(attempt.installRoot,'current'))) await this.fs.rename(path.join(attempt.installRoot,'current'),detached,{replace:false});
       }
+      await this.fs.rename(stage,path.join(attempt.installRoot,'current'),{replace:process.platform!=='win32'});
+      await journal.appendCompletion({attemptId:attempt.attemptId,fence:current.fence,intentId:('intentId' in select ? select.intentId : select.id)!,phase:'ROLLBACK_INTENT',result:{target:oldTarget}});
+    } else if(current.pending?.action==='select-previous') {
+      await journal.appendCompletion({attemptId:attempt.attemptId,fence:current.fence,intentId:current.pending.intentId,phase:'ROLLBACK_INTENT',result:{target:oldTarget}});
     }
     const rolledBackState = await journal.readSnapshot();
-    if (rolledBackState.phase !== "ROLLED_BACK") {
-      const intent = await journal.appendIntent({
+    if (rolledBackState.pending?.action==='complete-rollback' || !['ROLLED_BACK','ABORTED'].includes(rolledBackState.phase!)) {
+      const intent = rolledBackState.pending?.action==='complete-rollback' ? {id:rolledBackState.pending.intentId} : await journal.appendIntent({
         attemptId: attempt.attemptId,
         fence: rolledBackState.fence,
         action: "complete-rollback",
         phase: "ROLLED_BACK",
-        payload: { reason: "pre-commit-failure" },
+        payload: { reason: "pre-commit-failure", target:oldTarget },
       });
       await journal.appendCompletion({
         attemptId: attempt.attemptId,
@@ -639,6 +739,8 @@ class ManagedUpdateHooks implements UpdateOrchestratorHooks {
       });
     }
     await journal.writeStatusProjection();
+    await this.launchTerminal(attempt,journal,oldTarget,rolledBackState.previousVersion ?? rolledBackState.currentVersion!,false);
+    await this.releaseOwnership();
     return {
       state: "rolled_back",
       attemptId: attempt.attemptId,
@@ -651,6 +753,13 @@ class ManagedUpdateHooks implements UpdateOrchestratorHooks {
     attempt: UpdateOrchestrationAttempt,
     snapshot: AttemptJournalSnapshot,
   ): Promise<CommittedUpdate> {
+    const journal=await this.own(attempt);
+    await this.stopRecordedChildren(attempt);
+    snapshot=await journal.readSnapshot();
+    if(snapshot.pending?.action==='commit-update') {
+      await journal.appendCompletion({attemptId:attempt.attemptId,fence:snapshot.fence,intentId:snapshot.pending.intentId,phase:'COMMITTED',result:{recoveredCommit:true}});
+      snapshot=await journal.readSnapshot();
+    }
     const prepared = preparedUpdate(snapshot);
     const current = await this.fs.realpath(
       path.join(attempt.installRoot, "current"),
@@ -661,58 +770,69 @@ class ManagedUpdateHooks implements UpdateOrchestratorHooks {
     if (packageJson.version !== prepared.targetVersion) {
       throw new Error("COMMITTED current release version is invalid");
     }
-    const port = attempt.servicePort ?? 8080;
-    const environment = await this.serverEnvironment(attempt);
-    const currentMain = path.join(current, "apps/server/dist/main.js");
-    try {
-      await waitForJson(
-        `http://127.0.0.1:${port}/api/v1/auth/status`,
-        {},
-        Date.now() + 500,
-        (status) => status === 200,
-      );
-    } catch {
-      const child = spawn(process.execPath, [currentMain], {
-        cwd: attempt.installRoot,
-        env: environment,
-        windowsHide: true,
-        detached: process.platform !== "win32",
-        stdio: "ignore",
-      });
-      child.unref();
-      await waitForJson(
-        `http://127.0.0.1:${port}/api/v1/auth/status`,
-        {},
-        Date.now() + (attempt.timeoutMs ?? 120_000),
-        (status) => status === 200,
-      );
-    }
-    const journal = await AttemptJournal.open(attempt.installRoot);
-    const intent = await journal.appendIntent({
-      attemptId: attempt.attemptId,
-      fence: snapshot.fence,
-      action: "verify-committed-restart",
-      phase: "COMMITTED",
-      payload: { version: prepared.targetVersion },
-    });
-    await journal.appendCompletion({
-      attemptId: attempt.attemptId,
-      fence: snapshot.fence,
-      intentId: intent.id,
-      phase: "COMMITTED",
-      result: { version: prepared.targetVersion, health: "ok" },
-    });
+    await this.launchTerminal(attempt,journal,current,prepared.targetVersion,true);
     await new RetentionService(attempt.installRoot, {
       fs: this.fs,
     })
       .cleanup(await journal.readSnapshot())
       .catch(() => undefined);
+    await this.releaseOwnership();
     return {
       state: "committed",
       attemptId: attempt.attemptId,
       fence: snapshot.fence,
       version: prepared.targetVersion,
     };
+  }
+
+  private async launchTerminal(attempt:UpdateOrchestrationAttempt,journal:AttemptJournal,release:string,version:string,committed:boolean):Promise<void> {
+    let snapshot=await journal.readSnapshot();
+    const action=committed?'verify-committed-restart':'launch-terminal';
+    if(snapshot.pending && snapshot.pending.action!==action) throw new Error('terminal launch pending action differs');
+    if(snapshot.pending && (!isObject(snapshot.pending.payload) || snapshot.pending.payload.version!==version || snapshot.pending.payload.release!==release)) throw new Error('terminal launch intent identity differs');
+    // A previous child may have died after startup but before its completion.
+    // Reuse the durable intent; require a fresh independent process every retry.
+    const intent=snapshot.pending ? {id:snapshot.pending.intentId} : await journal.appendIntent({attemptId:attempt.attemptId,fence:snapshot.fence,action,phase:snapshot.phase!,payload:{version,release}});
+    snapshot=await journal.readSnapshot();
+    const port=attempt.servicePort ?? 8080;
+    if(!this.identity.listeningPid) throw new Error('terminal launcher cannot prove service port ownership');
+    if(await this.identity.listeningPid(port)!==undefined) throw new Error('terminal restart port is occupied; independent restart required');
+    const authority=new UpdateCapabilityAuthority();
+    const claims={attemptId:attempt.attemptId,fence:snapshot.fence,version,release,phase:snapshot.phase!,parentPid:process.pid,parentCreatedAt:await this.identity.processCreatedAt(process.pid),parentBoot:(await this.identity.current()).value,expiresAt:Date.now()+(attempt.timeoutMs ?? 120_000),nonce:randomUUID()};
+    const child=spawn(process.execPath,[path.join(attempt.installRoot,'updater/dist/cli.js'),'launch','--root',attempt.installRoot,'--inherited-launch'],{cwd:attempt.installRoot,env:this.osEnvironment(),windowsHide:true,detached:true,stdio:['pipe','ignore','ignore','ipc']});
+    const createdAt=await this.recordChild(attempt,child);
+    const response=new Promise<Record<string,unknown>>((resolve,reject)=>{
+      const timer=setTimeout(()=>{cleanup();reject(new Error('independent launcher proof timed out'));},attempt.timeoutMs ?? 120_000);
+      const onExit=()=>{cleanup();reject(new Error('independent launcher exited before proof'));};
+      const onMessage=(value:unknown)=>{cleanup();resolve(value as Record<string,unknown>);};
+      const cleanup=()=>{clearTimeout(timer);child.removeListener('exit',onExit);child.removeListener('message',onMessage);};
+      child.once('message',onMessage);child.once('exit',onExit);child.once('error',onExit);
+    });
+    const envelope=JSON.parse(encodeInheritedCapability(authority).toString('utf8'));
+    const encoded=Buffer.from(JSON.stringify({...envelope,runtime:await this.runtimeEnvironment(attempt),launch:{...claims,receipt:authority.receipt(claims)}}));
+    if(encoded.length>4096) throw new Error('terminal launch envelope unbounded');
+    child.stdin!.end(encoded,()=>encoded.fill(0));
+    const message=await response;
+    const proof=message.proof as Record<string,JsonValue>;
+    if(!proof || typeof message.receipt!=='string' || !authority.verifyReceipt(message.receipt,proof as never) || proof.pid!==child.pid || proof.createdAt!==createdAt || proof.boot!==claims.parentBoot || proof.version!==version || proof.release!==release || proof.health!=='ok' || proof.attemptId!==attempt.attemptId || proof.fence!==snapshot.fence || proof.nonce!==claims.nonce || !(await this.identity.isProcessAlive(child.pid!,createdAt)) || await this.identity.listeningPid(port)!==child.pid) throw new Error('independent launcher identity/version/health proof invalid');
+    await journal.appendCompletion({attemptId:attempt.attemptId,fence:snapshot.fence,intentId:intent.id,phase:snapshot.phase!,result:{version,health:'ok',pid:child.pid!,createdAt,boot:claims.parentBoot,nonce:claims.nonce,release}});
+    // The child waits for this message before reconciling RESTART_VERIFIED.
+    child.send({event:'verification-durable'});
+    child.disconnect(); child.unref();
+    await this.fs.unlink(path.join(attempt.installRoot,'update.processes.json'));
+  }
+
+  private osEnvironment():NodeJS.ProcessEnv {
+    const env:NodeJS.ProcessEnv={};
+    for(const key of ['PATH','Path','SystemRoot','WINDIR','TEMP','TMP']) if(process.env[key]!==undefined) env[key]=process.env[key];
+    return env;
+  }
+
+  private async runtimeEnvironment(attempt:UpdateOrchestrationAttempt):Promise<NodeJS.ProcessEnv> {
+    const loaded=await this.serverEnvironment(attempt);
+    const runtime:NodeJS.ProcessEnv={};
+    for(const key of ['NODE_ENV','JWT_SECRET','FILESTATION_PORT','FILESTATION_HOST','FILESTATION_DB_PATH','FILESTATION_STORAGE_PATH','FILESTATION_TEMP_PATH','FILESTATION_SERVE_STATIC','FILESTATION_WEB_URL','FILESTATION_WEB_DIST','FILESTATION_CORS_ORIGINS','FILESTATION_CONTAINER','FILESTATION_DEPLOYMENT_MODE']) if(loaded[key]!==undefined) runtime[key]=loaded[key];
+    return runtime;
   }
 
   private async appendAction(
@@ -749,9 +869,6 @@ class ManagedUpdateHooks implements UpdateOrchestratorHooks {
       path.join(attempt.installRoot, "current"),
     );
     const main = path.join(release, "apps/server/dist/main.js");
-    const environment = await this.serverEnvironment(attempt);
-    environment.FILESTATION_HOST = "127.0.0.1";
-    environment.FILESTATION_PORT = String(port);
     const snapshot = await AttemptJournal.inspect(attempt.installRoot);
     const args = [
       main,
@@ -764,7 +881,7 @@ class ManagedUpdateHooks implements UpdateOrchestratorHooks {
     ];
     const child = spawn(process.execPath, args, {
       cwd: attempt.installRoot,
-      env: environment,
+      env: this.osEnvironment(),
       windowsHide: true,
       stdio: ["pipe", "ignore", "pipe"],
     });
@@ -772,24 +889,24 @@ class ManagedUpdateHooks implements UpdateOrchestratorHooks {
       child.kill();
       throw new Error("server startup did not receive an inherited capability pipe");
     }
-    const inherited = encodeInheritedCapability(authority);
+    const createdAt=await this.recordChild(attempt,child);
+    const inherited = Buffer.from(JSON.stringify({...JSON.parse(encodeInheritedCapability(authority).toString('utf8')),runtime:{...await this.runtimeEnvironment(attempt),FILESTATION_HOST:'127.0.0.1',FILESTATION_PORT:String(port)}}));
     try {
-      child.stdin.end(inherited);
-    } finally {
-      inherited.fill(0);
-    }
+      child.stdin.end(inherited,()=>inherited.fill(0));
+    } catch(error) {inherited.fill(0);throw error;}
     return {
       child,
       baseUrl: `http://127.0.0.1:${port}`,
       stage,
       stopped: false,
+      processCreatedAt: createdAt,
     };
   }
 
   private async serverEnvironment(
     attempt: UpdateOrchestrationAttempt,
   ): Promise<NodeJS.ProcessEnv> {
-    const loaded = await loadInstallEnvironment(attempt.installRoot);
+    const loaded = await loadInstallEnvironment(attempt.installRoot,{processEnvironment:{...process.env,...this.runtime}});
     return {
       ...process.env,
       ...loaded.values,
@@ -804,6 +921,8 @@ export function createManagedUpdateOrchestrator(options: {
   handoffIdentity: string;
   identity?: ProcessIdentityProvider;
   fs?: DurableFileSystem;
+  runtime?: NodeJS.ProcessEnv;
+  operatorAuthority?: OperatorRecoveryAuthority;
 }): UpdateOrchestrator {
   return new UpdateOrchestrator(new ManagedUpdateHooks(
     options.handoffIdentity,

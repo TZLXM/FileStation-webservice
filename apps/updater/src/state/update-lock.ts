@@ -20,6 +20,7 @@ import {
 export type { ProcessIdentityProvider } from "./boot-identity";
 
 import { acquireRecoveryGuard, RecoveryGuard } from "../platform/recovery-guard";
+import { OperatorRecoveryAuthority } from '../update/operator-authority';
 
 const OWNER_LOCK = "update.lock";
 const RECOVERY_LOCK = "update.recovery.lock";
@@ -52,6 +53,7 @@ export interface LockOptions {
   identityProvider?: ProcessIdentityProvider;
   servicePort?: number;
   now?: () => Date;
+  operatorAuthority?: OperatorRecoveryAuthority;
 }
 
 export interface TakeoverHandoffInput {
@@ -73,8 +75,11 @@ function checksum(value: Omit<LockRecord, "checksum">): string {
 }
 
 function encode(record: Omit<LockRecord, "checksum">): Buffer {
+  // Runtime callers may pass a decoded LockRecord (for example heartbeat).
+  // Never include its previous checksum in the next checksum's input.
+  const { checksum: _previousChecksum, ...base } = record as LockRecord;
   return Buffer.from(
-    `${JSON.stringify({ ...record, checksum: checksum(record) })}\n`,
+    `${JSON.stringify({ ...base, checksum: checksum(base) })}\n`,
     "utf8",
   );
 }
@@ -305,6 +310,7 @@ export class RecoveryLockHandle {
     private readonly recoveryRecord: LockRecord,
     private readonly guard: RecoveryGuard,
     private readonly servicePort?: number,
+    private readonly operatorAuthority?: OperatorRecoveryAuthority,
   ) {}
 
   get fence(): number {
@@ -341,13 +347,14 @@ export class RecoveryLockHandle {
     } catch {
       throw new LockFailure("current boot identity is unavailable");
     }
-    if (currentBoot.value !== snapshot.owner.bootIdentity)
+    this.operatorAuthority?.assert(this.root, snapshot.attemptId!, this.operatorAuthority.fence);
+    if (currentBoot.value !== snapshot.owner.bootIdentity && !this.operatorAuthority)
       throw new LockFailure("old owner boot identity cannot be verified");
     if (oldRecord.owner.bootIdentity !== snapshot.owner.bootIdentity)
       throw new LockFailure("lock and journal old owner boot identities differ");
     let alive: boolean;
     try {
-      alive = await this.provider.isProcessAlive(
+      alive = currentBoot.value !== snapshot.owner.bootIdentity ? false : await this.provider.isProcessAlive(
         snapshot.owner.pid,
         snapshot.owner.processCreatedAt,
       );
@@ -404,14 +411,15 @@ export class RecoveryLockHandle {
     if (!(await this.fs.exists(lockPath)))
       throw new LockFailure("owner lock is missing; recovery requires review");
     const currentRecord = decode(await this.fs.readFile(lockPath), "owner");
-    if (!snapshot.owner?.handoffIdentityHash)
+    if(!snapshot.owner) throw new LockFailure('journal owner identity absent');
+    if (!snapshot.owner?.handoffIdentityHash && !this.operatorAuthority)
       throw new LockFailure("journal owner has no handoff identity");
-    if (
+    if (!this.operatorAuthority && (
       !sameDigest(
-        snapshot.owner.handoffIdentityHash,
+        snapshot.owner!.handoffIdentityHash!,
         hashCapability(input.handoffIdentity),
       )
-    )
+    ))
       throw new LockFailure("handoff identity does not match");
 
     if (snapshot.pending?.action === "replace-owner") {
@@ -516,10 +524,16 @@ export class RecoveryLockHandle {
     const snapshot = await this.journal.readSnapshot();
     if (snapshot.attemptId !== input.owner.attemptId || snapshot.fence !== input.expectedFence || !snapshot.owner || !snapshot.phase)
       throw new LockFailure("recovery attempt/fence does not match");
-    if (!snapshot.owner.handoffIdentityHash || !sameDigest(snapshot.owner.handoffIdentityHash, hashCapability(input.handoffIdentity)))
+    this.operatorAuthority?.assert(this.root, snapshot.attemptId!, this.operatorAuthority.fence);
+    if (!this.operatorAuthority && (!snapshot.owner.handoffIdentityHash || !sameDigest(snapshot.owner.handoffIdentityHash, hashCapability(input.handoffIdentity))))
       throw new LockFailure("recovery identity does not match");
     if (snapshot.pending?.action === "replace-owner") return this.takeoverHandoff(input);
     const lockPath = path.join(this.root, OWNER_LOCK);
+    if (!(await this.fs.exists(lockPath))) {
+      if (!['COMMITTED','ROLLED_BACK','ABORTED','FAILED'].includes(snapshot.phase) || snapshot.pending)
+        throw new LockFailure('active recovery owner lock is missing');
+      await this.fs.createExclusive(lockPath, encode({schemaVersion:1,kind:'owner',attemptId:snapshot.attemptId!,fence:snapshot.fence,owner:snapshot.owner}), {mode:0o600});
+    }
     const bytes = await this.fs.readFile(lockPath);
     const current = decode(bytes, "owner");
     const prior = snapshot.records.at(-1)!.context;
@@ -527,7 +541,7 @@ export class RecoveryLockHandle {
     await this.verifyOldOwnerStopped(snapshot, current);
     const next: AttemptContext = { ...structuredClone(prior), fence: snapshot.fence + 1, owner: journalOwner(input.owner) };
     // Retain the authentication identity across retries/restarts.
-    next.owner.handoffIdentityHash = snapshot.owner.handoffIdentityHash;
+    if(snapshot.owner.handoffIdentityHash) next.owner.handoffIdentityHash = snapshot.owner.handoffIdentityHash;
     const intent = await this.journal.appendIntent({ attemptId: snapshot.attemptId!, fence: snapshot.fence, action: "replace-owner", phase: snapshot.phase, payload: { nextContext: next } as unknown as JsonValue });
     await this.finishOwnerReplacement(snapshot.attemptId!, snapshot.fence, intent.id, next, bytes);
     return new LockHandle(this.root, this.fs, decode(await this.fs.readFile(lockPath), "owner"));
@@ -625,6 +639,7 @@ export class UpdateLock {
       options.journal ??
       (await AttemptJournal.open(root, { fs, now }));
     const snapshot = await journal.readSnapshot();
+    options.operatorAuthority?.assert(root, owner.attemptId, snapshot.fence);
     if (snapshot.initialized && !terminalAttempt(snapshot))
       throw new LockFailure(
         "an existing attempt has no active owner lock; use recovery",
@@ -703,6 +718,7 @@ export class UpdateLock {
     catch { throw new LockFailure("recovery OS guard is held or unavailable"); }
     try {
     const snapshot = await journal.readSnapshot();
+    options.operatorAuthority?.assert(root, owner.attemptId, snapshot.fence);
     const filename = path.join(root, RECOVERY_LOCK);
     const record: LockRecord = {
       schemaVersion: 1,
@@ -744,11 +760,11 @@ export class UpdateLock {
       } catch {
         throw new LockFailure("cannot verify stale recovery lock boot identity");
       }
-      if (existing.owner.bootIdentity !== currentBoot.value)
+      if (existing.owner.bootIdentity !== currentBoot.value && !options.operatorAuthority)
         throw new LockFailure("stale recovery owner boot identity differs");
       let alive: boolean;
       try {
-        alive = await provider.isProcessAlive(
+        alive = existing.owner.bootIdentity !== currentBoot.value ? false : await provider.isProcessAlive(
           existing.owner.pid,
           existing.owner.processCreatedAt,
         );
@@ -788,6 +804,7 @@ export class UpdateLock {
       record,
       guard,
       options.servicePort,
+      options.operatorAuthority,
     );
     } catch (error) { await guard.release(); throw error; }
   }

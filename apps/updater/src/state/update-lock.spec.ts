@@ -107,6 +107,16 @@ async function prepareHandoff(
 }
 
 describe("UpdateLock", () => {
+  it('retains a valid checksum across repeated owner heartbeats and release',async()=>{
+    const temp=await createTempRoot();
+    try {
+      const provider=new TestIdentityProvider();const journal=await makeJournal(temp.path);
+      const lock=await UpdateLock.acquire(temp.path,owner('attempt-01',provider.boot,100,'created-old'),{journal,identityProvider:provider});
+      await lock.heartbeat();await lock.assertActive();
+      await lock.heartbeat();await lock.assertActive();
+      await lock.release();
+    }finally{await temp.cleanup();}
+  });
   const handles: Array<{ release(): Promise<void> }> = [];
   const acquireRecovery = UpdateLock.acquireRecovery.bind(UpdateLock);
   beforeEach(() => { jest.spyOn(UpdateLock, "acquireRecovery").mockImplementation(async (...args) => { const handle = await acquireRecovery(...args); handles.push(handle); return handle; }); });

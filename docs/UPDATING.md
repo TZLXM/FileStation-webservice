@@ -192,17 +192,45 @@ Direct CLI launch from a different cwd fails before loading the server. A missin
 managed metadata file, changed canonical target (including an ancestor junction),
 active/pending update, torn journal tail or unresolved staging marker also fails
 closed. A completed update must agree with the journal's COMMITTED target version
-and current release. `status` and `recover` inspect the journal without creating
-or protecting directories.
+and current release. `status` inspects the journal without creating or protecting
+directories. A terminal rollback must match its explicitly selected previous release.
 
 Use `--dry-run` on `bootstrap` or `launch` to inspect validation without
 creating directories or opening the database. `filestation-updater status
 --root <root>` reads the existing journal contract. The updater process starts
 automatically as `continue --attempt <id>` with its private capability delivered
 on inherited stdin; never place that capability in argv, environment variables,
-URLs, logs or status files. Ambiguous active states, including states requiring
-an operator proof that is unavailable to this CLI, still fail closed. Do not edit
-or truncate journal files by hand.
+URLs, logs or status files. Runtime service configuration also travels privately
+on that pipe, including service-only production mode, JWT secret and port.
+
+For an interrupted attempt, run `status`, record its exact attempt ID and fence,
+then use the installation owner account (or an administrator on Windows):
+
+```text
+node updater/dist/cli.js recover --root <managed-root> --attempt <id> --expected-fence <fence>
+```
+
+Recovery verifies the installation's private OS ownership/permissions before
+acquiring its recovery OS guard. A live or unprovable prior writer still refuses
+recovery. Before COMMITTED it restores the snapshot when needed, deliberately
+selects the previous release and restarts it. After COMMITTED it starts only the
+new release and verifies a fresh process identity, running version and database
+health through inherited IPC before retention. A generic public HTTP 200 cannot
+satisfy this proof. Service-mode installations must invoke recovery with the
+same protected service configuration; secrets are never accepted as argv.
+Unknown/corrupt states remain fail closed. Do not delete lock/status markers or
+edit/truncate the journal to bypass recovery.
+
+The latest failed diagnostic set requires an exact-ID administrator acknowledgment:
+
+```text
+node updater/dist/cli.js cleanup --acknowledge-diagnostic <exact-id> --root <managed-root> --attempt <id> --expected-fence <fence>
+```
+
+This records permission for a later verified retention pass to remove that set.
+Two other diagnostic sets are retained. Current/previous releases, metadata
+references, active/unique snapshots and the latest pre-update snapshot remain
+protected; ordinary retention does not delete bootstrap environment/source backups.
 
 After a committed update has passed the independent restart check, remove the
 bootstrap-only recovery copies for one exact identifier with:

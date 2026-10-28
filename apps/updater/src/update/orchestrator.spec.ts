@@ -66,6 +66,12 @@ function hooks(
 }
 
 describe("UpdateOrchestrator recovery policy", () => {
+  it.each(['PREPARED','MAINTENANCE','SNAPSHOT_READY','OLD_STOPPED','CURRENT_SWITCHED','MIGRATING','READY_TO_COMMIT','ROLLBACK_INTENT'] as const)('dispatches initial %s into real recovery rather than waiting for handoff',async phase=>{
+    const value=hooks(snapshot(phase)); value.inspect=async()=>snapshot(phase);
+    await new UpdateOrchestrator(value).run(attempt);
+    expect(value.waitForHandoff).not.toHaveBeenCalled();
+    expect(value.rollback).toHaveBeenCalled();
+  });
   it.each([
     ["PREPARED", "restart-old"],
     ["MAINTENANCE", "restart-old"],
@@ -100,4 +106,30 @@ describe("UpdateOrchestrator recovery policy", () => {
     expect(value.rollback).not.toHaveBeenCalled();
     expect(value.restartCommitted).toHaveBeenCalledTimes(1);
   });
+});
+
+describe('identity bound termination',()=>{
+ it('does not allow replacement or DB work between SIGKILL and proven exit',async()=>{
+   const {stopServer}=await import('./orchestrator');
+   const {EventEmitter}=await import('node:events');
+   let live=true;
+   const child=Object.assign(new EventEmitter(),{pid:12345,exitCode:null,signalCode:null,kill:jest.fn(()=>true)});
+   const server={child,baseUrl:'http://fixture',stage:'validate',stopped:false,processCreatedAt:'fixture-created'};
+   const identity={isProcessAlive:async()=>live};
+   const stopping=stopServer(server as never,identity as never,10);
+   let progressed=false; void stopping.then(()=>{progressed=true;},()=>{});
+   await new Promise(r=>setTimeout(r,15));
+   expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+   expect(server.stopped).toBe(false); expect(progressed).toBe(false);
+   live=false; child.emit('exit',null,'SIGKILL');
+   await stopping; expect(server.stopped).toBe(true);
+ });
+ it('fails closed when SIGKILL never establishes exit',async()=>{
+   const {stopServer}=await import('./orchestrator');
+   const {EventEmitter}=await import('node:events');
+   const child=Object.assign(new EventEmitter(),{pid:12345,exitCode:null,signalCode:null,kill:()=>false});
+   const server={child,stage:'validate',stopped:false,processCreatedAt:'fixture'};
+   await expect(stopServer(server as never,{isProcessAlive:async()=>true} as never,5)).rejects.toThrow(/exit|stop/i);
+   expect(server.stopped).toBe(false);
+ });
 });

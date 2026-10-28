@@ -10,7 +10,7 @@ import {
   NodeDurableFileSystem,
 } from "../platform/durable-fs";
 
-export type RollbackCrashPoint = "after-diagnostic-intent";
+export type RollbackCrashPoint = "after-diagnostic-intent" | "after-move-db" | "after-move-wal" | "after-move-shm" | "after-move-journal" | "before-publication" | "after-publication";
 
 export interface UpdateRollbackOptions {
   crashAt?: RollbackCrashPoint;
@@ -98,15 +98,20 @@ export class UpdateRollbackService {
       throw new Error(`pending action ${current.pending.action} must recover first`);
     }
 
-    const token = createHash("sha256")
+    let token = createHash("sha256")
       .update(`${input.attemptId}:${input.fence}`)
       .digest("hex")
       .slice(0, 24);
-    const diagnosticDirectory = path.join(
+    let diagnosticDirectory = path.join(
       path.dirname(snapshotPath),
       "diagnostics",
       `${input.attemptId}-${input.fence}`,
     );
+    if(current.pending?.action==='rollback-database') {
+      const previous=object(current.pending.payload);
+      if(typeof previous.diagnosticDirectory!=='string' || typeof previous.restoreTag!=='string' || !within(path.dirname(snapshotPath),previous.diagnosticDirectory) || !/^[a-f0-9]{24}$/.test(previous.restoreTag)) throw new Error('pending rollback diagnostic identity malformed');
+      diagnosticDirectory=previous.diagnosticDirectory; token=previous.restoreTag;
+    }
     const payload = {
       databasePath,
       snapshotPath,
@@ -155,6 +160,23 @@ export class UpdateRollbackService {
       throw new Error("verified rollback snapshot hash changed");
     }
 
+    const complete = async (): Promise<RestoreDatabaseResult> => {
+      await input.journal.appendCompletion({ attemptId: input.attemptId, fence: input.fence, intentId: intentId!, phase: "ROLLBACK_INTENT", result: { diagnosticDirectory, snapshotPath, restored: true } });
+      return { state: "restored", diagnosticDirectory, snapshotPath };
+    };
+    const manifestPath = path.join(diagnosticDirectory, "manifest.json");
+    // Detached evidence is durable before publication. Never detach a published
+    // restore a second time into the original failed database's diagnostic set.
+    if (await this.fs.exists(manifestPath) && await this.fs.exists(databasePath)) {
+      const manifest = JSON.parse((await this.fs.readFile(manifestPath)).toString("utf8"));
+      if (manifest.attemptId !== input.attemptId || manifest.snapshotSha256 !== expectedHash || !manifest.detached)
+        throw new Error("restore publication manifest mismatched");
+      if (sha256(await readFile(databasePath)) !== expectedHash)
+        throw new Error("restored database publication hash mismatched");
+      for (const suffix of ["-wal", "-shm", "-journal"])
+        if (await this.fs.exists(databasePath + suffix)) throw new Error("restored publication has live sidecars");
+      return complete();
+    }
     await this.fs.ensurePrivateDirectory(diagnosticDirectory);
     const sidecars = ["", "-wal", "-shm", "-journal"] as const;
     for (const suffix of sidecars) {
@@ -168,6 +190,8 @@ export class UpdateRollbackService {
           throw new Error("rollback diagnostics already contain both source and target");
         }
         await this.fs.rename(source, target, { replace: false });
+        const point = `after-move-${suffix ? suffix.slice(1) : "db"}` as RollbackCrashPoint;
+        if (this.options.crashAt === point) throw new InjectedRollbackCrash(point);
       }
     }
     await this.fs.writeAtomic(
@@ -175,6 +199,9 @@ export class UpdateRollbackService {
       Buffer.from(
         `${JSON.stringify({
           schemaVersion: 1,
+          detached: true,
+          snapshotSha256: expectedHash,
+          releaseReferences: current.records.filter(r => r.kind === "intent" && ["attach-current", "replace-current"].includes(r.action ?? "")).map(r => r.payload),
           attemptId: input.attemptId,
           fence: input.fence,
           createdAt: this.now().toISOString(),
@@ -195,20 +222,11 @@ export class UpdateRollbackService {
     if (await this.fs.exists(databasePath)) {
       throw new Error("rollback database sidecar set was not fully detached");
     }
+    if (this.options.crashAt === "before-publication") throw new InjectedRollbackCrash("before-publication");
     await this.fs.rename(restorePath, databasePath, { replace: false });
     await this.fs.fsyncDirectory(path.dirname(databasePath));
 
-    await input.journal.appendCompletion({
-      attemptId: input.attemptId,
-      fence: input.fence,
-      intentId,
-      phase: "ROLLBACK_INTENT",
-      result: {
-        diagnosticDirectory,
-        snapshotPath,
-        restored: true,
-      },
-    });
-    return { state: "restored", diagnosticDirectory, snapshotPath };
+    if (this.options.crashAt === "after-publication") throw new InjectedRollbackCrash("after-publication");
+    return complete();
   }
 }

@@ -15,6 +15,12 @@ function childFixture() {
 describe('AnonymousPipeHandoffSpawner', () => {
   it('delivers the inherited authority only through anonymous stdin', async () => {
     const { child, stdin } = childFixture();
+    const deliveredPromise = new Promise<Buffer>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      stdin.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      stdin.on('end', () => resolve(Buffer.concat(chunks)));
+      stdin.on('error', reject);
+    });
     const spawn = jest.fn(() => child);
     const channel = { close: jest.fn(async () => undefined) };
     const root = path.resolve('/fixture/install');
@@ -57,12 +63,7 @@ describe('AnonymousPipeHandoffSpawner', () => {
     expect(serialized).not.toContain('fixture\\"}');
     expect(serialized).not.toContain(capability.toString('utf8'));
 
-    const delivered = await new Promise<Buffer>((resolve, reject) => {
-      const chunks: Buffer[] = [];
-      stdin.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
-      stdin.on('end', () => resolve(Buffer.concat(chunks)));
-      stdin.on('error', reject);
-    });
+    const delivered = await deliveredPromise;
     expect(delivered).toEqual(capability);
     expect(channel.close).toHaveBeenCalledTimes(1);
   });
@@ -89,5 +90,18 @@ describe('AnonymousPipeHandoffSpawner', () => {
       spawner.startWaiting(attempt, channel, Buffer.alloc(4097, 0x20)),
     ).rejects.toThrow(/capability|bounded/i);
     expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('transports service-only production configuration privately with the capability', async () => {
+    const {child,stdin}=childFixture();
+    const chunks:Buffer[]=[]; stdin.on('data',chunk=>chunks.push(Buffer.from(chunk)));
+    const spawn=jest.fn(()=>child);
+    const spawner=new AnonymousPipeHandoffSpawner({spawn:spawn as never,environment:{PATH:'fixture',NODE_ENV:'production',JWT_SECRET:'synthetic-service-secret',FILESTATION_PORT:'19371',UNRELATED_SECRET:'excluded'}});
+    const capability=Buffer.from('{"schemaVersion":1,"key":"fixture"}\n');
+    await spawner.startWaiting({attemptId:'service-attempt',fence:1,installRoot:path.resolve('/fixture/install'),backupId:'backup',targetVersion:'0.2.5'}, {close:async()=>{}}, capability);
+    const envelope=JSON.parse(Buffer.concat(chunks).toString());
+    expect(envelope.runtime).toEqual({NODE_ENV:'production',JWT_SECRET:'synthetic-service-secret',FILESTATION_PORT:'19371'});
+    expect(JSON.stringify(spawn.mock.calls)).not.toContain('synthetic-service-secret');
+    expect(envelope.runtime.UNRELATED_SECRET).toBeUndefined();
   });
 });
