@@ -235,11 +235,13 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
   private handedOff = false;
   private readonly scheduled = new Set<string>();
   private accepting?: Promise<InstallAcceptance>;
+  private abandoning?: Promise<void>;
   private operationReservation?: UpdateOperationLease;
 
   async onModuleDestroy(): Promise<void> {
     this.stopped = true;
     await this.accepting?.catch(() => undefined);
+    await this.abandoning?.catch(() => undefined);
     // The durable owner record stays for manual/fenced recovery after restart.
     // An executor may call app.close(); its writer guard must survive that call.
     if (!this.handedOff) await this.ownership?.recoveryGuard.release();
@@ -266,6 +268,7 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
   ) {}
 
   async reserveInstall(reauthenticate: () => Promise<void>): Promise<UpdateOperationLease> {
+    await this.abandoning;
     if (!this.operations) {
       throw ioFailure(
         'UPDATE_OPERATION_IN_PROGRESS',
@@ -303,6 +306,7 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
     receipt: PreparedUpdateReceipt,
     reservation?: UpdateOperationLease,
   ): Promise<InstallAcceptance> {
+    await this.abandoning;
     if (
       this.changing || this.stopped ||
       (this.ownership && !this.abandonedAttempts.has(this.ownership.attemptId))
@@ -516,11 +520,49 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
       finished = true;
     });
     response.once('close', () => {
-      if (!finished) this.abandonedAttempts.add(attempt.attemptId);
+      if (!finished) {
+        void this.abandonPrepared(attempt).catch(() => {
+          this.logger.warn('abandoned update reservation retained; ownership could not be proven');
+        });
+      }
     });
     void this.runAfterResponse(attempt, response).catch(() => {
       this.logger.warn('update install handoff failed closed');
     });
+  }
+
+  private abandonPrepared(attempt: MaintenanceAttempt): Promise<void> {
+    if (
+      this.stopped || this.handedOff || !this.barrier.accepting ||
+      this.ownership?.attemptId !== attempt.attemptId ||
+      this.ownership.lock.fence !== attempt.fence
+    ) return Promise.resolve();
+
+    // Block a late finish immediately. Retirement only frees allocation for a
+    // fresh prepare; the old journal/recovery writer authority stays retained.
+    this.abandonedAttempts.add(attempt.attemptId);
+    const pending = this.retirePreparedReservation(attempt);
+    this.abandoning = pending;
+    return pending;
+  }
+
+  private async retirePreparedReservation(attempt: MaintenanceAttempt): Promise<void> {
+    const ownership = this.ownership;
+    const operation = this.operationReservation;
+    if (!ownership || !operation) return;
+    await ownership.recoveryGuard.assertActive();
+    await ownership.lock.assertActive();
+    const snapshot = await AttemptJournal.inspect(ownership.root);
+    await operation.assertActive();
+    if (
+      this.stopped || this.handedOff || !this.barrier.accepting ||
+      this.ownership !== ownership || this.operationReservation !== operation ||
+      snapshot.attemptId !== attempt.attemptId || snapshot.fence !== attempt.fence ||
+      snapshot.phase !== 'PREPARED' || snapshot.pending
+    ) throw new Error('pre-maintenance abandonment is not proven');
+
+    await operation.release();
+    this.operationReservation = undefined;
   }
 
   private async runAfterResponse(
@@ -548,7 +590,7 @@ export class UpdateInstallCoordinator implements OnModuleDestroy {
         await this.executor.assertAvailable();
       } catch {
         this.handedOff = false;
-        this.abandonedAttempts.add(attempt.attemptId);
+        await this.abandonPrepared(attempt);
         await this.audit.record({
           accountId: null,
           action: AuditAction.UPDATE_FAILED,
