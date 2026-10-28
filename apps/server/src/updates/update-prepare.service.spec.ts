@@ -131,7 +131,13 @@ describe('UpdatePrepareService', () => {
 
     expect(events).toEqual(['preflight', 'download']);
     expect(Object.isFrozen(receipt)).toBe(true);
+    expect(Object.isFrozen(receipt.space_budget)).toBe(true);
     expect(receipt).toEqual({
+      space_budget: {
+        database_migration: candidate.manifest.database_migration,
+        migration_workspace_multiplier: candidate.manifest.migration_workspace_multiplier,
+        migration_workspace_min_bytes: candidate.manifest.migration_workspace_min_bytes,
+      },
       prepared_id: '123e4567-e89b-42d3-a456-426614174000',
       manifest_sha256: candidate.manifest_sha256,
       artifact_sha256: candidate.artifact.sha256,

@@ -210,6 +210,11 @@ export class UpdatePrepareService implements OnModuleDestroy {
         (this.config.get<number>('app.updatePreparedTtlMs') ??
           DEFAULT_PREPARED_TTL_MS);
       const receipt: PreparedUpdateReceipt = Object.freeze({
+        space_budget: Object.freeze({
+          database_migration: candidate.manifest.database_migration,
+          migration_workspace_multiplier: candidate.manifest.migration_workspace_multiplier,
+          migration_workspace_min_bytes: candidate.manifest.migration_workspace_min_bytes,
+        }),
         prepared_id: preparedId,
         manifest_sha256: candidate.manifest_sha256,
         artifact_sha256: candidate.artifact.sha256,

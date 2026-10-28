@@ -1015,7 +1015,7 @@ test("shared protocol exports and CI release-tool test wiring are present", asyn
   );
   assert.match(
     workflow,
-    /^        run: node --test scripts\/release\/release-tools\.test\.mjs\r?$/m,
+    /^        run: node --test scripts\/release\/release-tools\.test\.mjs scripts\/release\/resolve-candidate\.test\.mjs\r?$/m,
   );
 });
 
@@ -1170,11 +1170,11 @@ test("candidate and tag workflows bind exact source and run final platform integ
   assert.match(candidate, /default:\s*0\.2\.5/);
   assert.match(
     candidate,
-    /ref:\s*\$\{\{\s*github\.event\.pull_request\.head\.sha\s*\|\|\s*inputs\.source_commit\s*\|\|\s*github\.sha\s*\}\}/,
+    /ref:\s*\$\{\{\s*github\.event\.pull_request\.head\.sha\s*\|\|\s*github\.sha\s*\}\}/,
   );
   assert.match(
     candidate,
-    /RUN_SOURCE:\s*\$\{\{\s*github\.event\.pull_request\.head\.sha\s*\|\|\s*inputs\.source_commit\s*\|\|\s*github\.sha\s*\}\}/,
+    /RUN_SOURCE:\s*\$\{\{\s*github\.event\.pull_request\.head\.sha\s*\|\|\s*github\.sha\s*\}\}/,
   );
   assert.match(
     release,

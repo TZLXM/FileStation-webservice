@@ -35,6 +35,8 @@ async function main() {
   const servicePort =
     portIndex >= 0 ? Number(process.argv[portIndex + 1]) : undefined;
   const recovery = process.argv.includes("--recovery");
+  let handoffIdentity = '';
+  for await (const chunk of process.stdin) handoffIdentity += chunk.toString('utf8');
   if (
     !root ||
     !attemptId ||
@@ -53,14 +55,14 @@ async function main() {
     );
   }
   const orchestrator = createManagedUpdateOrchestrator({
-    handoffIdentity: recovery ? "" : "fixture-handoff",
+    handoffIdentity: recovery ? "" : handoffIdentity,
     fs: new CrashFileSystem(),
     operatorAuthority,
   });
   const result = await orchestrator.run({
     attemptId,
     installRoot: path.resolve(root),
-    handoffIdentity: recovery ? "" : "fixture-handoff",
+    handoffIdentity: recovery ? "" : handoffIdentity,
     servicePort,
     timeoutMs: 4_000,
     recovery,

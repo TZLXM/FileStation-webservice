@@ -123,7 +123,7 @@ describe('DatabaseSnapshotService', () => {
       await syncParent(directory);
     });
     if (failure === 'drain') jest.spyOn(barrier, 'waitForZero').mockRejectedValueOnce(new Error('drain deadline'));
-    const config = {get:(key:string) => key === 'app.dbPath' ? databasePath : key === 'app.updateJournalRoot' ? root : undefined} as ConfigService;
+    const config = {get:(key:string) => key === 'app.dbPath' ? databasePath : key === 'app.updateJournalRoot' ? root :key==='app.storagePath'?path.join(root,'storage'):key==='app.tempPath'?path.join(root,'temp'):undefined} as ConfigService;
     const capability = {inspect:async()=>({mode:'managed', supported:true, install_root:root, platform: process.platform === 'win32' ? 'windows-x64' : 'linux-x64'})} as UpdateCapabilityService;
     const snapshot = new DatabaseSnapshotService(dataSource, config, barrier, freeze, durable);
     const frozen = jest.spyOn(snapshot, 'freezeSourceDatabase');
@@ -132,12 +132,12 @@ describe('DatabaseSnapshotService', () => {
       frozen.mockImplementation(async attempt => { await freezeSource(attempt); throw new Error('partially frozen'); });
     }
     const close = jest.fn(async()=>{throw new Error('partial close');}); const spawn = jest.fn();
-    const executor = new HandoffUpdateInstallExecutor(config, capability, snapshot, barrier, {close} as unknown as ApplicationShutdownService, {startWaiting:spawn});
+    const executor = new HandoffUpdateInstallExecutor(config, capability, snapshot, barrier, {close} as unknown as ApplicationShutdownService, {startWaiting:spawn}, new UpdateSpacePreflightService(dataSource, config, {resolveVolumeId:async()=> 'fixture-volume',readAvailableBytes:async()=>1024**4}));
     const execute=executor.execute.bind(executor);let executed=false;
     jest.spyOn(executor,'execute').mockImplementation(async context=>{try{await execute(context);}finally{executed=true;}});
     const identity = {current:async()=>({provider:'windows-cim' as const,value:'fixture-boot'}),processCreatedAt:async()=> 'fixture-created',isProcessAlive:async()=>true};
     const coordinator = new UpdateInstallCoordinator(config, barrier, capability, {record:jest.fn()} as unknown as AuditService, executor, identity, Date.now, '0.2.0', randomUUID);
-    const receipt = Object.freeze({prepared_id:randomUUID(),manifest_sha256:'a'.repeat(64),artifact_sha256:'b'.repeat(64),version:'0.2.5', platform:process.platform === 'win32' ? 'windows-x64' : 'linux-x64',arch:'x64',staging_path:await import('node:fs/promises').then(fs=>fs.realpath(staging)),verified_size:1,unpacked_size:1,expires_at:Date.now()+60000});
+    const receipt = Object.freeze({space_budget:Object.freeze({database_migration:false,migration_workspace_multiplier:0,migration_workspace_min_bytes:0}),prepared_id:randomUUID(),manifest_sha256:'a'.repeat(64),artifact_sha256:'b'.repeat(64),version:'0.2.5', platform:process.platform === 'win32' ? 'windows-x64' : 'linux-x64',arch:'x64',staging_path:await import('node:fs/promises').then(fs=>fs.realpath(staging)),verified_size:1,unpacked_size:1,expires_at:Date.now()+60000});
     try {
       const accepted = await coordinator.accept(receipt);
       const response = new EventEmitter() as Response;
@@ -373,3 +373,4 @@ describe('DatabaseSnapshotService', () => {
     ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });
+import { UpdateSpacePreflightService } from './update-space-preflight.service';

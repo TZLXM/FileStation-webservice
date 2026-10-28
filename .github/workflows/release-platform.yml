@@ -75,7 +75,7 @@ jobs:
         run: npm ci --no-audit --no-fund
 
       - name: Run release-tool tests
-        run: node --test scripts/release/release-tools.test.mjs
+        run: node --test scripts/release/release-tools.test.mjs scripts/release/resolve-candidate.test.mjs
 
       - name: Build application
         run: npm run build

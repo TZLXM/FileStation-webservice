@@ -63,6 +63,12 @@ export interface UpdateCheckView extends UpdateStatusResponse {
 }
 
 export interface PreparedUpdateReceipt {
+  /** Retained signed sizing facts for the drained, pre-snapshot recheck. */
+  readonly space_budget?: Readonly<{
+    database_migration: boolean;
+    migration_workspace_multiplier: number;
+    migration_workspace_min_bytes: number;
+  }>;
   readonly prepared_id: string;
   readonly manifest_sha256: string;
   readonly artifact_sha256: string;

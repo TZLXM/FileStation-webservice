@@ -96,19 +96,19 @@ describe('UpdateAuditReconciler', () => {
     });
     const reconciler = new UpdateAuditReconciler(db,barrier);
     const staging=path.join(root,'.filestation-update-staging','fixture','payload');await mkdir(staging,{recursive:true});
-    const config={get:(key:string)=>key==='app.dbPath'?databasePath:key==='app.updateJournalRoot'?root:undefined} as ConfigService;
+    const config={get:(key:string)=>key==='app.dbPath'?databasePath:key==='app.updateJournalRoot'?root:key==='app.storagePath'?path.join(root,'storage'):key==='app.tempPath'?path.join(root,'temp'):undefined} as ConfigService;
     const capability={inspect:async()=>({mode:'managed',supported:true,install_root:root,platform:process.platform==='win32'?'windows-x64':'linux-x64'})} as UpdateCapabilityService;
     const durable=new NodeDurableFileSystem();
     jest.spyOn(durable,'syncFile').mockRejectedValue(new Error('end fixture before freeze'));
     const snapshot=new DatabaseSnapshotService(db,config,barrier,freeze,durable);
     const capture=jest.spyOn(snapshot,'createVerifiedSnapshot');
-    const executor=new HandoffUpdateInstallExecutor(config,capability,snapshot,barrier,{close:jest.fn()} as unknown as ApplicationShutdownService,{startWaiting:jest.fn()});
+    const executor=new HandoffUpdateInstallExecutor(config,capability,snapshot,barrier,{close:jest.fn()} as unknown as ApplicationShutdownService,{startWaiting:jest.fn()}, new UpdateSpacePreflightService(db, config, {resolveVolumeId:async()=> 'fixture-volume',readAvailableBytes:async()=>1024**4}));
     const coordinator=new UpdateInstallCoordinator(config,barrier,capability,{record:jest.fn()} as unknown as AuditService,executor,{current:async()=>({provider:'windows-cim',value:'fixture'}),processCreatedAt:async()=> 'fixture-created',isProcessAlive:async()=>true},Date.now,'0.2.5',randomUUID);
     const replay = reconciler.reconcile(root);
     try {
       await paused;
       expect(barrier.activeLeaseCount).toBe(1);
-      const next=await coordinator.accept(Object.freeze({prepared_id:randomUUID(),manifest_sha256:'a'.repeat(64),artifact_sha256:'b'.repeat(64),version:'0.2.6',platform:process.platform==='win32'?'windows-x64':'linux-x64',arch:'x64',staging_path:await realpath(staging),verified_size:1,unpacked_size:1,expires_at:Date.now()+60000}));
+      const next=await coordinator.accept(Object.freeze({space_budget:Object.freeze({database_migration:false,migration_workspace_multiplier:0,migration_workspace_min_bytes:0}),prepared_id:randomUUID(),manifest_sha256:'a'.repeat(64),artifact_sha256:'b'.repeat(64),version:'0.2.6',platform:process.platform==='win32'?'windows-x64':'linux-x64',arch:'x64',staging_path:await realpath(staging),verified_size:1,unpacked_size:1,expires_at:Date.now()+60000}));
       const response=new EventEmitter() as Response;
       const http=await barrier.acquire('http');
       const state=registerMaintenanceRequestLease({} as any,response,http);state.handlerStarted=true;state.handlerDone=true;
@@ -195,3 +195,4 @@ describe('UpdateAuditReconciler', () => {
     expect(JSON.stringify(query.mock.calls)).not.toContain('capability');
   });
 });
+import { UpdateSpacePreflightService } from './update-space-preflight.service';

@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   OnModuleDestroy,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { lstat, realpath } from 'node:fs/promises';
@@ -26,6 +27,7 @@ import { MaintenanceAttempt } from '../maintenance/write-freeze.service';
 import { UpdateCapabilityService } from './update-capability.service';
 import { ApplicationShutdownService } from './application-shutdown.service';
 import { DatabaseSnapshotService } from './database-snapshot.service';
+import { UpdateSpacePreflightService } from './update-space-preflight.service';
 import { HANDOFF_SPAWNER, HandoffSpawner } from './handoff-spawner';
 import { HandoffProgress, ShutdownCoordinator } from './shutdown-coordinator';
 import {
@@ -108,6 +110,7 @@ export class HandoffUpdateInstallExecutor
     private readonly shutdown: ApplicationShutdownService,
     @Inject(HANDOFF_SPAWNER)
     private readonly spawner: HandoffSpawner,
+    @Optional() private readonly space?: UpdateSpacePreflightService,
   ) {}
 
   async assertAvailable(): Promise<void> {
@@ -173,7 +176,16 @@ export class HandoffUpdateInstallExecutor
         journalRoot: attempt.installRoot,
         journal: execution.ownership.journal,
         barrier: this.barrier,
-        snapshot: this.snapshot,
+        snapshot: {
+          createVerifiedSnapshot: async (ownedAttempt) => {
+            // ShutdownCoordinator has closed admission and drained counted
+            // writers. Measure live DB/WAL/SHM now, before VACUUM or freeze.
+            if (!this.space) throw new Error('Update space preflight is unavailable');
+            await this.space.assertPreparedSufficient(attempt.installRoot, execution.receipt);
+            return this.snapshot.createVerifiedSnapshot(ownedAttempt);
+          },
+          freezeSourceDatabase: (ownedAttempt) => this.snapshot.freezeSourceDatabase(ownedAttempt),
+        },
         spawner: this.spawner,
         channel: { close: async () => undefined },
         handoffCapability: inheritedCapability,

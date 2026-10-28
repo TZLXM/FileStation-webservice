@@ -1,9 +1,7 @@
 import { ChildProcess, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
   chmod,
-  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -19,18 +17,12 @@ import sqlite3 = require("sqlite3");
 import { AttemptJournal } from "../src/state/attempt-journal";
 import { PlatformBootIdentityProvider } from "../src/state/boot-identity";
 import { NodeDurableFileSystem } from "../src/platform/durable-fs";
-import { UpdateLock } from "../src/state/update-lock";
-import {
-  planRequiredSpace,
-  recheckRequiredSpace,
-  VolumeManifest,
-} from "../src/platform/volume-space";
+import { stopDetachedChild, DetachedIdentity } from './fixtures/cleanup-process';
 
 jest.setTimeout(120_000);
 
 const identity = new PlatformBootIdentityProvider();
 const durable = new NodeDurableFileSystem();
-const sourceRoot = path.resolve(__dirname, "../..");
 const fixtureRoot = path.resolve(__dirname, "fixtures");
 const compiledRoot = path.resolve(__dirname, "../dist");
 const sqliteModulePath = require.resolve("sqlite3");
@@ -46,10 +38,6 @@ const durableFsModulePath = path.join(
   compiledRoot,
   "platform/durable-fs.js",
 );
-const recoveryGuardModulePath = path.join(
-  compiledRoot,
-  "platform/recovery-guard.js",
-);
 const orchestratorModulePath = path.join(
   compiledRoot,
   "update/orchestrator.js",
@@ -59,10 +47,6 @@ const operatorAuthorityModulePath = path.join(
   "update/operator-authority.js",
 );
 const cliModulePath = path.join(compiledRoot, "cli.js");
-const bootstrapSnapshotModulePath = path.resolve(
-  __dirname,
-  "../../server/dist/bootstrap/bootstrap-snapshot.js",
-);
 
 interface SnapshotFixture {
   root: string;
@@ -76,11 +60,10 @@ interface SnapshotFixture {
   stagingRelease: string;
   oldWriter: ChildProcess;
   journal: AttemptJournal;
+  handoffIdentity: string;
+  evidence?: Record<string, any>;
 }
 
-function createHashHex(bytes: Buffer | string): string {
-  return createHash("sha256").update(bytes).digest("hex");
-}
 
 async function allocatePort(): Promise<number> {
   const server = net.createServer();
@@ -119,34 +102,23 @@ async function waitForExit(
   return { code: child.exitCode, signal: child.signalCode };
 }
 
-async function sendMessage(
-  child: ChildProcess,
-  command: string,
-  event: string,
-): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const receive = (message: { event?: string; error?: string }) => {
-        child.off("message", receive);
-        if (message.error) reject(new Error(message.error));
-        else if (message.event === event) resolve();
-        else {
-          child.once("message", receive);
-        }
-      };
-      child.once("message", receive);
-      timer = setTimeout(() => {
-        child.off("message", receive);
-        reject(new Error(`old writer did not acknowledge ${command}`));
-      }, 10_000);
-      child.send?.(command);
-    });
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+function messageEvent(child: ChildProcess, event: string): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => finish(new Error(`old writer did not emit ${event}`)), 30_000);
+    const receive = (message: Record<string, unknown>) => {
+      if (message.error) finish(new Error(String(message.error)));
+      else if (message.event === event) { clearTimeout(timer); child.off('message', receive); resolve(message); }
+    };
+    const finish = (error: Error) => { clearTimeout(timer); child.off('message', receive); reject(error); };
+    child.on('message', receive);
+  });
 }
 
+async function sendMessage(child: ChildProcess, command: string, event: string): Promise<Record<string, unknown>> {
+  const result = messageEvent(child, event);
+  child.send(command);
+  return result;
+}
 async function waitForReady(
   child: ChildProcess,
   getErrors: () => string = () => "",
@@ -238,7 +210,7 @@ async function installRelease(
 }
 
 async function createFixture(
-  options: { holdOldProcess?: boolean } = {},
+  options: { holdOldProcess?: boolean; diskFull?: boolean } = {},
 ): Promise<SnapshotFixture> {
   const root = await realpath(
     await mkdtemp(path.join(tmpdir(), "filestation-update-flow-")),
@@ -287,8 +259,10 @@ async function createFixture(
   );
   const oldWriterFixture = path.join(root, "old-writer.cjs");
   await writeTemplate("old-writer.cjs", oldWriterFixture, {
-    __SQLITE3_PATH__: JSON.stringify(sqliteModulePath),
-    __RECOVERY_GUARD_PATH__: JSON.stringify(recoveryGuardModulePath),
+    __TYPEORM_PATH__: JSON.stringify(require.resolve('typeorm')),
+    __SERVER_DIST__: JSON.stringify(path.resolve(__dirname, '../../server/dist')),
+    __UPDATER_DIST__: JSON.stringify(compiledRoot),
+    __PACKAGER_URL__: JSON.stringify(require('node:url').pathToFileURL(path.resolve(__dirname, '../../../scripts/release/package-artifact.mjs')).href),
   });
 
   const env = [
@@ -332,193 +306,74 @@ async function createFixture(
       oldWriterFixture,
       root,
       database,
+      ...(options.diskFull ? ['--disk-full'] : []),
+      ...(options.holdOldProcess ? ['--hold-old'] : []),
     ],
     {
       cwd: root,
       env: { ...process.env },
-      stdio: ["ignore", "ignore", "pipe", "ipc"],
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
       windowsHide: true,
     },
   );
   let writerErrors = "";
+  oldWriter.stdout?.resume();
   oldWriter.stderr?.on("data", (chunk) => {
     writerErrors += chunk.toString("utf8");
   });
-  await waitForReady(oldWriter, () => writerErrors);
-  const processCreatedAt = await identity.processCreatedAt(oldWriter.pid!);
-  const boot = await identity.current();
-  const journal = await AttemptJournal.open(root);
-  const lock = await UpdateLock.acquire(
-    root,
-    {
+  try {
+    await waitForReady(oldWriter, () => writerErrors);
+    const journal = await AttemptJournal.open(root);
+    const maintenance = await sendMessage(oldWriter, 'install', 'maintenance');
+    expect(maintenance).toMatchObject({ active: 1, accepting: false });
+    const blocked = await sendMessage(oldWriter, 'probe', 'blocked');
+    expect(blocked).toMatchObject({ active: 1, admissionRejected: true, snapshots: 0, freezes: 0 });
+    await expect(stat(path.join(root, 'backups/update-backup-01/update-snapshot.sqlite'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const failure = options.diskFull ? messageEvent(oldWriter, 'failed') : undefined;
+    const handoff = !options.diskFull ? messageEvent(oldWriter, 'handoff') : undefined;
+    await sendMessage(oldWriter, 'release', 'released');
+    let handoffIdentity = '';
+    if (failure) {
+      await failure;
+    } else {
+      handoffIdentity = String((await handoff!).identity);
+      if (!options.holdOldProcess) await waitForExit(oldWriter);
+    }
+    const state = await journal.readSnapshot();
+    const evidence = !options.holdOldProcess ? JSON.parse(await readFile(path.join(root, 'fixture-prehandoff.json'), 'utf8')) : undefined;
+    if (!options.diskFull && !options.holdOldProcess) {
+      expect(state.phase).toBe('HANDOFF_READY');
+      expect(evidence.events).toEqual(['maintenance', 'lease-write', 'lease-release', 'snapshot', 'freeze', 'spawn', 'close']);
+      expect(evidence).toMatchObject({ snapshotLeaseCount: 0, snapshotAccepting: false, frozenSqlRejected: true, frozenStorageRejected: true, closedConnection: true });
+      expect(evidence.walAfter).toBeGreaterThan(evidence.walBefore);
+      expect(evidence.snapshotWalBytes).toBeGreaterThanOrEqual(evidence.walAfter);
+      expect(await databaseQuery(path.join(root, 'backups/update-backup-01/update-snapshot.sqlite'), 'SELECT value FROM items')).toEqual([{ value: 'wal-before-update' }]);
+    }
+    const lock = { fence: state.fence! };
+    if (writerErrors) throw new Error(writerErrors);
+    return {
+      root,
+      database,
+      storage,
+      temp,
+      servicePort,
       attemptId,
-      bootIdentity: boot.value,
-      pid: oldWriter.pid!,
-      processCreatedAt,
-      heartbeatAt: new Date().toISOString(),
-      currentVersion: "0.2.5",
-      targetVersion: "0.2.6",
-      previousVersion: "0.2.5",
-      backupId: "backup-01",
-    },
-    { journal },
-  );
-
-  const prepare = await journal.appendIntent({
-    attemptId,
-    fence: lock.fence,
-    action: "prepare-update",
-    phase: "PREPARED",
-    payload: {
-      stagingPath: stagingRelease,
-      targetVersion: "0.2.6",
-      artifactSha256: "b".repeat(64),
-      manifestSha256: "c".repeat(64),
-      databasePath: database,
-    },
-  });
-  await journal.appendCompletion({
-    attemptId,
-    fence: lock.fence,
-    intentId: prepare.id,
-    phase: "PREPARED",
-  });
-  const maintenance = await journal.appendIntent({
-    attemptId,
-    fence: lock.fence,
-    action: "enter-maintenance",
-    phase: "MAINTENANCE",
-  });
-  await journal.appendCompletion({
-    attemptId,
-    fence: lock.fence,
-    intentId: maintenance.id,
-    phase: "MAINTENANCE",
-  });
-
-  await sendMessage(oldWriter, "write", "written");
-  const walPath = `${database}-wal`;
-  expect((await stat(walPath)).size).toBeGreaterThan(0);
-  await sendMessage(oldWriter, "drain", "drained");
-
-  const snapshotPath = path.join(
-    root,
-    "backups/backup-01/update-snapshot.sqlite",
-  );
-  const { createBootstrapSnapshot } = require(
-    bootstrapSnapshotModulePath,
-  ) as {
-    createBootstrapSnapshot(options: {
-      database: string;
-      output: string;
-    }): Promise<{
-      sourceIntegrity: "ok";
-      sourceForeignKeys: 0;
-      snapshotIntegrity: "ok";
-      snapshotForeignKeys: 0;
-    }>;
-  };
-  const snapshotVerification = await createBootstrapSnapshot({
-    database,
-    output: snapshotPath,
-  });
-  expect(snapshotVerification).toEqual({
-    sourceIntegrity: "ok",
-    sourceForeignKeys: 0,
-    snapshotIntegrity: "ok",
-    snapshotForeignKeys: 0,
-  });
-  expect(
-    await databaseQuery<{ value: string }>(
-      snapshotPath,
-      "SELECT value FROM items",
-    ),
-  ).toEqual([{ value: "wal-before-update" }]);
-  const snapshotBytes = await readFile(snapshotPath);
-  const snapshot = await stat(snapshotPath);
-  const snapshotIntent = await journal.appendIntent({
-    attemptId,
-    fence: lock.fence,
-    action: "snapshot-database",
-    phase: "SNAPSHOT_READY",
-    payload: {
-      path: snapshotPath,
-      sha256: createHashHex(snapshotBytes),
-      bytes: snapshot.size,
-      createdAt: new Date().toISOString(),
-      integrity: "ok",
-      foreignKeys: 0,
-    },
-  });
-  await journal.appendCompletion({
-    attemptId,
-    fence: lock.fence,
-    intentId: snapshotIntent.id,
-    phase: "SNAPSHOT_READY",
-  });
-
-  const current = await journal.readSnapshot();
-  const nextContext = {
-    ...structuredClone(current.records.at(-1)!.context),
-    phase: "MAINTENANCE" as const,
-    owner: {
-      ...structuredClone(current.records.at(-1)!.context.owner),
-      heartbeatAt: new Date().toISOString(),
-      handoffIdentityHash: createHashHex("fixture-handoff"),
-    },
-  };
-  const handoffIdentity = await journal.appendIntent({
-    attemptId,
-    fence: lock.fence,
-    action: "bind-handoff-identity",
-    phase: "MAINTENANCE",
-    payload: { identityHash: nextContext.owner.handoffIdentityHash },
-  });
-  await journal.appendCompletion({
-    attemptId,
-    fence: lock.fence,
-    intentId: handoffIdentity.id,
-    phase: "MAINTENANCE",
-    nextContext,
-  });
-  const closeIntent = await journal.appendIntent({
-    attemptId,
-    fence: lock.fence,
-    action: "close-application",
-    phase: "SNAPSHOT_READY",
-  });
-
-  if (!options.holdOldProcess) {
-    // The fixture proved the drain barrier before this forced exit. SIGKILL
-    // makes the old-process death proof explicit and releases the OS guard.
-    oldWriter.kill("SIGKILL");
-    await waitForExit(oldWriter);
+      attemptFence: lock.fence,
+      oldRelease,
+      stagingRelease,
+      oldWriter,
+      journal,
+      handoffIdentity,
+      evidence,
+    };
+  } catch (error) {
+    if (oldWriter.exitCode === null && oldWriter.signalCode === null) {
+      oldWriter.kill('SIGKILL');
+      await waitForExit(oldWriter).catch(() => undefined);
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    throw error;
   }
-  if (!options.holdOldProcess && oldWriter.exitCode === null) {
-    await waitForExit(oldWriter);
-  }
-  if (!options.holdOldProcess) {
-    await journal.appendCompletion({
-      attemptId,
-      fence: lock.fence,
-      intentId: closeIntent.id,
-      phase: "HANDOFF_READY",
-    });
-  }
-  if (writerErrors) throw new Error(writerErrors);
-  return {
-    root,
-    database,
-    storage,
-    temp,
-    servicePort,
-    attemptId,
-    attemptFence: lock.fence,
-    oldRelease,
-    stagingRelease,
-    oldWriter,
-    journal,
-  };
 }
 
 async function runWorker(
@@ -546,10 +401,11 @@ async function runWorker(
         JWT_SECRET: "synthetic-task11-service-secret",
         ...environment,
       },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     },
   );
+  child.stdin!.end(fixture.handoffIdentity);
   let output = "";
   child.stdout?.on("data", (chunk) => {
     output += chunk.toString("utf8");
@@ -557,8 +413,15 @@ async function runWorker(
   child.stderr?.on("data", (chunk) => {
     output += chunk.toString("utf8");
   });
-  const exit = await waitForExit(child, 60_000);
-  return { code: exit.code, output };
+  try {
+    const exit = await waitForExit(child, 60_000);
+    return { code: exit.code, output };
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL');
+      await waitForExit(child).catch(() => undefined);
+    }
+  }
 }
 
 async function cleanupFixture(fixture: SnapshotFixture): Promise<void> {
@@ -570,24 +433,31 @@ async function cleanupFixture(fixture: SnapshotFixture): Promise<void> {
     await waitForExit(fixture.oldWriter, 10_000).catch(() => undefined);
   }
   const snapshot = await AttemptJournal.inspect(fixture.root);
-  const pids = new Set<number>();
+  const children = new Map<string, DetachedIdentity>();
   for (const record of snapshot.records) {
     if (
       record.kind === "completion" &&
       record.result &&
       typeof record.result === "object" &&
       !Array.isArray(record.result) &&
-      typeof record.result.pid === "number"
+      typeof record.result.pid === "number" &&
+      typeof record.result.createdAt === "string" &&
+      typeof record.result.boot === "string"
     ) {
-      pids.add(record.result.pid);
+      const child = record.result as unknown as DetachedIdentity;
+      children.set(`${child.pid}:${child.createdAt}:${child.boot}`, child);
     }
   }
-  for (const pid of pids) {
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {
-      // Already exited.
+  // Validation/gated children can be recorded in the production ledger before
+  // a journal completion exists (e.g. updater crash). It carries the same proof.
+  const ledger = await readFile(path.join(fixture.root, 'update.processes.json'), 'utf8').then(text => JSON.parse(text)).catch(() => undefined);
+  if (ledger?.attemptId === fixture.attemptId && Array.isArray(ledger.children)) {
+    for (const child of ledger.children) {
+      if (child && typeof child === 'object') children.set(`${child.pid}:${child.createdAt}:${child.boot}`, child);
     }
+  }
+  for (const child of children.values()) {
+    await stopDetachedChild(child, identity);
   }
   await rm(fixture.root, {
     recursive: true,
@@ -672,8 +542,10 @@ describe("controlled cross-process update integration", () => {
         pending: null,
         currentVersion: "0.2.5",
         targetVersion: "0.2.6",
-        previousVersion: "0.2.5",
       });
+      // Production acceptance records currentVersion; rollback resolves its
+      // previous release from previousVersion ?? currentVersion.
+      expect(committed.previousVersion ?? committed.currentVersion).toBe('0.2.5');
       expect(committed.fence).toBeGreaterThan(fixture.attemptFence);
       expect(await realpath(path.join(fixture.root, "current"))).toContain(
         "v0.2.6-",
@@ -745,20 +617,11 @@ describe("controlled cross-process update integration", () => {
   it("rejects takeover while the old PID is still alive", async () => {
     const fixture = await createFixture({ holdOldProcess: true });
     try {
-      await fixture.journal.appendCompletion({
-        attemptId: fixture.attemptId,
-        fence: fixture.attemptFence,
-        intentId: fixture.journal
-          .readSnapshot
-          ? (await fixture.journal.readSnapshot()).pending!.intentId
-          : "",
-        phase: "HANDOFF_READY",
-      });
       const worker = await runWorker(fixture, "forward");
       expect(worker.code).not.toBe(0);
       expect(worker.output).toMatch(/timed out waiting|old update owner/i);
       expect(await AttemptJournal.inspect(fixture.root)).toMatchObject({
-        phase: "HANDOFF_READY",
+        phase: "SNAPSHOT_READY",
         fence: fixture.attemptFence,
       });
     } finally {
@@ -766,119 +629,26 @@ describe("controlled cross-process update integration", () => {
     }
   });
 
-  it("does not create a snapshot after a disk-space recheck fails with a real WAL", async () => {
-    const root = await realpath(
-      await mkdtemp(path.join(tmpdir(), "filestation-wal-space-")),
-    );
-    const database = path.join(root, "data/filestation.db");
-    const writerFixture = path.join(root, "old-writer.cjs");
-    await mkdir(path.dirname(database), { recursive: true });
-    await writeTemplate("old-writer.cjs", writerFixture, {
-      __SQLITE3_PATH__: JSON.stringify(sqliteModulePath),
-      __RECOVERY_GUARD_PATH__: JSON.stringify(recoveryGuardModulePath),
-    });
-    const writer = spawn(
-      process.execPath,
-      [writerFixture, root, database],
-      {
-        cwd: root,
-        stdio: ["ignore", "ignore", "pipe", "ipc"],
-        windowsHide: true,
-      },
-    );
+  it('durably aborts a pre-snapshot capacity fault after real WAL growth and drain', async () => {
+    const fixture = await createFixture({ diskFull: true });
     try {
-      await waitForReady(writer);
-      await sendMessage(writer, "write", "written");
-      const wal = `${database}-wal`;
-      expect((await stat(wal)).size).toBeGreaterThan(0);
-      const pageCount = await databaseQuery<{ page_count: number }>(
-        database,
-        "PRAGMA page_count",
-      );
-      const pageSize = await databaseQuery<{ page_size: number }>(
-        database,
-        "PRAGMA page_size",
-      );
-      const snapshotPath = path.join(root, "backups/pre-update.sqlite");
-      const paths = {
-        installRoot: root,
-        artifactStaging: path.join(root, ".staging"),
-        releases: path.join(root, "releases"),
-        retainedRelease: path.join(root, "releases/0.2.5"),
-        database,
-        wal,
-        shm: `${database}-shm`,
-        temp: path.join(root, "data/temp"),
-        backups: path.join(root, "backups"),
-        snapshot: snapshotPath,
-        restoreTemp: path.join(root, "data/restore.sqlite"),
-      };
-      const currentPlatform: "windows-x64" | "linux-x64" =
-        process.platform === "win32" ? "windows-x64" : "linux-x64";
-      const manifest: VolumeManifest = {
-        database_migration: true,
-        migration_workspace_multiplier: 2,
-        migration_workspace_min_bytes: 256 * 1024 * 1024,
-        artifacts: [
-          {
-            platform: currentPlatform,
-            archive_size: 1_000,
-            unpacked_size: 4_000,
-          },
-        ],
-      };
-      const metrics = {
-        pageCount: pageCount[0].page_count,
-        pageSize: pageSize[0].page_size,
-        dbFileBytes: (await stat(database)).size,
-        walBytes: (await stat(wal)).size,
-        shmBytes: (await stat(`${database}-shm`)).size,
-        snapshotBytes: 0,
-      };
-      const options = {
-        resolveVolumeId: async () => "same-volume",
-        minimumSafetyMarginBytes: 64 * 1024 * 1024,
-        retainedReleaseBytes: 4_000,
-        artifactPlatform: currentPlatform,
-      };
-      const initial = await planRequiredSpace(
-        paths,
-        manifest,
-        metrics,
-        {
-          ...options,
-          readAvailableBytes: async () => 1024 * 1024 * 1024,
-        },
-      );
-      expect(initial).toHaveLength(1);
-      expect(initial[0].sufficient).toBe(true);
-      const recheck = await recheckRequiredSpace(
-        paths,
-        manifest,
-        { ...metrics, walBytes: metrics.walBytes + 4096 },
-        initial,
-        {
-          ...options,
-          readAvailableBytes: async () => 1,
-        },
-      );
-      expect(recheck).toMatchObject({ changed: true, sufficient: false });
-      expect(recheck.plan[0].components).toContainEqual(
-        expect.objectContaining({
-          name: "database-wal",
-          bytes: metrics.walBytes + 4096,
-        }),
-      );
-      await expect(stat(snapshotPath)).rejects.toMatchObject({
-        code: "ENOENT",
-      });
-    } finally {
-      if (writer.exitCode === null) writer.kill("SIGKILL");
-      await waitForExit(writer, 10_000).catch(() => undefined);
-      await rm(root, { recursive: true, force: true });
-    }
+      const evidence = fixture.evidence!;
+      expect(evidence.walAfter).toBeGreaterThan(evidence.walBefore);
+      expect(evidence.preflights).toHaveLength(2);
+      expect(evidence.preflights[0]).toMatchObject({ lowCapacity: false, accepting: true });
+      expect(evidence.preflights[1]).toMatchObject({ lowCapacity: true, active: 0, accepting: false });
+      expect(evidence.preflights[1].walBytes).toBeGreaterThanOrEqual(evidence.walAfter);
+      expect(evidence).toMatchObject({ snapshots: 0, freezes: 0, spawns: 0, acceptingAfterFailure: true, frozenAfterFailure: false });
+      const state = await fixture.journal.readSnapshot();
+      expect(state).toMatchObject({ phase: 'FAILED', pending: null });
+      expect(state.records.find(record => record.kind === 'intent' && record.action === 'record-install-failure')?.payload).toMatchObject({ reason: 'PRE_FREEZE_ABORT' });
+      expect(state.records.some(record => record.kind === 'intent' && ['snapshot-database', 'install-release', 'validate-release', 'close-application'].includes(record.action ?? ''))).toBe(false);
+      await expect(stat(path.join(fixture.root, 'backups/update-backup-01/update-snapshot.sqlite'))).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await realpath(path.join(fixture.root, 'current'))).toBe(fixture.oldRelease);
+      expect(await databaseQuery(fixture.database, "SELECT name FROM sqlite_master WHERE name = 'update_schema'")).toEqual([]);
+      expect(await databaseQuery(fixture.database, 'SELECT value FROM items')).toEqual([{ value: 'wal-before-update' }]);
+    } finally { await cleanupFixture(fixture); }
   });
-
   it.each([
     ["migration", "fixture-migration-failure"],
     ["validation health", "fixture-health-failure"],
