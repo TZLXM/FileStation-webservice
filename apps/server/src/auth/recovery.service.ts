@@ -25,12 +25,13 @@ const RECOVERY_CODE_COUNT = 10;
 const RECOVERY_CODE_TTL_MS = 24 * 60 * 60 * 1000;
 const RECOVERY_LOCK_THRESHOLD = 5;
 const RECOVERY_LOCK_MS = 15 * 60 * 1000;
-const ARGON2_OPTIONS = {
+const ARGON2_OPTIONS: argon2.Options & { raw: false } = {
   type: argon2.argon2id,
   memoryCost: 19_456,
   timeCost: 2,
   parallelism: 1,
-} satisfies argon2.HashOptions;
+  raw: false,
+};
 const DUMMY_RECOVERY_VALUE = 'filestation invalid recovery code comparison';
 
 interface RecoveryFailureState {
