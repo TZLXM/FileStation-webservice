@@ -202,8 +202,11 @@ realWinTest("recovers crashes during every recovery-generated intent, action and
           await expect(switcher.recover(await journal.readSnapshot())).rejects.toThrow("recovery crash");
           const reopened = await makeJournal(root);
           const restart = new CurrentLinkSwitcher(root, reopened);
-          expect(await restart.recover(await reopened.readSnapshot())).toMatchObject({ state: "restored", target: old });
-          expect(await restart.recover(await reopened.readSnapshot())).toMatchObject({ state: "restored", target: old });
+          for (let recovery = 0; recovery < 2; recovery++) {
+            const result = await restart.recover(await reopened.readSnapshot());
+            expect(result.state).toBe("restored");
+            expect(path.resolve(result.target)).toBe(old);
+          }
         } finally { await temp.cleanup(); }
       }
     }

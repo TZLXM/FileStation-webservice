@@ -281,7 +281,7 @@ describe("relocatable release artifacts", () => {
   let archives: PreparedArchive[];
 
   beforeAll(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "filestation-artifact-test-"));
+    root = await realpath(await mkdtemp(path.join(tmpdir(), "filestation-artifact-test-")));
     version = JSON.parse(
       await readFile(path.join(repositoryRoot, "package.json"), "utf8"),
     ).version;

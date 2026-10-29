@@ -337,7 +337,13 @@ async function createFixture(
       await failure;
     } else {
       handoffIdentity = String((await handoff!).identity);
-      if (!options.holdOldProcess) await waitForExit(oldWriter);
+      if (!options.holdOldProcess) {
+        try { await waitForExit(oldWriter); }
+        catch (error) {
+          const state = await journal.readSnapshot();
+          throw new Error(`${error}; old writer: ${JSON.stringify({ exitCode: oldWriter.exitCode, signalCode: oldWriter.signalCode, connected: oldWriter.connected, phase: state.phase, pending: state.pending?.action })}; stderr: ${writerErrors}`);
+        }
+      }
     }
     const state = await journal.readSnapshot();
     const evidence = !options.holdOldProcess ? JSON.parse(await readFile(path.join(root, 'fixture-prehandoff.json'), 'utf8')) : undefined;
@@ -416,6 +422,11 @@ async function runWorker(
   try {
     const exit = await waitForExit(child, 60_000);
     return { code: exit.code, output };
+  } catch (error) {
+    const state = await fixture.journal.readSnapshot();
+    const terminal = await readFile(path.join(fixture.root, 'fixture-terminal-error.txt'), 'utf8').catch(() => '');
+    const stage = await readFile(path.join(fixture.root, 'fixture-stage-error.txt'), 'utf8').catch(() => '');
+    throw new Error(`${error}; updater worker: ${JSON.stringify({ exitCode: child.exitCode, signalCode: child.signalCode, phase: state.phase, pending: state.pending?.action })}; output: ${output}; terminal: ${terminal}; stage: ${stage}`);
   } finally {
     if (child.exitCode === null && child.signalCode === null) {
       child.kill('SIGKILL');
@@ -666,6 +677,8 @@ describe("controlled cross-process update integration", () => {
         phase: "ROLLED_BACK",
         pending: null,
       });
+      const terminal = state.records.find(record => record.kind === 'intent' && record.action === 'launch-terminal');
+      expect(terminal?.payload).toMatchObject({ release: fixture.oldRelease, version: '0.2.5' });
       await expectOldReleaseRunning(fixture);
       expect(
         await databaseQuery<{ name: string }>(

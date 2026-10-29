@@ -30,7 +30,7 @@ async function exitedWithin(child:ChildProcess,timeoutMs=10000) {
   finally{clearTimeout(timer!);}
 }
 
-async function fixture(phase:AttemptPhase,pending?:string, reboot=false, liveOld=false) {
+async function fixture(phase:AttemptPhase,pending?:string, reboot=false, liveOld=false, historicalTarget=false) {
   const root=await realpath(await mkdtemp(path.join(tmpdir(),'fs-production-recovery-')));
   const servicePort=await port();
   const paths={database:path.join(root,'runtime/db.sqlite'),storage:path.join(root,'runtime/storage'),temp:path.join(root,'runtime/temp')};
@@ -100,7 +100,10 @@ async function fixture(phase:AttemptPhase,pending?:string, reboot=false, liveOld
   await action('prepare-update','PREPARED',{stagingPath:path.join(root,'releases/staging'),targetVersion:'0.2.5',artifactSha256:'b'.repeat(64),manifestSha256:'c'.repeat(64),databasePath:paths.database});
   if(!['PREPARED','MAINTENANCE'].includes(phase)) await action('snapshot-database','SNAPSHOT_READY',{path:backup,sha256:createHash('sha256').update('verified-db').digest('hex')});
   if(['SWITCH_INTENT','CURRENT_SWITCHED','MIGRATING','MIGRATED_VERIFIED','READY_TO_COMMIT','COMMITTED','ROLLBACK_INTENT'].includes(phase)) {
-    try {await new CurrentLinkSwitcher(root,journal).switchTo(next,{attemptId:'attempt-real',fence:owner.fence},pending==='interrupted-switch'?{crashAt:{action:process.platform==='win32'?'attach-current':'replace-current',when:'after-action'}}:{});}catch(error){if(pending!=='interrupted-switch')throw error;}
+    class HistoricalTargetFs extends NodeDurableFileSystem {
+      override async readlink(filename:string) {return path.resolve(await super.readlink(filename))+path.sep;}
+    }
+    try {await new CurrentLinkSwitcher(root,journal,historicalTarget?{fs:new HistoricalTargetFs()}:undefined).switchTo(next,{attemptId:'attempt-real',fence:owner.fence},pending==='interrupted-switch'?{crashAt:{action:process.platform==='win32'?'attach-current':'replace-current',when:'after-action'}}:{});}catch(error){if(pending!=='interrupted-switch')throw error;}
   }
   if(!(await journal.readSnapshot()).pending) await action('fixture-stage',phase);
   if(pending && pending!=='interrupted-switch') await journal.appendIntent({attemptId:'attempt-real',fence:owner.fence,action:pending,phase,payload:{version:'0.2.5',release:next}});
@@ -221,6 +224,66 @@ async function publicRecover(v:Awaited<ReturnType<typeof fixture>>, fence?:numbe
 }
 
 describe('production recovery entry and stable launcher',()=>{
+  it('recovers a historical switch originalTarget with a trailing separator without rewriting its journal',async()=>{
+    const v=await fixture('CURRENT_SWITCHED',undefined,false,false,true);
+    try {
+      const before=await AttemptJournal.inspect(v.root);
+      const switched=before.records.find(record=>record.kind==='intent' && ['stage-current-link','replace-current'].includes(record.action??''));
+      expect(switched?.payload).toMatchObject({originalTarget:v.previous+path.sep});
+      const filename=path.join(v.root,'update-attempt.journal');
+      const prefix=await readFile(filename);
+      const result=await v.run();
+      if(result.code!==0)throw new Error(result.output);
+      expect((await readFile(filename)).subarray(0,prefix.length)).toEqual(prefix);
+      expect(await realpath(path.join(v.root,'current'))).toBe(v.previous);
+      expect(await readFile(v.paths.database,'utf8')).toBe('verified-db');
+      const state=await AttemptJournal.inspect(v.root);
+      expect(state.pending).toBeNull();
+      expect(state.records.at(-1)?.result).toMatchObject({version:'0.2.0',health:'ok',release:v.previous});
+    } finally {await v.cleanup();}
+  });
+  it('rejects a relative historical switch originalTarget without rewriting its journal',async()=>{
+    const v=await fixture('ROLLED_BACK');
+    try {
+      for(const [action,payload] of [['replace-current',{originalTarget:path.relative(v.root,v.previous)}],['complete-rollback',{}]] as const) {
+        const intent=await v.journal.appendIntent({attemptId:'attempt-real',fence:v.fence,action,phase:'ROLLED_BACK',payload});
+        await v.journal.appendCompletion({attemptId:'attempt-real',fence:v.fence,intentId:intent.id,phase:'ROLLED_BACK',result:{reason:'terminal launch interrupted'}});
+      }
+      const filename=path.join(v.root,'update-attempt.journal');
+      const prefix=await readFile(filename);
+      const result=await v.run();
+      expect(result.code).toBe(1);
+      expect(result.output).toMatch(/previous release target must be absolute/);
+      expect((await readFile(filename)).subarray(0,prefix.length)).toEqual(prefix);
+      expect(await realpath(path.join(v.root,'current'))).toBe(v.previous);
+      expect(await readFile(v.paths.database,'utf8')).toBe('changed-db');
+    } finally {await v.cleanup();}
+  });
+  it.each(['trailing-separator','different-release','relative-release'] as const)('handles historical pending terminal release %s without rewriting its journal',async mode=>{
+    const v=await fixture('ROLLED_BACK');
+    try {
+      const completion=await v.journal.appendIntent({attemptId:'attempt-real',fence:v.fence,action:'complete-rollback',phase:'ROLLED_BACK'});
+      await v.journal.appendCompletion({attemptId:'attempt-real',fence:v.fence,intentId:completion.id,phase:'ROLLED_BACK',result:{reason:'terminal launch interrupted'}});
+      const release=mode==='trailing-separator'?v.previous+path.sep:mode==='different-release'?v.next:path.relative(v.root,v.previous);
+      await v.journal.appendIntent({attemptId:'attempt-real',fence:v.fence,action:'launch-terminal',phase:'ROLLED_BACK',payload:{version:'0.2.0',release}});
+      const filename=path.join(v.root,'update-attempt.journal');
+      const prefix=await readFile(filename);
+      const result=await v.run();
+      const state=await AttemptJournal.inspect(v.root);
+      expect((await readFile(filename)).subarray(0,prefix.length)).toEqual(prefix);
+      expect(await realpath(path.join(v.root,'current'))).toBe(v.previous);
+      expect(await readFile(v.paths.database,'utf8')).toBe('changed-db');
+      if(mode==='trailing-separator') {
+        if(result.code!==0)throw new Error(result.output);
+        expect(state.pending).toBeNull();
+        expect(state.records.at(-1)?.result).toMatchObject({version:'0.2.0',health:'ok',release:v.previous});
+      } else {
+        expect(result.code).toBe(1);
+        expect(result.output).toMatch(/terminal launch intent identity differs/);
+        expect(state.pending?.action).toBe('launch-terminal');
+      }
+    } finally {await v.cleanup();}
+  });
   it.each([
     ['MAINTENANCE', '{"kind":"intent"'],
     ['MIGRATING', '{"kind":"completion"'],

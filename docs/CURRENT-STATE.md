@@ -2,6 +2,13 @@
 
 Updated: 2026-10-29
 
+## Windows Node 20.17 候选阻塞修正（2026-10-29）
+
+- `5380264` 的 [candidate 40813250517](https://github.com/TZLXM/FileStation-webservice/actions/runs/40813250517) Linux leg 与同源普通 CI 的 Linux jobs 成功，但 Windows controlled updater/artifact 组 **6 failed / 5 passed**，整轮候选失败，没有可提升的双平台 evidence。
+- 官方 Node 20.17 Windows 本地单例复现：旧 writer 已退出，migration rollback 的 updater worker 在 `ROLLED_BACK / launch-terminal` 失败后仍持有子进程句柄，最终超时；更早的 forward fetch 错误掩盖了 terminal proof 拒绝。真实 junction 探针确认 Node 20 `readlink` 返回带末尾分隔符的目标，而 Node 22 不带；历史 journal 原目标与 launcher 的规范化 release proof 因字符串拼写不同被拒绝。rollback 消费历史目标时先检查绝对路径，再 `path.resolve`；恢复已有 pending terminal release 也先验证类型/绝对路径，再规范化比较。不改写 journal，不放宽 containment、身份、健康或版本证明。新增真实历史 switch/pending intent 回归 **5 passed / 41 filtered**，覆盖尾分隔符兼容、相对目标和不同 release 拒绝，以及原始 journal prefix 不变。
+- artifact/launcher fixture 直接从 Windows 8.3 短 TEMP 拼装 metadata，与 `realpath(current)` 的长路径不一致；仅在创建 fixture 根时 `realpath`，生产启动校验保持严格。真实短 TEMP 的 launcher RED **3 failed**，修后完整 **22 passed**。精确命令与原始日志保存在 ignored SDD `windows-node20-process-fix-report.md` 和相邻日志目录；Node20 更新组合 **7/7**、compact 短 TEMP 的制品组 **4/4** 分别通过。曾将两组放在故意加长的 TEMP 父目录下合跑，结果 **7 passed / 4 failed**，原因是原生归档句柄的长路径限制；这次失败保留，不冒充同一次组合全绿，也不代表已覆盖所有 Windows 长路径。
+- 协调器/current-link/launcher 三组最初 **54 passed / 1 failed / 1 skipped** 暴露同一原始 readlink 尾分隔符断言，保持目录与状态断言、规范化返回路径后，控制器在 Node20 完整重跑 **3 suites / 55 passed / 1 platform skip**（64.177s）。本轮另有 server unit **326 passed / 20 todo**、full E2E **121 passed**、Web no-cache **242 passed**；没有重跑未受影响的 32 分钟 updater 全套。Sol medium 对最终消费层与五项回归补审 APPROVED，C1 closed；最终修复范围复审和新 hosted 候选仍需核实。未增大超时、使用 forceExit、跳过 Windows 断言或以裸 PID 结束进程。
+
 ## Publisher public key provisioning（2026-10-29）
 
 - 已提交并推送公钥配置 `c4872c7` 和精确缓存忽略规则 `df1d80f`，创建 [draft PR #2](https://github.com/TZLXM/FileStation-webservice/pull/2)。`master` 业务文件未改动，主 checkout 状态干净；实施 worktree 仍只保留原 Task 5/6 报告的未提交改动。
@@ -9,7 +16,7 @@ Updated: 2026-10-29
 - 此次推进修复只处理上述具体阻塞：选版单测生成与实际 host 相符的 signed metadata/capability，另断言异 OS 的签名制品继续被拒绝；默认 Windows archive fixture 的其他调用保持不变。发布工具统一 `fs.cp` filter 源根与回调路径的 namespaced 表示，再计算相对路径，不放宽数据/env/test 排除规则。官方 Node 20.17 便携 runtime 经官方 SHA-256 核对后本地复现路径回归 RED **1 failed**，修正后 focused **2 passed**、完整 release/resolver **56 passed**。同一阶段 Windows 本地 server unit **54 suites / 326 passed / 20 todo**、完整 E2E **17 suites / 121 passed**；Linux 最终结果仍以修复提交的新 hosted run 为准。新提交改变候选输入，必须重新构建双方，不沿用旧 run 的单边制品。
 
 - 用户已配置固定 Ed25519 SPKI 公钥，状态为 `configured`；公钥 DER 的 SHA-256 指纹为 `9463e9b6b4b6237bfe5d84631356a9a218379f2fdd278c503c599d63cb965122`。现有发布工具成功解析实际公钥，configured/unconfigured 两项状态回归通过。下方历史验证记录中的 `UNCONFIGURED` 表示当时状态，不代表当前公钥。
-- 私钥未被读取、显示、写入仓库或制品。用户报告已完成配置；GitHub `release-signing` environment 的 Secret、保护规则及私钥配对尚未由本地验证确认，受保护的实际签名 job 仍需验证精确公私钥绑定。
+- 私钥未被读取、显示、写入仓库或制品。经用户明确选择后，GitHub UI 已保存并核实 `release-signing` environment：required reviewer 为 `TZLXM`、管理员绕过关闭、仅允许 `v*` 类型 Tag；Secret 名称 `RELEASE_SIGNING_PRIVATE_KEY_BASE64` 已存在，值未读取/修改。没有启用 Prevent self-review，单一 owner 仍可人工批准本人触发的发布。受保护的实际签名 job 仍需验证精确公私钥绑定；本次设置不触发签名、tag 或发布。
 - 公钥属于制品输入，必须使用包含本次配置的新提交重新构建 unsigned candidate；旧候选不能提升。依赖 audit Critical/High 和真实平台/人工验收仍独立阻塞正式 tag/sign/release，未接受风险或填写虚构通过证据。
 - 主 checkout 的五个未跟踪目录已确认为 Jest 缓存/测试 fixture；使用本机 Git exclude 隐藏并补充共享 ignore 规则，不删除文件，不修改 master 的业务源码。原有 Task 5/6 报告修改保留，未纳入本次提交。
 - 配置后 fresh 验证：server unit **54 suites / 325 passed / 20 todo**；完整 E2E **17 suites / 121 passed**；Web no-cache **22 files / 242 passed**；发布/bootstrap/gate **117 passed / 2 platform skips**；typecheck/build 与 diff-check 通过。首轮 E2E **120 passed / 1 failed** 复现未配置公钥测试依赖生产 sentinel 的问题，现仅测试实例显式注入 null trust 与 rejecting fetch，保留全部 fail-closed 断言并新增零 fetch 调用断言；focused **11/11** 与完整 **121/121** 通过。完整 E2E 仍输出退出后一秒异步句柄提示，但最终 exit 0；未以 forceExit 隐藏。Sol medium 配置及测试夹具复核均 APPROVED。

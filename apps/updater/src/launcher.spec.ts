@@ -75,7 +75,7 @@ interface Fixture {
 }
 
 async function fixture(): Promise<Fixture> {
-  const root = await mkdtemp(path.join(tmpdir(), "filestation-task6-launch-"));
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), "filestation-task6-launch-")));
   const installRoot = path.join(root, "install");
   const releases = path.join(installRoot, "releases");
   const release = path.join(releases, "v0.2.0-current");

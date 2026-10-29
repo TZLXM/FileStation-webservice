@@ -108,6 +108,13 @@ is still alive on the current boot.
 
 On Windows:
 
+Choose a short installation and staging/download location, such as
+`C:\FileStation`. Native archive handles on Windows have a known limitation
+with sufficiently long absolute paths: a deliberately deep temporary parent
+failed archive opening in Node 20.17 while a compact path passed. This does not
+relax canonical-path or archive checks; not every extended-length Windows path
+has been qualified.
+
 ```powershell
 $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString("O")
 $created = (Get-CimInstance Win32_Process -Filter "ProcessId=<old-pid>").CreationDate.ToUniversalTime().ToString("O")

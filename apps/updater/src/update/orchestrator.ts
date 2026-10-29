@@ -750,7 +750,12 @@ export class ManagedUpdateHooks implements UpdateOrchestratorHooks {
     // The earliest switch describes the pre-update release. A recover() result
     // is never used as an instruction to select that release.
     const firstSwitch=current.records.find(r=>r.kind==='intent' && linkActions.includes(r.action ?? '') && isObject(r.payload) && typeof r.payload.originalTarget==='string');
-    const oldTarget=firstSwitch && isObject(firstSwitch.payload) ? firstSwitch.payload.originalTarget as string : await this.fs.realpath(path.join(attempt.installRoot,'current'));
+    // Windows Node 20 readlink(junction) can retain a trailing separator in
+    // historical switch intents. Use the same absolute release spelling as
+    // the independent launcher's __dirname proof, including during recovery.
+    const recordedTarget=firstSwitch && isObject(firstSwitch.payload) ? firstSwitch.payload.originalTarget as string : await this.fs.realpath(path.join(attempt.installRoot,'current'));
+    if(!path.isAbsolute(recordedTarget)) throw new Error('previous release target must be absolute');
+    const oldTarget=path.resolve(recordedTarget);
     if(!within(path.join(attempt.installRoot,'releases'),oldTarget)) throw new Error('previous release escaped install');
     if(!(await this.fs.exists(path.join(attempt.installRoot,'current'))) || await this.fs.realpath(path.join(attempt.installRoot,'current'))!==oldTarget) {
       // Use a distinct operation identity so Windows staging paths from the
@@ -838,7 +843,9 @@ export class ManagedUpdateHooks implements UpdateOrchestratorHooks {
     let snapshot=await journal.readSnapshot();
     const action=committed?'verify-committed-restart':'launch-terminal';
     if(snapshot.pending && snapshot.pending.action!==action) throw new Error('terminal launch pending action differs');
-    if(snapshot.pending && (!isObject(snapshot.pending.payload) || snapshot.pending.payload.version!==version || snapshot.pending.payload.release!==release)) throw new Error('terminal launch intent identity differs');
+    // Resume an existing Node 20 junction spelling without accepting a
+    // relative path or a different absolute release from the durable intent.
+    if(snapshot.pending && (!isObject(snapshot.pending.payload) || snapshot.pending.payload.version!==version || typeof snapshot.pending.payload.release!=='string' || !path.isAbsolute(snapshot.pending.payload.release) || path.resolve(snapshot.pending.payload.release)!==release)) throw new Error('terminal launch intent identity differs');
     // A previous child may have died after startup but before its completion.
     // Reuse the durable intent; require a fresh independent process every retry.
     const intent=snapshot.pending ? {id:snapshot.pending.intentId} : await journal.appendIntent({attemptId:attempt.attemptId,fence:snapshot.fence,action,phase:snapshot.phase!,payload:{version,release}});
