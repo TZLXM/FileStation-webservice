@@ -48,6 +48,11 @@ temp/
 # Testing
 coverage/
 .nyc_output/
+/.jest-cache-wave/
+/.tmp-jest-core/
+/.tmp-jest-server/
+/.tmp-jest-updater/
+/.tmp-jest/
 
 # Uploads (runtime)
 uploads/
