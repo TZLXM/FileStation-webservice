@@ -3,11 +3,13 @@ import {
   AttemptPhase,
 } from "../state/attempt-journal";
 import {
+  ManagedUpdateHooks,
   recoveryActionFor,
   UpdateOrchestrationAttempt,
   UpdateOrchestrator,
   UpdateOrchestratorHooks,
 } from "./orchestrator";
+import path from 'node:path';
 
 function snapshot(phase: AttemptPhase): AttemptJournalSnapshot {
   return {
@@ -110,6 +112,36 @@ describe("UpdateOrchestrator recovery policy", () => {
     });
     expect(value.rollback).not.toHaveBeenCalled();
     expect(value.restartCommitted).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('W20-I01 durable terminal intent release boundary',()=>{
+  it.each(['canonical','trailing','relative','different','missing','non-string'] as const)('validates %s intent before probing the recorded child',async mode=>{
+    const installRoot=path.resolve('fixture-terminal-boundary');
+    const release=path.join(installRoot,'releases/v0.2.0-old');
+    const current=snapshot('ROLLED_BACK');
+    const payload={version:'0.2.0',release:mode==='canonical'?release:mode==='trailing'?release+path.sep:mode==='relative'?path.relative(installRoot,release):mode==='different'?path.join(installRoot,'releases/v0.2.5-other'):mode==='missing'?undefined:42};
+    current.records=[
+      {id:'terminal-intent',kind:'intent',action:'launch-terminal',phase:'ROLLED_BACK',payload},
+      {kind:'completion',intentId:'terminal-intent',phase:'ROLLED_BACK',context:{attemptId:attempt.attemptId},result:{pid:12345,createdAt:'fixture-created',boot:'fixture-boot',nonce:'fixture-nonce-long-enough',health:'ok',version:'0.2.0',release}},
+    ] as unknown as AttemptJournalSnapshot['records'];
+    const alive=jest.fn().mockResolvedValue(false);
+    const active=jest.fn().mockResolvedValue(undefined);
+    const hooks=new ManagedUpdateHooks('',{
+      fs:{exists:async()=>false,realpath:async()=>release} as never,
+      identity:{current:async()=>({value:'fixture-boot'}),isProcessAlive:alive} as never,
+    });
+    Object.assign(hooks,{ownership:{journal:{readSnapshot:async()=>current},recovery:{assertActive:active}}});
+    // In-memory boundary: no native signaling or filesystem mutation is possible.
+    const recover=(hooks as unknown as {stopRecordedChildren(a:UpdateOrchestrationAttempt):Promise<void>}).stopRecordedChildren({...attempt,installRoot});
+    if(mode==='canonical' || mode==='trailing') {
+      await expect(recover).resolves.toBeUndefined();
+      expect(alive).toHaveBeenCalledWith(12345,'fixture-created');
+    } else {
+      await expect(recover).rejects.toThrow('durable terminal child identity/version proof mismatched');
+      expect(alive).not.toHaveBeenCalled();
+    }
+    expect(active).toHaveBeenCalledTimes(1);
   });
 });
 

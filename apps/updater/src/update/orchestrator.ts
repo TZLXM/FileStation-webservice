@@ -365,7 +365,10 @@ export class ManagedUpdateHooks implements UpdateOrchestratorHooks {
       if(!isObject(proof) || !isObject(intent.payload) || completed.context.attemptId!==attempt.attemptId || completed.phase!==snapshot.phase ||
         !Number.isSafeInteger(proof.pid) || Number(proof.pid)<1 || typeof proof.createdAt!=='string' || !proof.createdAt || typeof proof.boot!=='string' || !proof.boot ||
         typeof proof.nonce!=='string' || proof.nonce.length<16 || proof.health!=='ok' || proof.version!==version || intent.payload.version!==version ||
-        typeof proof.release!=='string' || !within(path.join(attempt.installRoot,'releases'),proof.release) || path.relative(proof.release,release)!=='' || intent.payload.release!==proof.release)
+        typeof proof.release!=='string' || !within(path.join(attempt.installRoot,'releases'),proof.release) || path.relative(proof.release,release)!=='' ||
+        // Historical Node 20 junction spelling survives in the original intent,
+        // while the verified completion uses the canonical release spelling.
+        typeof intent.payload.release!=='string' || !path.isAbsolute(intent.payload.release) || path.resolve(intent.payload.release)!==proof.release)
         throw new Error('durable terminal child identity/version proof mismatched');
       children=[{pid:proof.pid as number,createdAt:proof.createdAt,boot:proof.boot}];
     }

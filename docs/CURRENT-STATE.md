@@ -2,6 +2,11 @@
 
 Updated: 2026-10-29
 
+## 当前候选复审状态（2026-10-29）
+
+- `f0aa1a5` 已提交推送到 draft PR #2。其 scoped Sol xhigh 最终复审发现的 W20-I01 已修复：历史 intent.release 先验证字符串及绝对路径，再与 canonical completion proof 比较。真实组合回归覆盖 trailing pending → 首次恢复在 ledger-retired 崩溃 → 再次恢复，断言确切旧 child 退出、新 child/端口归属、current/DB 和 journal prefix 不变；相对/不同/缺失/非字符串路径继续拒绝。官方 Windows Node20 RED **1 failed**，GREEN **12 passed / 68 filtered**（152.099s），完整 orchestrator **33 passed**；根 typecheck/build 与 scoped diff-check exit 0。Sol medium 与原 Sol xhigh 均 APPROVED，W20-I01 **CLOSED**。整体仍因下述独立 hosted 失败 **不可合并**；下方早期“可合并”结论仅适用于当时修复范围。
+- 同源 [CI 40842398042](https://github.com/TZLXM/FileStation-webservice/actions/runs/40842398042) 的主测试与 Ubuntu updater jobs 已成功；[candidate 40842398115](https://github.com/TZLXM/FileStation-webservice/actions/runs/40842398115) Linux leg 成功，但 Windows controlled 组 **5 failed / 6 passed**（765.521s），整轮候选失败。Windows 制品组 **4/4** 已通过；更新流程仍有五项独立 launcher proof timeout，正在核查 fixture 全阶段 4 秒预算与真实 Windows 身份查询链。未形成可提升的双平台候选。后续源码修正需重新构建，不能沿用旧提交的制品。
+
 ## Windows Node 20.17 候选阻塞修正（2026-10-29）
 
 - `5380264` 的 [candidate 40813250517](https://github.com/TZLXM/FileStation-webservice/actions/runs/40813250517) Linux leg 与同源普通 CI 的 Linux jobs 成功，但 Windows controlled updater/artifact 组 **6 failed / 5 passed**，整轮候选失败，没有可提升的双平台 evidence。
@@ -21,7 +26,7 @@ Updated: 2026-10-29
 - 主 checkout 的五个未跟踪目录已确认为 Jest 缓存/测试 fixture；使用本机 Git exclude 隐藏并补充共享 ignore 规则，不删除文件，不修改 master 的业务源码。原有 Task 5/6 报告修改保留，未纳入本次提交。
 - 配置后 fresh 验证：server unit **54 suites / 325 passed / 20 todo**；完整 E2E **17 suites / 121 passed**；Web no-cache **22 files / 242 passed**；发布/bootstrap/gate **117 passed / 2 platform skips**；typecheck/build 与 diff-check 通过。首轮 E2E **120 passed / 1 failed** 复现未配置公钥测试依赖生产 sentinel 的问题，现仅测试实例显式注入 null trust 与 rejecting fetch，保留全部 fail-closed 断言并新增零 fetch 调用断言；focused **11/11** 与完整 **121/121** 通过。完整 E2E 仍输出退出后一秒异步句柄提示，但最终 exit 0；未以 forceExit 隐藏。Sol medium 配置及测试夹具复核均 APPROVED。
 
-FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 2 实现/自动化验证已完成；release-auto-update 的 11 个任务、chapter review 和最终修复复审均已完成，本地实施范围内可合并。** 产品版本为 `0.2.5`；发布候选、真实 Windows/Linux bootstrap/update/rollback、Docker/Nginx、hosted workflow 与人工验收仍未完成。代码测试通过不能替代真实部署验收；fresh registry audit 仍有 Critical/High，不得描述为全绿或当前已清零。
+FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 2 实现/自动化验证已完成；release-auto-update 的 11 个任务和原修复审阅已完成，后续 W20-I01 已关闭，当前仍有 Windows hosted 候选失败待解决，不可合并。** 产品版本为 `0.2.5`；发布候选、真实 Windows/Linux bootstrap/update/rollback、Docker/Nginx、hosted workflow 与人工验收仍未完成。代码测试通过不能替代真实部署验收；fresh registry audit 仍有 Critical/High，不得描述为全绿或当前已清零。
 
 ## FR-I05 / FRF-I01：PREPARED 公共重试修正（2026-10-29）
 

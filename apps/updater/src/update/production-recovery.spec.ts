@@ -284,6 +284,45 @@ describe('production recovery entry and stable launcher',()=>{
       }
     } finally {await v.cleanup();}
   });
+  it('W20-I01 recovers a historical pending terminal release after ledger retirement without rewriting its journal',async()=>{
+    const v=await fixture('ROLLED_BACK');
+    try {
+      // Model the already-restored database at the interrupted terminal launch.
+      await writeFile(v.paths.database,'verified-db');
+      const rollback=await v.journal.appendIntent({attemptId:'attempt-real',fence:v.fence,action:'complete-rollback',phase:'ROLLED_BACK'});
+      await v.journal.appendCompletion({attemptId:'attempt-real',fence:v.fence,intentId:rollback.id,phase:'ROLLED_BACK',result:{reason:'terminal launch interrupted'}});
+      const intent=await v.journal.appendIntent({attemptId:'attempt-real',fence:v.fence,action:'launch-terminal',phase:'ROLLED_BACK',payload:{version:'0.2.0',release:v.previous+path.sep}});
+      const filename=path.join(v.root,'update-attempt.journal');
+      const historicalPrefix=await readFile(filename);
+      const first=await v.run('terminal:ledger-retired');
+      if(first.code!==73)throw new Error(first.output);
+      const retiredPrefix=await readFile(filename);
+      expect(retiredPrefix.subarray(0,historicalPrefix.length)).toEqual(historicalPrefix);
+      const retired=await AttemptJournal.inspect(v.root);
+      expect(retired.pending).toBeNull();
+      const completed=retired.records.find(record=>record.kind==='completion' && record.intentId===intent.id)!;
+      const prior=completed.result as unknown as DetachedIdentity;
+      expect(completed.result).toMatchObject({version:'0.2.0',health:'ok',release:v.previous});
+      expect(await durable.exists(path.join(v.root,'update.processes.json'))).toBe(false);
+      expect(await identity.isProcessAlive(prior.pid,prior.createdAt)).toBe(true);
+      expect(await identity.listeningPid!(v.servicePort)).toBe(prior.pid);
+      const second=await v.run();
+      if(second.code!==0)throw new Error(second.output);
+      expect(await identity.isProcessAlive(prior.pid,prior.createdAt)).toBe(false);
+      const after=await AttemptJournal.inspect(v.root);
+      const fresh=after.records.at(-1)!.result as unknown as DetachedIdentity;
+      expect(after.phase).toBe('ROLLED_BACK');
+      expect(after.pending).toBeNull();
+      expect(after.fence).toBeGreaterThan(retired.fence);
+      expect(fresh.pid).not.toBe(prior.pid);
+      expect(after.records.at(-1)!.result).toMatchObject({version:'0.2.0',health:'ok',release:v.previous});
+      expect(await identity.isProcessAlive(fresh.pid,fresh.createdAt)).toBe(true);
+      expect(await identity.listeningPid!(v.servicePort)).toBe(fresh.pid);
+      expect(await realpath(path.join(v.root,'current'))).toBe(v.previous);
+      expect(await readFile(v.paths.database,'utf8')).toBe('verified-db');
+      expect((await readFile(filename)).subarray(0,retiredPrefix.length)).toEqual(retiredPrefix);
+    } finally {await v.cleanup();}
+  });
   it.each([
     ['MAINTENANCE', '{"kind":"intent"'],
     ['MIGRATING', '{"kind":"completion"'],
