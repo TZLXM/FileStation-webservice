@@ -33,10 +33,11 @@ pending until a real run exists; local fixtures do not supply release evidence.
 
 ## Publisher signing key prerequisite
 
-The repository intentionally ships with an explicit unconfigured public-key
-sentinel in
+The fixed publisher Ed25519 public key is stored in
 `packages/shared/src/update-public-key.ts`. Release signing and verification
-fail closed until a reviewed publisher Ed25519 key is provisioned.
+fail closed when its explicit unconfigured sentinel is used. Only the public
+key belongs in this module; the matching private key belongs in the protected
+signing environment.
 
 To enable signing after review:
 

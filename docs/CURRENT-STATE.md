@@ -2,6 +2,14 @@
 
 Updated: 2026-10-29
 
+## Publisher public key provisioning（2026-10-29）
+
+- 用户已配置固定 Ed25519 SPKI 公钥，状态为 `configured`；公钥 DER 的 SHA-256 指纹为 `9463e9b6b4b6237bfe5d84631356a9a218379f2fdd278c503c599d63cb965122`。现有发布工具成功解析实际公钥，configured/unconfigured 两项状态回归通过。下方历史验证记录中的 `UNCONFIGURED` 表示当时状态，不代表当前公钥。
+- 私钥未被读取、显示、写入仓库或制品。用户报告已完成配置；GitHub `release-signing` environment 的 Secret、保护规则及私钥配对尚未由本地验证确认，受保护的实际签名 job 仍需验证精确公私钥绑定。
+- 公钥属于制品输入，必须使用包含本次配置的新提交重新构建 unsigned candidate；旧候选不能提升。依赖 audit Critical/High 和真实平台/人工验收仍独立阻塞正式 tag/sign/release，未接受风险或填写虚构通过证据。
+- 主 checkout 的五个未跟踪目录已确认为 Jest 缓存/测试 fixture；使用本机 Git exclude 隐藏并补充共享 ignore 规则，不删除文件，不修改 master 的业务源码。原有 Task 5/6 报告修改保留，未纳入本次提交。
+- 配置后 fresh 验证：server unit **54 suites / 325 passed / 20 todo**；完整 E2E **17 suites / 121 passed**；Web no-cache **22 files / 242 passed**；发布/bootstrap/gate **117 passed / 2 platform skips**；typecheck/build 与 diff-check 通过。首轮 E2E **120 passed / 1 failed** 复现未配置公钥测试依赖生产 sentinel 的问题，现仅测试实例显式注入 null trust 与 rejecting fetch，保留全部 fail-closed 断言并新增零 fetch 调用断言；focused **11/11** 与完整 **121/121** 通过。完整 E2E 仍输出退出后一秒异步句柄提示，但最终 exit 0；未以 forceExit 隐藏。Sol medium 配置及测试夹具复核均 APPROVED。
+
 FileStation 是一个私有文件传输站 Web 应用。**Phase 1 MVP 与 Phase 2 实现/自动化验证已完成；release-auto-update 的 11 个任务、chapter review 和最终修复复审均已完成，本地实施范围内可合并。** 产品版本为 `0.2.5`；发布候选、真实 Windows/Linux bootstrap/update/rollback、Docker/Nginx、hosted workflow 与人工验收仍未完成。代码测试通过不能替代真实部署验收；fresh registry audit 仍有 Critical/High，不得描述为全绿或当前已清零。
 
 ## FR-I05 / FRF-I01：PREPARED 公共重试修正（2026-10-29）

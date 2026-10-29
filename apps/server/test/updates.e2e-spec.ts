@@ -1,5 +1,6 @@
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
+import { UPDATE_FETCH, UPDATE_TRUSTED_KEY } from '../src/updates/updates.tokens';
 import {
   createApp,
   initAndLogin,
@@ -13,6 +14,7 @@ describe('update management API (e2e)', () => {
   let app: INestApplication;
   let adminToken: string;
   let apiToken: string;
+  let updateFetch: jest.Mock;
 
   beforeAll(async () => {
     delete process.env.FILESTATION_INSTALL_ROOT;
@@ -20,7 +22,12 @@ describe('update management API (e2e)', () => {
     delete process.env.FILESTATION_DEPLOYMENT_MODE;
     delete process.env.FILESTATION_CONTAINER;
     env = await setupEnv();
-    app = await createApp();
+    updateFetch = jest.fn(() => Promise.reject(new Error('Unexpected update fetch in unconfigured-key fixture')));
+    app = await createApp(undefined, (builder) =>
+      builder
+        .overrideProvider(UPDATE_TRUSTED_KEY).useValue(() => null)
+        .overrideProvider(UPDATE_FETCH).useValue(updateFetch),
+    );
     adminToken = await initAndLogin(app);
 
     const created = await request(app.getHttpServer())
@@ -94,6 +101,7 @@ describe('update management API (e2e)', () => {
         error_code: 'PUBLISHER_UNCONFIGURED',
       }),
     );
+    expect(updateFetch).not.toHaveBeenCalled();
   });
 
   it('rejects URLs, recovery codes, and unknown fields in management bodies', async () => {

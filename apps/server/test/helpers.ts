@@ -1,4 +1,4 @@
-import { Test, TestingModule } from '@nestjs/testing';
+import { Test, TestingModule, TestingModuleBuilder } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import cookieParser from 'cookie-parser';
@@ -36,8 +36,12 @@ export async function teardownEnv(env: TestEnv): Promise<void> {
   await rm(env.dir, { recursive: true, force: true });
 }
 
-export async function createApp(configure?: (app: INestApplication) => void): Promise<INestApplication> {
-  const moduleFixture: TestingModule = await Test.createTestingModule({ imports: [AppModule] }).compile();
+export async function createApp(
+  configure?: (app: INestApplication) => void,
+  configureModule?: (builder: TestingModuleBuilder) => TestingModuleBuilder,
+): Promise<INestApplication> {
+  const builder = Test.createTestingModule({ imports: [AppModule] });
+  const moduleFixture: TestingModule = await (configureModule?.(builder) ?? builder).compile();
   const app = moduleFixture.createNestApplication();
   app.use(cookieParser());
   app.setGlobalPrefix('api/v1');
