@@ -4,6 +4,10 @@ Updated: 2026-10-29
 
 ## Publisher public key provisioning（2026-10-29）
 
+- 已提交并推送公钥配置 `c4872c7` 和精确缓存忽略规则 `df1d80f`，创建 [draft PR #2](https://github.com/TZLXM/FileStation-webservice/pull/2)。`master` 业务文件未改动，主 checkout 状态干净；实施 worktree 仍只保留原 Task 5/6 报告的未提交改动。
+- 首次真实 [candidate run 40811884730](https://github.com/TZLXM/FileStation-webservice/actions/runs/40811884730) 的 Linux leg 已完成构建、组合更新/制品测试、打包、解压 smoke、上传和 provenance attestation；Windows leg 在 Node 20.17 的路径过滤测试失败，因此整个候选未成功，不能用于提升或填写双平台通过。普通 [CI run 40811884767](https://github.com/TZLXM/FileStation-webservice/actions/runs/40811884767) 的 Linux updater/protocol job 已通过，但 server unit 有两个 Windows-only metadata fixture 失败。
+- 此次推进修复只处理上述具体阻塞：选版单测生成与实际 host 相符的 signed metadata/capability，另断言异 OS 的签名制品继续被拒绝；默认 Windows archive fixture 的其他调用保持不变。发布工具统一 `fs.cp` filter 源根与回调路径的 namespaced 表示，再计算相对路径，不放宽数据/env/test 排除规则。官方 Node 20.17 便携 runtime 经官方 SHA-256 核对后本地复现路径回归 RED **1 failed**，修正后 focused **2 passed**、完整 release/resolver **56 passed**。同一阶段 Windows 本地 server unit **54 suites / 326 passed / 20 todo**、完整 E2E **17 suites / 121 passed**；Linux 最终结果仍以修复提交的新 hosted run 为准。新提交改变候选输入，必须重新构建双方，不沿用旧 run 的单边制品。
+
 - 用户已配置固定 Ed25519 SPKI 公钥，状态为 `configured`；公钥 DER 的 SHA-256 指纹为 `9463e9b6b4b6237bfe5d84631356a9a218379f2fdd278c503c599d63cb965122`。现有发布工具成功解析实际公钥，configured/unconfigured 两项状态回归通过。下方历史验证记录中的 `UNCONFIGURED` 表示当时状态，不代表当前公钥。
 - 私钥未被读取、显示、写入仓库或制品。用户报告已完成配置；GitHub `release-signing` environment 的 Secret、保护规则及私钥配对尚未由本地验证确认，受保护的实际签名 job 仍需验证精确公私钥绑定。
 - 公钥属于制品输入，必须使用包含本次配置的新提交重新构建 unsigned candidate；旧候选不能提升。依赖 audit Critical/High 和真实平台/人工验收仍独立阻塞正式 tag/sign/release，未接受风险或填写虚构通过证据。

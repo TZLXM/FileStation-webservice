@@ -803,6 +803,28 @@ test("staging path filters use repository-relative segments", async () => {
   );
 });
 
+test("staging accepts a namespaced dependency root without leaking ancestor segments", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  const destination = path.join(fixtureRoot, `namespaced-stage-${crypto.randomUUID()}`);
+  await prepareArtifactDirectory({
+    repositoryRoot,
+    destination,
+    version: "0.2.0",
+    platform: "windows-x64",
+    productionNodeModulesDirectory: path.toNamespacedPath(
+      path.join(repositoryRoot, "node_modules"),
+    ),
+  });
+  assert.equal(await readFile(path.join(
+    destination,
+    "node_modules/sqlite3/build/Release/node_sqlite3.node",
+  ), "utf8"), "native-fixture");
+  await assert.rejects(stat(path.join(destination, ".env")), { code: "ENOENT" });
+  await assert.rejects(stat(path.join(destination, "apps/server/test/secret.test.js")), { code: "ENOENT" });
+});
+
 test("artifact staging includes production tree and excludes data, env, logs, and tests", async () => {
   const repositoryRoot = await createRepositoryFixture();
   const destination = path.join(fixtureRoot, `stage-${crypto.randomUUID()}`);

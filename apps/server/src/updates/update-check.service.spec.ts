@@ -89,7 +89,7 @@ function readyCapability(
     supported: true,
     install_root: '/fixture/install',
     updater_version: '0.2.0',
-    platform: 'windows-x64',
+    platform: process.platform === 'linux' ? 'linux-x64' : 'windows-x64',
     reason: null,
     ...overrides,
   };
@@ -106,7 +106,11 @@ describe('UpdateCheckService', () => {
   let service: UpdateCheckService;
 
   beforeEach(async () => {
-    fixture = createSignedManifestFixture();
+    fixture = createSignedManifestFixture(
+      undefined,
+      '0.2.5',
+      process.platform === 'linux' ? 'linux-x64' : 'windows-x64',
+    );
     now = Date.parse('2026-10-28T00:00:00.000Z');
     random = 0.5;
     trustedKey = fixture.publicKey;
@@ -165,6 +169,32 @@ describe('UpdateCheckService', () => {
     );
     expect(status.release_summaries).toEqual(fixture.manifest.release_summaries);
     expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it('refuses a signed artifact for another operating system', async () => {
+    fixture = createSignedManifestFixture(
+      undefined,
+      '0.2.5',
+      process.platform === 'linux' ? 'windows-x64' : 'linux-x64',
+    );
+    trustedKey = fixture.publicKey;
+    fetchImpl = scriptedFetch([{ fixture }]);
+
+    const status = await service.check({ force: true });
+
+    expect(status).toEqual(expect.objectContaining({
+      decision: 'unsupported_platform',
+      available_version: '0.2.5',
+      artifact_sha256: null,
+    }));
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    await expect(service.resolveCandidate({
+      version: '0.2.5',
+      manifest_sha256: fixture.digest,
+      artifact_sha256: fixture.manifest.artifacts[0].sha256,
+    })).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'UPDATE_SELECTION_STALE' }),
+    });
   });
 
   it('uses the installed updater version instead of the release bundle version', async () => {

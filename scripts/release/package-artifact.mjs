@@ -202,7 +202,7 @@ async function copyDirectory(sourceRoot, destination, relativePath) {
     dereference: true,
     filter: (sourcePath) => {
       const relativePath = path
-        .relative(source, sourcePath)
+        .relative(path.toNamespacedPath(source), path.toNamespacedPath(sourcePath))
         .split(path.sep)
         .join("/");
       return relativePath === "" || !isForbiddenArtifactPath(relativePath);
@@ -313,7 +313,10 @@ export async function prepareArtifactDirectory({
       dereference: true,
       filter: (sourcePath) => {
         const relativePath = path
-          .relative(sourceNodeModules, sourcePath)
+          .relative(
+            path.toNamespacedPath(sourceNodeModules),
+            path.toNamespacedPath(sourcePath),
+          )
           .split(path.sep)
           .filter(Boolean)
           .join("/");

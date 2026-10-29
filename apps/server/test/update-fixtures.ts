@@ -108,8 +108,15 @@ export function buildSafePublisherZip(version = '0.2.5'): Buffer {
 export function createSignedManifestFixture(
   artifactBytes = buildSafePublisherZip(),
   version = '0.2.5',
+  platform: 'windows-x64' | 'linux-x64' = 'windows-x64',
 ): SignedManifestFixture {
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  // Metadata-only selection tests may describe either platform. Archive tests
+  // supply their own payload and continue to use the Windows ZIP default.
+  const linux = platform === 'linux-x64';
+  const filename = linux
+    ? `filestation-v${version}-linux-x64.tar.gz`
+    : `filestation-v${version}-win-x64.zip`;
   const manifest: UpdateManifestV1 = {
     version,
     commit: 'a'.repeat(40),
@@ -138,15 +145,15 @@ export function createSignedManifestFixture(
       'https://github.com/TZLXM/FileStation-webservice/blob/master/docs/UPDATING.md',
     artifacts: [
       {
-        platform: 'windows-x64',
-        os: 'windows',
+        platform,
+        os: linux ? 'linux' : 'windows',
         arch: 'x64',
-        filename: `filestation-v${version}-win-x64.zip`,
-        url: `https://github.com/TZLXM/FileStation-webservice/releases/download/v${version}/filestation-v${version}-win-x64.zip`,
+        filename,
+        url: `https://github.com/TZLXM/FileStation-webservice/releases/download/v${version}/${filename}`,
         archive_size: artifactBytes.length,
         unpacked_size: 7 * 2,
         sha256: createHash('sha256').update(artifactBytes).digest('hex'),
-        format: 'zip',
+        format: linux ? 'tar.gz' : 'zip',
       },
     ],
   };
