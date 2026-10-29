@@ -428,6 +428,8 @@ async function runWorker(
     const stage = await readFile(path.join(fixture.root, 'fixture-stage-error.txt'), 'utf8').catch(() => '');
     throw new Error(`${error}; updater worker: ${JSON.stringify({ exitCode: child.exitCode, signalCode: child.signalCode, phase: state.phase, pending: state.pending?.action })}; output: ${output}; terminal: ${terminal}; stage: ${stage}`);
   } finally {
+    const timing = await readFile(path.join(fixture.root, 'fixture-terminal-timing.jsonl'), 'utf8').catch(() => '');
+    if (timing) console.info(`terminal native timing (${mode}):\n${timing}`);
     if (child.exitCode === null && child.signalCode === null) {
       child.kill('SIGKILL');
       await waitForExit(child).catch(() => undefined);

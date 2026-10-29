@@ -6,6 +6,8 @@ Updated: 2026-10-29
 
 - `f0aa1a5` 已提交推送到 draft PR #2。其 scoped Sol xhigh 最终复审发现的 W20-I01 已修复：历史 intent.release 先验证字符串及绝对路径，再与 canonical completion proof 比较。真实组合回归覆盖 trailing pending → 首次恢复在 ledger-retired 崩溃 → 再次恢复，断言确切旧 child 退出、新 child/端口归属、current/DB 和 journal prefix 不变；相对/不同/缺失/非字符串路径继续拒绝。官方 Windows Node20 RED **1 failed**，GREEN **12 passed / 68 filtered**（152.099s），完整 orchestrator **33 passed**；根 typecheck/build 与 scoped diff-check exit 0。Sol medium 与原 Sol xhigh 均 APPROVED，W20-I01 **CLOSED**。整体仍因下述独立 hosted 失败 **不可合并**；下方早期“可合并”结论仅适用于当时修复范围。
 - 同源 [CI 40842398042](https://github.com/TZLXM/FileStation-webservice/actions/runs/40842398042) 的主测试与 Ubuntu updater jobs 已成功；[candidate 40842398115](https://github.com/TZLXM/FileStation-webservice/actions/runs/40842398115) Linux leg 成功，但 Windows controlled 组 **5 failed / 6 passed**（765.521s），整轮候选失败。Windows 制品组 **4/4** 已通过；更新流程仍有五项独立 launcher proof timeout，正在核查 fixture 全阶段 4 秒预算与真实 Windows 身份查询链。未形成可提升的双平台候选。后续源码修正需重新构建，不能沿用旧提交的制品。
+- Windows 原生只读查询与实际 terminal chain 的本地观测显示明显查询开销，但没有复现 hosted 的四秒 proof-wait 超时：一次真实并行查询期间 proof-send 距 terminal entry 5354ms，因 claim lifetime 与父 proof timer 起点不同，该次仍通过。故不调整测试或生产预算、不声称根因已确认；新增测试夹具的操作名/耗时诊断供新 hosted runner 定位，实际身份查询、IPC 与证明断言仍照常执行，不输出 receipt、身份对象或环境凭据。
+- 诊断初版完整 Windows Node20 update-flow **7/7**（265.944s）通过；medium 审阅要求 timing 写入失败隔离及 envelope receiver 转发，已改为 whole-record best-effort 与 `apply(this,args)`。修后 VM 故障注入分别模拟 append 与记录构造失败，确认 query 返回/原异常引用、envelope 与 IPC this/args/回调/返回值保留，native exit 0；最终语法/类型/diff-check 通过。七项完整结果属于修正前，不冒充修后重跑；新 hosted 候选结果仍待核实。
 
 ## Windows Node 20.17 候选阻塞修正（2026-10-29）
 
