@@ -153,7 +153,9 @@ export class PlatformBootIdentityProvider implements ProcessIdentityProvider {
           pid,
         );
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new ProcessAbsentError("process absent");
+        // An opened proc stat can report ESRCH if the task exits before read.
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT" || code === "ESRCH") throw new ProcessAbsentError("process absent");
         if (error instanceof BootIdentityError) throw error;
         throw new BootIdentityError(`Linux process ${pid} is unavailable`);
       }

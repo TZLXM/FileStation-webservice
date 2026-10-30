@@ -1,8 +1,78 @@
+import { spawn, ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
+import { open, readFile } from 'node:fs/promises';
 import {
   BootIdentityError,
   PlatformBootIdentityProvider,
   canonicalWindowsCimTimestamp,
 } from "./boot-identity";
+
+// Test-only waits retain the owned ChildProcess and detach every listener/timer.
+async function waitForFixtureChild(child: ChildProcess, event: 'message' | 'exit', timeoutMs = 5_000): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    if (event === 'exit') return;
+    throw new Error('fixture child exited before message');
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const expected = once(child, event, { signal: controller.signal });
+    const candidates = [expected];
+    if (event === 'message') candidates.push(once(child, 'exit', { signal: controller.signal }).then(() => {
+      throw new Error('fixture child exited before message');
+    }));
+    await Promise.race(candidates);
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('fixture child ' + event + ' exceeded ' + timeoutMs + 'ms');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+  }
+}
+
+describe('owned process fixture lifecycle', () => {
+  it.each(['message', 'exit'] as const)('bounds a missing child %s and proves final cleanup', async event => {
+    const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{},5000)'], {
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true,
+    });
+    let observer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const observed = await Promise.race([
+        waitForFixtureChild(child, event, 40).then(() => ({ kind: 'resolved', error: undefined }), error => ({ kind: 'rejected', error })),
+        new Promise<{ kind: string; error: undefined }>(resolve => { observer = setTimeout(() => resolve({ kind: 'hung', error: undefined }), 300); }),
+      ]);
+      expect(observed.kind).toBe('rejected');
+      expect(observed.error?.message).toMatch(/fixture child (message|exit) exceeded 40ms/);
+    } finally {
+      if (observer) clearTimeout(observer);
+      if (child.exitCode === null && child.signalCode === null) {
+        await Promise.all([waitForFixtureChild(child, 'exit'), Promise.resolve().then(() => child.kill('SIGKILL'))]);
+      }
+    }
+    expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
+  }, 10_000);
+  it('rejects a child exit before readiness and proves final cleanup', async () => {
+    const child = spawn(process.execPath, ['-e', 'process.exit(0)'], {
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true,
+    });
+    let observer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const observed = await Promise.race([
+        waitForFixtureChild(child, 'message').then(() => ({ kind: 'resolved', error: undefined }), error => ({ kind: 'rejected', error })),
+        new Promise<{ kind: string; error: undefined }>(resolve => { observer = setTimeout(() => resolve({ kind: 'hung', error: undefined }), 6_000); }),
+      ]);
+      expect(observed.kind).toBe('rejected');
+      expect(observed.error?.message).toMatch(/fixture child exited before message/);
+    } finally {
+      if (observer) clearTimeout(observer);
+      if (child.exitCode === null && child.signalCode === null) {
+        await Promise.all([waitForFixtureChild(child, 'exit'), Promise.resolve().then(() => child.kill('SIGKILL'))]);
+      }
+    }
+    expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
+  }, 10_000);
+});
 
 describe("PlatformBootIdentityProvider", () => {
   const winTest = process.platform === "win32" ? it : it.skip;
@@ -124,10 +194,59 @@ describe("PlatformBootIdentityProvider", () => {
     expect(creation).toMatch(/^linux-starttime:\d+$/);
     expect(await provider.isProcessAlive(process.pid, creation)).toBe(true);
   });
+  linuxTest('recognizes stat ESRCH when a verified child exits between open and read', async () => {
+    const child = spawn(process.execPath, ['-e', "process.send('ready');setTimeout(()=>process.exit(0),5000)"], {
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true,
+    });
+    try {
+      await waitForFixtureChild(child, 'message');
+      const identity = new PlatformBootIdentityProvider({ platform: 'linux' });
+      const creation = await identity.processCreatedAt(child.pid!);
+      expect(await identity.isProcessAlive(child.pid!, creation)).toBe(true);
+      const statPath = '/proc/' + child.pid + '/stat';
+      let readError: NodeJS.ErrnoException | undefined;
+      const exiting = new PlatformBootIdentityProvider({ platform: 'linux', readFile: async filename => {
+        if (filename !== statPath) return readFile(filename, 'utf8');
+        const handle = await open(filename, 'r');
+        try {
+          await Promise.all([waitForFixtureChild(child, 'exit'), Promise.resolve().then(() => child.kill('SIGTERM'))]);
+          return await handle.readFile('utf8');
+        } catch (error) {
+          readError = error as NodeJS.ErrnoException;
+          throw error;
+        } finally { await handle.close(); }
+      } });
+      const observed = await exiting.isProcessAlive(child.pid!, creation).then(
+        alive => ({ alive, error: undefined }), error => ({ alive: undefined, error }),
+      );
+      expect(readError).toMatchObject({ code: 'ESRCH', syscall: 'read' });
+      expect(observed.error).toBeUndefined();
+      expect(observed.alive).toBe(false);
+      expect(await identity.isProcessAlive(child.pid!, creation)).toBe(false);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        await Promise.all([waitForFixtureChild(child, 'exit'), Promise.resolve().then(() => child.kill('SIGKILL'))]);
+      }
+    }
+  }, 20_000);
+
 });
 
 describe("review identity failures", () => {
-  it.each(["EACCES", "EIO", "malformed"])("fails closed on Linux %s with a live PID probe", async code => {
+  it.each(['ENOENT', 'ESRCH'])('recognizes Linux stat %s as absence without probing a bare PID', async code => {
+    const probe = jest.fn(() => true);
+    const provider = new PlatformBootIdentityProvider({ platform: 'linux', kill: probe,
+      readFile: async filename => {
+        expect(filename).toBe('/proc/123/stat');
+        throw Object.assign(new Error('stat target disappeared'), { code });
+      },
+    });
+    await expect(provider.processCreatedAt(123)).rejects.toThrow();
+    await expect(provider.isProcessAlive(123, 'linux-starttime:987654')).resolves.toBe(false);
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it.each(["EACCES", "EPERM", "EIO", "malformed"])("fails closed on Linux %s with a live PID probe", async code => {
     const provider = new PlatformBootIdentityProvider({ platform: "linux", kill: () => true,
       readFile: async () => { if (code === "malformed") return "bad stat"; throw Object.assign(new Error(code), { code }); } });
     await expect(provider.isProcessAlive(123, "old")).rejects.toBeInstanceOf(BootIdentityError);

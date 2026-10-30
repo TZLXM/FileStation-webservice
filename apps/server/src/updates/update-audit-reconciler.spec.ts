@@ -71,7 +71,7 @@ describe('UpdateAuditReconciler', () => {
   let root: string;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), 'filestation-update-audit-'));
+    root = await realpath(await mkdtemp(path.join(tmpdir(), 'filestation-update-audit-')));
   });
 
   afterEach(async () => {
