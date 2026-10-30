@@ -2,6 +2,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   readdir,
   rm,
   writeFile,
@@ -19,7 +20,7 @@ import {
 jest.setTimeout(30_000);
 
 async function fixture() {
-  const root = await mkdtemp(path.join(tmpdir(), "filestation-rollback-"));
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), "filestation-rollback-")));
   const databasePath = path.join(root, "data", "filestation.db");
   const snapshotPath = path.join(
     root,
@@ -85,7 +86,7 @@ async function fixture() {
 describe("UpdateRollbackService", () => {
   it('refuses a retargeted diagnostic ancestor before mkdir/protect/detach', async()=>{
     const v=await fixture();
-    const outside=await mkdtemp(path.join(tmpdir(),'rollback-diagnostic-outside-'));
+    const outside=await realpath(await mkdtemp(path.join(tmpdir(), 'rollback-diagnostic-outside-')));
     try {
       const {symlink}=await import('node:fs/promises');
       await symlink(outside,path.join(path.dirname(v.databasePath),'.filestation-update-diagnostics'),process.platform==='win32'?'junction':'dir');

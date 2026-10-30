@@ -47,7 +47,7 @@ export default function MaintenanceOverlay({
       inFlight = true;
       setPollInFlight(true);
       try {
-        const response = await api.get<MaintenanceStatusView>(
+        const response = await api.getRaw<MaintenanceStatusView>(
           readinessOnly ? '/auth/status' : '/updates/status',
           undefined,
           signal,
@@ -59,7 +59,7 @@ export default function MaintenanceOverlay({
           maintenanceStore.getState().reset();
           return;
         }
-        const status = response.data;
+        const status = response;
         if (!status) {
           maintenanceStore.getState().setPollError(
             '服务器暂未返回更新状态；服务重启后会自动重试。',

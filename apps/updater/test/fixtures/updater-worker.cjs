@@ -64,7 +64,9 @@ async function main() {
     installRoot: path.resolve(root),
     handoffIdentity: recovery ? "" : handoffIdentity,
     servicePort,
-    timeoutMs: 4_000,
+    // The live-owner refusal never launches a terminal; retain its short wait.
+    // Normal native identity + independent proof uses the production 120s budget.
+    timeoutMs: process.env.FIXTURE_EXPECT_LIVE_OWNER === "1" ? 4_000 : 120_000,
     recovery,
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);

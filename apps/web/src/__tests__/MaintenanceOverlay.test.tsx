@@ -12,7 +12,7 @@ vi.mock('../lib/api', async (importOriginal) => {
   return {
     ...actual,
     api: {
-      get: vi.fn(),
+      getRaw: vi.fn(),
     },
   };
 });
@@ -20,7 +20,7 @@ vi.mock('../lib/api', async (importOriginal) => {
 const mockedApi = vi.mocked(api);
 
 function response<T>(data: T) {
-  return { code: 'OK', data, request_id: 'test-request' } as never;
+  return data;
 }
 
 describe('MaintenanceOverlay', () => {
@@ -37,7 +37,7 @@ describe('MaintenanceOverlay', () => {
   });
 
   it('opens from the global store, polls the read-only status route, and shows target/retry state', async () => {
-    mockedApi.get.mockResolvedValue(response({
+    mockedApi.getRaw.mockResolvedValue(response({
       phase: 'MAINTENANCE',
       attempt_id: 'attempt-01',
       target_version: '0.2.5',
@@ -57,7 +57,7 @@ describe('MaintenanceOverlay', () => {
 
     const dialog = screen.getByRole('alertdialog', { name: '系统维护中' });
     expect(dialog).toBeInTheDocument();
-    expect(mockedApi.get).toHaveBeenCalledWith('/updates/status', undefined, expect.any(AbortSignal));
+    expect(mockedApi.getRaw).toHaveBeenCalledWith('/updates/status', undefined, expect.any(AbortSignal));
     await waitFor(() => expect(within(dialog).getByText('v0.2.5')).toBeInTheDocument());
     expect(within(dialog).getByText('目标版本')).toBeInTheDocument();
     expect(screen.getByText(/每 7 秒/)).toBeInTheDocument();
@@ -65,7 +65,7 @@ describe('MaintenanceOverlay', () => {
   });
 
   it('closes only after a terminal update status', async () => {
-    mockedApi.get
+    mockedApi.getRaw
       .mockResolvedValueOnce(response({ phase: 'MAINTENANCE', target_version: '0.2.5' }))
       .mockResolvedValueOnce(response({ phase: 'COMMITTED', target_version: '0.2.5' }));
 
@@ -79,12 +79,12 @@ describe('MaintenanceOverlay', () => {
     await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument(), {
       timeout: 2_000,
     });
-    expect(mockedApi.get).toHaveBeenCalledTimes(2);
+    expect(mockedApi.getRaw).toHaveBeenCalledTimes(2);
     expect(maintenanceStore.getState().active).toBe(false);
   });
 
   it('recovers an expired session through public readiness without exposing admin status', async () => {
-    mockedApi.get.mockImplementation(async (path) => {
+    mockedApi.getRaw.mockImplementation(async (path) => {
       if (path === '/updates/status') throw new ApiError(401, 'Session expired', 'AUTH_REQUIRED');
       return response({ initialized: true });
     });
@@ -97,24 +97,24 @@ describe('MaintenanceOverlay', () => {
     }));
 
     await waitFor(() => expect(maintenanceStore.getState().active).toBe(false));
-    expect(mockedApi.get.mock.calls.map(([path]) => path)).toEqual(['/updates/status', '/auth/status']);
+    expect(mockedApi.getRaw.mock.calls.map(([path]) => path)).toEqual(['/updates/status', '/auth/status']);
   });
   it('lets an anonymous share visitor recover after public readiness returns', async () => {
     useAuthStore.setState({ accessToken: null, isAuthenticated: false });
-    mockedApi.get.mockRejectedValueOnce(new ApiError(503, 'Maintenance', 'UPDATE_MAINTENANCE'))
+    mockedApi.getRaw.mockRejectedValueOnce(new ApiError(503, 'Maintenance', 'UPDATE_MAINTENANCE'))
       .mockResolvedValue(response({ initialized: true }));
     maintenanceStore.getState().activate({ status: 503, code: 'UPDATE_MAINTENANCE' });
     render(<MaintenanceOverlay pollIntervalMs={5} />);
     await waitFor(() => expect(maintenanceStore.getState().active).toBe(false));
-    expect(mockedApi.get.mock.calls.map(([path]) => path)).toEqual(['/auth/status', '/auth/status']);
+    expect(mockedApi.getRaw.mock.calls.map(([path]) => path)).toEqual(['/auth/status', '/auth/status']);
   });
   it('retires pending status polling when the session changes and ignores the old result', async () => {
     let finish!: (value: unknown) => void;
-    mockedApi.get.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }) as never)
+    mockedApi.getRaw.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }) as never)
       .mockResolvedValue(response({ phase: 'MAINTENANCE', attempt_id: 'new-session-attempt' }));
     maintenanceStore.getState().activate({ status: 503, code: 'UPDATE_MAINTENANCE' });
     render(<MaintenanceOverlay pollIntervalMs={1000} />);
-    const oldSignal = mockedApi.get.mock.calls[0][2]!;
+    const oldSignal = mockedApi.getRaw.mock.calls[0][2]!;
     act(() => useAuthStore.setState({ accessToken: 'replacement-session' }));
     expect(oldSignal.aborted).toBe(true);
     await act(async () => finish(response({ phase: 'COMMITTED' })));

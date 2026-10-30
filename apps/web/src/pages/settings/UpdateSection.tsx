@@ -192,9 +192,9 @@ export default function UpdateSection({
   const acceptedTargetVersion = useRef<string>();
 
   const loadStatus = useCallback(async () => {
-    const response = await api.get<UpdateStatusView>('/updates/status');
-    if (mounted.current && response.data) setStatus(response.data);
-    return response.data;
+    const response = await api.getRaw<UpdateStatusView>('/updates/status');
+    if (mounted.current && response) setStatus(response);
+    return response;
   }, []);
 
   useEffect(() => {
@@ -226,13 +226,13 @@ export default function UpdateSection({
 
     const poll = async () => {
       try {
-        const response = await api.get<UpdateStatusView>(
+        const response = await api.getRaw<UpdateStatusView>(
           '/updates/status',
           undefined,
           controller.signal,
         );
-        if (cancelled || controller.signal.aborted || !response.data) return;
-        const latest = response.data;
+        if (cancelled || controller.signal.aborted || !response) return;
+        const latest = response;
         const observedFence = attemptFence.current;
         const targetVersion = acceptedTargetVersion.current;
         if (
@@ -281,9 +281,9 @@ export default function UpdateSection({
     setChecking(true);
     setError('');
     try {
-      const response = await api.post<UpdateStatusView>('/updates/check', { force: true });
-      if (!response.data) throw new Error('服务器未返回更新检查结果。');
-      setStatus(response.data);
+      const response = await api.postRaw<UpdateStatusView>('/updates/check', { force: true });
+      if (!response) throw new Error('服务器未返回更新检查结果。');
+      setStatus(response);
       setPrepared(null);
       setInstallMessage('');
     } catch (checkError) {
@@ -308,15 +308,15 @@ export default function UpdateSection({
     setError('');
     setInstallMessage('');
     try {
-      const response = await api.post<PreparedUpdate>('/updates/prepare', {
+      const response = await api.postRaw<PreparedUpdate>('/updates/prepare', {
         version: status.available_version,
         manifest_sha256: status.manifest_sha256,
         artifact_sha256: status.artifact_sha256,
       });
-      if (!response.data?.prepared_id) {
+      if (!response?.prepared_id) {
         throw new Error('服务器未返回已准备的更新凭据。');
       }
-      setPrepared(response.data);
+      setPrepared(response);
       setPassword('');
       setTotpCode('');
       setConfirmOpen(true);
@@ -354,12 +354,12 @@ export default function UpdateSection({
     setPassword('');
     setTotpCode('');
     try {
-      const response = await api.post<InstallAcceptance>('/updates/install', {
+      const response = await api.postRaw<InstallAcceptance>('/updates/install', {
         prepared_id: prepared.prepared_id,
         password: submittedPassword,
         ...(totpActive ? { totp_code: submittedTotp } : {}),
       });
-      const accepted = response.data;
+      const accepted = response;
       if (
         !accepted?.attempt_id ||
         accepted.phase !== 'PREPARED' ||

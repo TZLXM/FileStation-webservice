@@ -4,7 +4,7 @@ All notable changes to FileStation are documented here. GitHub Release notes
 and each versioned source file under `release-notes/` must contain the same
 reviewed facts.
 
-## [0.2.5] - 2026-10-28 (local candidate)
+## [0.2.5] - 2026-10-30 (local candidate)
 
 ### 中文
 
@@ -17,11 +17,13 @@ reviewed facts.
 
 - 修复更新切换、SQLite WAL 快照、进程身份、当前版本链接切换和中断恢复中的竞态。
 - 完善根路径与 `/fs/` 子路径配置，并为 `index.html`、SPA fallback 和失效静态资源设置正确缓存边界。
+- 修复更新页面和维护轮询对原始 JSON 响应的读取，并在 Windows journal 独占追加获取阶段有界重试短暂的读句柄冲突。
 
 #### 安全更新
 
 - 内部更新健康与提交通道使用 attempt/fence 绑定的短时 capability；归档、路径、凭据和文件权限保持 fail closed。
 - 发布必须校验精确候选提交、运行 ID、双平台 SHA-256、固定公钥和受保护签名环境。
+- 修复完整安装依赖图中的 Critical/High advisories；精确使用官方 Argon2 0.44.0 以兼容 Node 20.17 的 Windows N-API 9，保留原 Argon2id 参数。
 
 #### 升级说明
 
@@ -31,7 +33,8 @@ reviewed facts.
 #### 已知问题
 
 - `0.2.5` 首个 managed updater 不自动替换自身，协议或 updater 版本不兼容时会要求手动 bootstrap/upgrade。
-- 2026-10-28 registry 快照的 full audit 为 4 Critical、7 High、25 Moderate、9 Low，production 为 1 Critical、5 High、19 Moderate；Critical/High 处置或明确风险接受前发布保持 blocked。
+- 2026-10-30 registry 快照：full 为 0 Critical、0 High、25 Moderate、9 Low，production 为 0 Critical、0 High、16 Moderate、0 Low；audit 仍退出 1，剩余 advisories 与候选和人工发布门保持独立。
+- Linux 原生兼容性须在目标系统验证；本轮 Bookworm/glibc 2.36 测试镜像需源码重建 sqlite3，不能据此认定未重建 Linux 制品兼容。
 
 ### English
 
@@ -44,11 +47,13 @@ reviewed facts.
 
 - Fix races in update switching, SQLite WAL snapshots, process identity, current-link changes, and interrupted recovery.
 - Complete root and `/fs/` deployments with correct cache boundaries for `index.html`, SPA fallback, and stale static assets.
+- Fix raw JSON handling in update controls and maintenance polling, and bound retries for transient reader conflicts while acquiring Windows journal append handles.
 
 #### Security
 
 - Bind internal update health and promote routes to short-lived attempt/fence capabilities while keeping archives, paths, credentials, and file permissions fail closed.
 - Require the exact candidate commit, run ID, both platform SHA-256 digests, fixed public key, and protected signing environment.
+- Resolve Critical/High advisories in the complete installed dependency graph; pin official Argon2 0.44.0 for Windows N-API 9 on Node 20.17 while preserving Argon2id parameters.
 
 #### Upgrade Notes
 
@@ -58,7 +63,8 @@ reviewed facts.
 #### Known Issues
 
 - The first managed updater in `0.2.5` does not replace itself; incompatible protocols or updater versions require manual bootstrap or upgrade guidance.
-- The 2026-10-28 registry snapshot has 4 Critical, 7 High, 25 Moderate, and 9 Low findings for the full tree, and 1 Critical, 5 High, and 19 Moderate for production; publication remains blocked until Critical/High findings are resolved or explicitly accepted.
+- The 2026-10-30 registry snapshot has 0 Critical, 0 High, 25 Moderate and 9 Low findings for the full graph, and 0 Critical, 0 High, 16 Moderate and 0 Low for production; audit still exits 1, and remaining advisories, candidate and manual release gates remain separate.
+- Verify Linux native compatibility on the target system; this Bookworm/glibc 2.36 test image required a sqlite3 source rebuild and does not certify an unrebuilt Linux artifact.
 
 ## [0.2.0] - 2026-10-27 (candidate)
 

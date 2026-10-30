@@ -2,6 +2,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   writeFile,
   symlink,
@@ -13,7 +14,7 @@ import { RetentionService } from "./retention";
 import { createHash } from 'node:crypto';
 
 async function committedFixture() {
-  const root = await mkdtemp(path.join(tmpdir(), "filestation-retention-"));
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), "filestation-retention-")));
   const releases = path.join(root, "releases");
   const currentRelease = path.join(releases, "v0.2.5-current");
   const previousRelease = path.join(releases, "v0.2.0-previous");
@@ -89,8 +90,8 @@ async function committedFixture() {
 
 describe("RetentionService", () => {
   it.each(['backups', 'selected'])(`refuses native linked %s ancestry without touching outside assets`, async level => {
-    const root = await mkdtemp(path.join(tmpdir(), 'retention-link-'));
-    const outside = await mkdtemp(path.join(tmpdir(), 'retention-sentinel-'));
+    const root = await realpath(await mkdtemp(path.join(tmpdir(), 'retention-link-')));
+    const outside = await realpath(await mkdtemp(path.join(tmpdir(), 'retention-sentinel-')));
     try {
       const backup = level === 'backups' ? path.join(outside, 'exact') : outside;
       await mkdir(path.join(backup, 'env'), {recursive:true});

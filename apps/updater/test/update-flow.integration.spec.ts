@@ -19,7 +19,12 @@ import { PlatformBootIdentityProvider } from "../src/state/boot-identity";
 import { NodeDurableFileSystem } from "../src/platform/durable-fs";
 import { stopDetachedChild, DetachedIdentity } from './fixtures/cleanup-process';
 
-jest.setTimeout(120_000);
+// A worker has a 300s total cap (two 120s phases + 60s native/journal overhead).
+// A case additionally allows 120s for real setup and identity-safe cleanup.
+// This is a hard overall cap: repeated phase failures still fail the case.
+const workerExitBudgetMs = 300_000;
+const fixtureOverheadBudgetMs = 120_000;
+jest.setTimeout(workerExitBudgetMs + fixtureOverheadBudgetMs);
 
 const identity = new PlatformBootIdentityProvider();
 const durable = new NodeDurableFileSystem();
@@ -420,7 +425,7 @@ async function runWorker(
     output += chunk.toString("utf8");
   });
   try {
-    const exit = await waitForExit(child, 60_000);
+    const exit = await waitForExit(child, workerExitBudgetMs);
     return { code: exit.code, output };
   } catch (error) {
     const state = await fixture.journal.readSnapshot();
@@ -504,6 +509,7 @@ describe("controlled cross-process update integration", () => {
         path.join(fixture.root, "fixture-promote-drop-once"),
         "drop the first readiness response",
       );
+      await writeFile(path.join(fixture.root, "fixture-slow-boot-query"), "controlled local latency; real native query follows");
       const worker = await runWorker(fixture, "forward");
       if (worker.code !== 0) {
         const terminalError = await readFile(
@@ -547,6 +553,13 @@ describe("controlled cross-process update integration", () => {
         );
       }
       expect(worker.output).toMatch(/"state":"committed"/);
+      const timings = (await readFile(path.join(fixture.root, "fixture-terminal-timing.jsonl"), "utf8"))
+        .trim().split("\n").map(line => JSON.parse(line));
+      expect(timings.find(event => event.event === "controlled-boot-delay")).toMatchObject({ delayMs: 22_500 });
+      const firstBoot = timings.find(event => event.event === "identity:current");
+      const proofSent = timings.find(event => event.event === "proof-send");
+      expect(firstBoot.durationMs).toBeGreaterThanOrEqual(22_500);
+      expect(proofSent.elapsedMs).toBeGreaterThan(firstBoot.elapsedMs);
 
       const committed = await AttemptJournal.inspect(fixture.root);
       expect(committed).toMatchObject({
@@ -630,7 +643,7 @@ describe("controlled cross-process update integration", () => {
   it("rejects takeover while the old PID is still alive", async () => {
     const fixture = await createFixture({ holdOldProcess: true });
     try {
-      const worker = await runWorker(fixture, "forward");
+      const worker = await runWorker(fixture, "forward", { FIXTURE_EXPECT_LIVE_OWNER: "1" });
       expect(worker.code).not.toBe(0);
       expect(worker.output).toMatch(/timed out waiting|old update owner/i);
       expect(await AttemptJournal.inspect(fixture.root)).toMatchObject({
@@ -733,7 +746,7 @@ describe("controlled cross-process update integration", () => {
     } finally {
       await cleanupFixture(fixture);
     }
-  });
+  }, 2 * workerExitBudgetMs + fixtureOverheadBudgetMs);
 
   it("recovers a crashed updater from the durable stale attempt", async () => {
     const fixture = await createFixture();
@@ -763,5 +776,5 @@ describe("controlled cross-process update integration", () => {
     } finally {
       await cleanupFixture(fixture);
     }
-  });
+  }, 2 * workerExitBudgetMs + fixtureOverheadBudgetMs);
 });

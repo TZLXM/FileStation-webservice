@@ -1,4 +1,4 @@
-import {mkdtemp,rm} from 'node:fs/promises';
+import {mkdtemp,realpath,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {OperatorRecoveryAuthority} from './operator-authority';
@@ -9,7 +9,7 @@ import {context} from '../test-support';
 jest.setTimeout(30000);
 describe('protected local operator authority',()=>{
   it('requires real OS protection and exact attempt/fence; JS construction and prototype spoofing fail',async()=>{
-    const root=await mkdtemp(path.join(tmpdir(),'fs-operator-'));
+    const root=await realpath(await mkdtemp(path.join(tmpdir(), 'fs-operator-')));
     try {
       const journal=await AttemptJournal.open(root);
       await journal.beginAttempt(context());

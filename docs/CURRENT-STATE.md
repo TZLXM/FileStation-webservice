@@ -4,16 +4,15 @@ Updated: 2026-10-30
 
 ## 依赖安全修复与隔离验证（2026-10-30）
 
-- 用户要求先修复 full/production audit Critical/High，再由原代理审阅，之后开展隔离测试。实施使用 opencode DeepSeek v4.1 max，沿用 `codex/release-auto-update` worktree，保留原 Task 5/6 报告改动。
-- 官方 Windows Node20.17 fresh registry baseline：full **4 Critical / 7 High / 26 Moderate / 9 Low**；production **1 Critical / 5 High / 16 Moderate / 0 Low**。旧审计数字仅作历史记录。当前补丁、安装和兼容验证尚在进行，不宣称风险清零或接受例外。
-- 中间 fresh audit 曾报告 full **0C/0H/25M/9L**、production **0C/0H/16M/0L**，但原 Sol xhigh 复核发现锁文件缺少 SDK/TOTP 等必需依赖闭包，`npm ls` 同样报 missing。因此这组计数只覆盖缺损依赖图，不能认定完整安全清零；SEC-S-I01 仍待修复，需完整图、干净安装及绑定到同一输入的重新审计。
-- 后续完整重建已通过 `npm ci` / `npm ls --all`（exit 0），原 Sol xhigh 对 SDK/Express/otplib 闭包的 103 节点遍历确认零缺失必需边、零不满足版本约束、registry metadata 完整，SEC-S-I01 **CLOSED**。`argon2` 精确锁定 0.44.0 后再次 fresh full/production audit 仍为 **0C/0H/25M/9L**、**0C/0H/16M/0L**；Moderate/Low 保留，不能称为全部审计全绿。实际项目安装树原 Argon2id 参数的 hash/verify 已通过；版本绑定的应用类型/兼容验证和原代理最终安全批准仍在进行。
-- 版本绑定验证完成：恢复码 unit **20/20**、恢复码 E2E **23/23**、MCP unit **3/3**、MCP E2E **26/26**、完整 typecheck 与 diff-check 均 exit 0；保留既有异步退出提示，不使用 forceExit。原 Sol xhigh 的最终安全复审 **APPROVED / PASS**，明确接受官方 argon2 0.44.0 的精确兼容版本选择，SEC-S-I01/M01 已关闭。本轮完整依赖输入的 Critical/High 修复要求已满足；完整仓库回归、实际 Linux Node20/Docker 验证及 Windows 候选仍独立待验证，现已按用户顺序启动隔离测试。
-- 安全补丁的完整 Windows Node20.17/npm10.9.2 回归已通过：server unit **54 suites / 327 passed / 20 todo**（122.125s）、full server E2E **17 suites / 122 passed**（66.153s）、Web no-cache **22 files / 242 passed**、root typecheck/build（含 `/fs/` bundle）exit 0；release/bootstrap/gate **118 passed / 2 platform skips**，diff-check exit 0。这些结果不替代独立 updater 制品演练或新 hosted candidate。
-- Docker 隔离构建的早期两次失败已保留：第一次 Debian 编译工具源连接超时，尚未复制应用源码；第二次测试 Dockerfile 过早设置 `NODE_ENV=production`，导致 omit dev 后类型声明缺失。已调整测试配置，使用完整安装构建、运行时再启用 production；不修改应用安全行为或绕过引擎检查。实际 Linux20/Docker/Nginx 结果仍待观察。
-- Windows Node20 原生兼容诊断已证实：`argon2@0.45.1` 官方预编译模块请求 N-API 10，而 Node20.17 提供 N-API 9；同一模块在 Node22 可运行，在 Node20 加载时 AccessViolation。同版源码显式按 N-API 9 的一次独立构建通过 load/hash/verify，原 Argon2id 参数保持不变；持久修复方案仍在核对，未将本机替换二进制当作可复现修复。
-- `69d4a89` 的 candidate **40847196517** 与 CI **40847196518** 均失败；Linux candidate、主测试及 Ubuntu updater 成功，Windows controlled 组 **5 failed / 6 passed**（828.195s），artifact 组通过。诊断确认 hosted Windows terminal boot CIM 查询单次 **22–28 秒**，远超测试夹具四秒预算；生产默认仍为 120 秒。测试修正需保留真实身份/退出证明，不能将旧失败填为通过。
-- Docker Desktop Linux daemon 已确认可用，后续测试使用独立名称、端口和合成数据。原有业务容器/正式数据库/上传存储不参与验收，不作全局清理；正式 tag/sign/release 仍未执行。
+- 用户要求先修复 full/production audit Critical/High，由原代理审阅，再开展隔离测试。实施使用 opencode DeepSeek v4.1 max，沿用 `codex/release-auto-update` worktree，保留原 Task 5/6 报告改动。安全补丁已提交为 `540a390`；原 Sol xhigh 最终安全复审 **APPROVED / PASS**，SEC-S-I01/M01 已关闭。
+- 官方 Windows Node20.17/npm10.9.2 fresh registry baseline：full **4C/7H/26M/9L**，production **1C/5H/16M/0L**。最终完整锁文件及真实安装闭包重审为 full **0C/0H/25M/9L**、production **0C/0H/16M/0L**；两次 audit 因保留 Moderate/Low 均 exit 1，不能称为全部审计全绿或风险已接受。中间缺损依赖图的审计结果已作废；完整重建的正常 `npm ci` / `npm ls --all` exit 0，独立遍历 103 节点确认零缺失必需边、零不满足版本约束，registry metadata 完整。
+- 官方 `argon2@0.45.1` Windows 预编译模块要求 N-API 10，而 Node20.17 提供 N-API 9，实际加载发生 AccessViolation；最终精确使用官方 `argon2@0.44.0` N-API 9 预编译包。干净正常安装、应用原 Argon2id 参数 hash/verify、跨版本 PHC 验证均通过，无替换二进制或自定义安装流程。恢复码 unit **20/20**、恢复码 E2E **23/23**、MCP unit **3/3**、MCP E2E **26/26**、typecheck/diff-check exit 0，保留既有异步退出提示。
+- 安全补丁的完整 Windows Node20.17 回归通过：server unit **54 suites / 327 passed / 20 todo**（122.125s），full server E2E **17 suites / 122 passed**（66.153s），Web no-cache **22 files / 242 passed**，root typecheck/build（含 root 与 `/fs/` bundle）exit 0；release/bootstrap/gate **118 passed / 2 platform skips**，diff-check exit 0。独立短临时根的 Windows update-flow **7/7**（318.561s）、artifact smoke **4/4**（145.701s）、native lock/current-link **25 passed / 1 skipped**（114.048s）也通过。仅该安全补丁输入已完成这些验证；后续集成修复需另外绑定复验。
+- 实际 Linux Node20.17 Docker 正常安装、依赖树、typecheck、build 和 Argon2 hash/verify 已通过。Bookworm 的 glibc 2.36 无法加载 sqlite3 6.0.1 的现有 glibc 2.38 预编译包；本次仅在一次性测试 Dockerfile 中从源码重建 sqlite3，最终运行镜像仍为固定摘要的官方 Node20.17 Bookworm slim。这不证明未重建的 GitHub Linux 制品可在 glibc 2.36 上运行，也不代替原生 installed-Linux 更新验收。早期 apt 网络超时、构建时误设 production、原生加载及启动配置失败均保留。
+- Docker 合成管理员实测：更新 status **200** / `DOCKER_MANUAL_UPGRADE`，直接 prepare/install 均 **409** 且相同拒绝码，无 update audit 或 staging 副作用。真实 Nginx root 与 `/fs/` HTML/SPA/API/静态资源及缓存检查通过，内部更新和初始化路由对外拒绝。实际浏览器发现的“无法读取更新状态”已修复：保留服务器原始 JSON 契约，通过共享安全请求链的 typed raw 方法消费更新结果；原 Sol xhigh 对七份冻结 Web 文件复审 **APPROVED / PASS**。修后 Web no-cache **23 files / 251 passed**、typecheck/build/diff-check exit 0；真实 root 与 `/fs/` 设置页均显示版本和 Docker 镜像升级指引，无容器内下载/安装按钮。页面缓存检查失败提示仍保留；未将其说成远程更新检查成功。修后补跑 server full E2E **17 suites / 122 passed**（64.605s）；unit 首轮 **326 passed / 1 failed / 20 todo**，gated-startup journal append 遇 Win32 sharing error 32。真实文件句柄实验已稳定复现候选读 journal 与 updater 独占追加获取冲突，属于生产可达竞争；已实现 Windows append 获取阶段最多 500ms、每次至多 10ms 的异步重试，仅处理原生 sharing error 32；获取成功后绝不重放写入/flush/close，独占 share=0、write-through 和失败传播保持不变。真实句柄及错误注入测试 **11/11**，修后完整 server unit **54 suites / 327 passed / 20 todo**（111.686s）、full E2E **17 suites / 122 passed**（70.281s）、Web no-cache **23 files / 251 passed**（12.90s）、typecheck/build 已 exit 0；相关 durable-fs、journal 原生协议 **3 suites / 21 passed**；新生产构建完整 Windows 更新流程 **7/7 passed**（653.476s，exit 0）。原 Sol xhigh 已核对 20 个输入和 644 个构建文件测试前后均无变化及专属目录清理证据，最终 **APPROVED / PASS**。
+- `69d4a89` 的 candidate **40847196517** 与 CI **40847196518** 均失败；Linux candidate、主测试及 Ubuntu updater 成功，Windows controlled 组 **5 failed / 6 passed**（828.195s），artifact 组通过。hosted Windows terminal boot CIM 查询单次 **22–28 秒**，超过测试夹具四秒预算；生产默认仍为 120 秒。未保留未经修后验证的预算候选改动，本地通过不代表 hosted 已修复；新候选和人工验收仍是独立发布门。
+- 旧 hosted CI Windows 的另一组失败已获取具体日志：4 failing suites / 54 failed / 89 passed / 1 skipped（1804.276s）。其中 retention、rollback、operator-authority 的测试根未展开 8.3 TEMP 别名，先触发 canonical drift 而未进入目标断言；仅在六处测试新建根上 `realpath`，生产路径/权限/链接检查不变。真实官方 Node20.17 短 TEMP RED **19 failed / 8 passed**，GREEN **27/27 passed**（104.662s），三份 spec 已冻结，原 Sol xhigh 完成哈希绑定并 **APPROVED / PASS**。production-recovery 的独立旧 15 秒 proof 路径已用受控 22.5 秒延迟、随后真实 native 查询复现失败；最终统一 terminal phase 120 秒，按真实单/双 worker 分配有界外层预算，公开/IPC/拒绝边界保持原上限。最终输入正向 **2 passed / 46 filtered**（115.894s），拒绝边界 **8 passed / 40 filtered**（97.663s），共十个不同选例通过，并非 48 项全套；原 Sol xhigh 最终哈希/证据复审 **APPROVED / PASS**，新 hosted run 仍待验证。
+- 测试只使用专属名称、loopback 端口和合成数据，现有业务容器及正式数据库/上传存储未参与。三处本轮 Windows 临时根已核对路径、ownership marker 和引用进程后清理；Docker 修后 root 与 `/fs/` 浏览器复验和最终接口检查已完成，脱敏证据保存后已按精确标签清理专属容器、网络、卷、测试镜像及临时目录；现有两个 harmony 业务容器保持运行，共享官方基础镜像保留，未作全局 prune。正式 merge/tag/sign/release 未执行，实际签名密钥配对及 375px/TOTP/恢复码/刷新续传等人工项仍待验收。
 
 ## 当前候选复审状态（2026-10-29）
 
@@ -426,7 +425,7 @@ Task 9 orchestrator, maintenance snapshots/restoration, global WriteBarrier and 
 
 ### Phase 2 后续
 
-- 发布门：Task 11 的本地可执行门禁已完成；需推送并运行真实 `release-candidate.yml`，记录精确 source commit/run ID/双平台 digest，再以同一制品完成双平台 bootstrap/update/pre-COMMITTED rollback、Docker refusal、Nginx root/`/fs/`、375px、TOTP/恢复码和刷新续传验收并更新 `release-evidence/v0.2.5.json`，否则 stable tag 必须保持禁止。hosted Windows/Linux smoke、reviewed publisher SPKI 公钥和 protected signing environment 亦未完成；fresh audit 的 Critical/High 必须先处置或明确接受。
+- 发布门：完整依赖图的 Critical/High 已清零并获原安全代理批准；固定 publisher SPKI 与 protected `release-signing` 环境已配置，实际私钥/公钥配对仍需受保护签名任务校验。仍需成功的精确源提交双平台 candidate、同制品 bootstrap/update/pre-COMMITTED rollback 和人工验收，记录 source commit/run ID/双平台 digest 后更新 `release-evidence/v0.2.5.json`。本轮隔离 Docker/Nginx API 检查不等于同制品正式验收，浏览器更新状态契约缺陷正在修复；hosted Windows 测试预算修正已补齐双 worker 外层预算（HB-I01 CLOSED），原 Sol xhigh 对三个冻结测试文件 **APPROVED / PASS**。首轮 4 passed / 3 failed，第二轮 4 selected passed / 3 filtered；七个不同场景具有跨轮通过证据，并非一次完整 7/7。新生产共享冲突修复的完整七场景已独立通过，原 Sol xhigh 最终审阅 **APPROVED / PASS**；新 hosted run 仍待执行。375px、TOTP/恢复码、刷新续传等人工项仍 pending，stable tag/sign/publish 继续禁止。
 - 用户手动验收：375px 小屏/设备；TOTP 与恢复码流程；刷新页面后的上传续传。真实 MCP 客户端上述用例已通过；直接 MCP `download_file` 工具尚未实现。
 
 ### 待设计（Phase 3+）
@@ -444,7 +443,7 @@ Task 9 orchestrator, maintenance snapshots/restoration, global WriteBarrier and 
 | 大文件上传内存 | 分块合并时内存溢出 | 流式合并 + 临时文件 + fsync |
 | FRP 配置复杂性 | 用户配置困难 | 提供 Nginx 配置生成器（Phase 3） |
 | 无 Nginx 公网暴露 | 初始化端点少一层本机限制 | 一次性 Token 哈希存储 + 短有效期；文档建议公网用 Nginx 模式 |
-| Publisher key 未配置 | tag workflow 无法签名/发布 | 固定公钥 sentinel 与签名 fail closed；按 UPDATING.md 在 protected environment provision reviewed Ed25519 SPKI/PKCS#8 后才可发布 |
+| 实际签名密钥配对未验证 | Secret 与固定公钥不匹配时签名失败 | 公钥及受保护环境已配置；只在满足正式发布证据和人工审批后由签名任务验证配对，不读取或复制私钥 |
 
 ## 变更日志
 

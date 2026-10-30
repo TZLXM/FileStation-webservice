@@ -12,6 +12,7 @@ import { useAuthStore } from '../stores/authStore';
 vi.mock('../lib/api', () => ({
   api: {
     get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn(),
+    getRaw: vi.fn(), postRaw: vi.fn(),
     downloadFile: vi.fn(),
   },
 }));
@@ -32,6 +33,10 @@ const baseSettings = {
 describe('SettingsPage Phase 2 sections', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedApi.getRaw.mockResolvedValue({
+      stage: 'idle', current_version: '0.2.5', available_version: null,
+      decision: 'same_version', phase: 'idle',
+    });
     useAuthStore.setState({ isAuthenticated: true, accessToken: 'test-token', username: 'alice' });
   });
 
@@ -170,7 +175,7 @@ describe('SettingsPage Phase 2 sections', () => {
     expect(mockedApi.post).toHaveBeenNthCalledWith(2, '/auth/totp/confirm', { code: '123456' });
     expect(mockedApi.get.mock.calls.filter(([path]) => path === '/settings')).toHaveLength(2);
     expect(mockedApi.get.mock.calls.filter(([path]) => path === '/api-tokens')).toHaveLength(1);
-    expect(mockedApi.get.mock.calls.filter(([path]) => path === '/updates/status')).toHaveLength(1);
+    expect(mockedApi.getRaw.mock.calls.filter(([path]) => path === '/updates/status')).toHaveLength(1);
     expect(required).toBeChecked();
 
     mockedApi.put.mockResolvedValue({ data: null } as never);
@@ -218,7 +223,7 @@ describe('SettingsPage Phase 2 sections', () => {
     fireEvent.click(await screen.findByRole('button', { name: '启用 TOTP' }));
     fireEvent.change(await screen.findByLabelText('确认验证码'), { target: { value: '123456' } });
     fireEvent.click(screen.getByRole('button', { name: '确认启用' }));
-    expect(await screen.findByRole('status')).toHaveTextContent('TOTP 已启用');
+    expect(await screen.findByText('TOTP 已启用。')).toHaveAttribute('role', 'status');
 
     fireEvent.click(screen.getByRole('button', { name: '生成新的一组' }));
     expect(screen.getByLabelText('当前 6 位 TOTP 验证码')).toBeInTheDocument();
@@ -230,7 +235,7 @@ describe('SettingsPage Phase 2 sections', () => {
     fireEvent.change(within(totpSection).getByLabelText('当前密码'), { target: { value: 'password-placeholder' } });
     fireEvent.change(within(totpSection).getByLabelText('当前验证码'), { target: { value: '654321' } });
     fireEvent.click(within(totpSection).getByRole('button', { name: '确认停用' }));
-    expect(await screen.findByRole('status')).toHaveTextContent('TOTP 已停用');
+    expect(await screen.findByText('TOTP 已停用。')).toHaveAttribute('role', 'status');
     await waitFor(() => expect(screen.queryByLabelText('当前 6 位 TOTP 验证码')).not.toBeInTheDocument());
     expect(required).toBeChecked();
     await act(async () => resolveDisableRefresh({ data: settingsResponse(activeOnServer) }));
@@ -261,7 +266,7 @@ describe('SettingsPage Phase 2 sections', () => {
     fireEvent.change(within(totpSection).getByLabelText('当前密码'), { target: { value: 'password-placeholder' } });
     fireEvent.change(within(totpSection).getByLabelText('当前验证码'), { target: { value: '654321' } });
     fireEvent.click(within(totpSection).getByRole('button', { name: '确认停用' }));
-    expect(await screen.findByRole('status')).toHaveTextContent('TOTP 已停用');
+    expect(await screen.findByText('TOTP 已停用。')).toHaveAttribute('role', 'status');
 
     fireEvent.click(screen.getByRole('button', { name: '生成新的一组' }));
     expect(screen.queryByLabelText('当前 6 位 TOTP 验证码')).not.toBeInTheDocument();
@@ -377,7 +382,7 @@ describe('SettingsPage Phase 2 sections', () => {
     await act(async () => rejectEnableRefresh(new Error('stale-refresh-error-placeholder')));
 
     expect(screen.getByRole('button', { name: '启用 TOTP' })).toBeInTheDocument();
-    expect(screen.getByRole('status')).toHaveTextContent('TOTP 已停用');
+    expect(screen.getByText('TOTP 已停用。')).toHaveAttribute('role', 'status');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
@@ -407,7 +412,7 @@ describe('SettingsPage Phase 2 sections', () => {
     fireEvent.click(screen.getByRole('button', { name: '确认启用' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('TOTP 已启用，但状态刷新失败');
-    expect(screen.getByRole('status')).toHaveTextContent('TOTP 已启用');
+    expect(screen.getByText('TOTP 已启用。')).toHaveAttribute('role', 'status');
     expect(screen.getByRole('button', { name: '停用 TOTP' })).toBeInTheDocument();
   });
 
@@ -437,7 +442,7 @@ describe('SettingsPage Phase 2 sections', () => {
     fireEvent.click(screen.getByRole('button', { name: '确认停用' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('TOTP 已停用，但状态刷新失败');
-    expect(screen.getByRole('status')).toHaveTextContent('TOTP 已停用');
+    expect(screen.getByText('TOTP 已停用。')).toHaveAttribute('role', 'status');
     expect(screen.getByRole('button', { name: '启用 TOTP' })).toBeInTheDocument();
   });
 
@@ -466,7 +471,7 @@ describe('SettingsPage Phase 2 sections', () => {
     expect(screen.getByRole('button', { name: '确认启用' })).toBeInTheDocument();
     expect(mockedApi.get.mock.calls.filter(([path]) => path === '/settings')).toHaveLength(1);
     expect(mockedApi.get.mock.calls.filter(([path]) => path === '/api-tokens')).toHaveLength(1);
-    expect(mockedApi.get.mock.calls.filter(([path]) => path === '/updates/status')).toHaveLength(1);
+    expect(mockedApi.getRaw.mock.calls.filter(([path]) => path === '/updates/status')).toHaveLength(1);
   });
 
   it('ignores a stale setup response without unlocking a newer setup request', async () => {
@@ -551,7 +556,7 @@ describe('SettingsPage Phase 2 sections', () => {
     await waitFor(() => {
       expect(mockedApi.get.mock.calls.filter(([path]) => path === '/settings')).toHaveLength(2);
       expect(mockedApi.get.mock.calls.filter(([path]) => path === '/api-tokens')).toHaveLength(1);
-      expect(mockedApi.get.mock.calls.filter(([path]) => path === '/updates/status')).toHaveLength(1);
+      expect(mockedApi.getRaw.mock.calls.filter(([path]) => path === '/updates/status')).toHaveLength(1);
     });
     expect(await screen.findByRole('button', { name: '启用 TOTP' })).toBeInTheDocument();
   });

@@ -28,6 +28,8 @@ const GENERIC_READ = 0x80000000;
 const GENERIC_WRITE = 0x40000000;
 const FILE_READ_ATTRIBUTES = 0x80;
 const FILE_APPEND_DATA = 0x0004;
+const APPEND_ACQUIRE_TIMEOUT_MS = 500;
+const APPEND_ACQUIRE_RETRY_MS = 10;
 const CREATE_NEW = 1;
 const OPEN_EXISTING = 3;
 const OPEN_ALWAYS = 4;
@@ -367,13 +369,33 @@ export class NodeDurableFileSystem implements DurableFileSystem {
       });
     await mkdir(path.dirname(filename), { recursive: true, mode: 0o700 });
     if (this.windows) {
-      const handle = this.windows.api.create(
-        filename,
-        FILE_APPEND_DATA,
-        0,
-        create ? OPEN_ALWAYS : OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
-      );
+      const deadline = performance.now() + APPEND_ACQUIRE_TIMEOUT_MS;
+      let handle: unknown;
+      // Read-only journal consumers can briefly hold a conflicting handle.
+      // Retry acquisition only: replaying a write or flush could duplicate bytes.
+      for (;;) {
+        try {
+          handle = this.windows.api.create(
+            filename,
+            FILE_APPEND_DATA,
+            0,
+            create ? OPEN_ALWAYS : OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+          );
+          break;
+        } catch (error) {
+          if (
+            typeof error !== 'object' || error === null ||
+            !('win32Code' in error) || error.win32Code !== 32
+          ) throw error;
+          const remaining = deadline - performance.now();
+          if (remaining <= 0) throw error;
+          await new Promise<void>((resolve) => setTimeout(
+            resolve, Math.min(APPEND_ACQUIRE_RETRY_MS, remaining),
+          ));
+          if (performance.now() >= deadline) throw error;
+        }
+      }
       try {
         this.windows.diagnostics.writeThroughFile++;
         this.windows.api.write(handle, bytes);

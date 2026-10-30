@@ -46,9 +46,19 @@ capability.readInheritedEnvelope = async function (...args) {
 const { PlatformBootIdentityProvider } = require(path.join(path.dirname(cliPath), "state/boot-identity.js"));
 for (const operation of ["current", "processCreatedAt", "listeningPid"]) {
   const original = PlatformBootIdentityProvider.prototype[operation];
+  let delayed = false;
   PlatformBootIdentityProvider.prototype[operation] = async function (...args) {
     const start = performance.now();
-    try { return await original.apply(this, args); }
+    try {
+      // Controlled latency before the real query, never a substitute identity.
+      // Only the successful flow installs this marker; all native errors propagate.
+      if (operation === "current" && !delayed && fs.existsSync(path.join(process.cwd(), "fixture-slow-boot-query"))) {
+        delayed = true;
+        timing("controlled-boot-delay", { delayMs: 22_500 });
+        await new Promise(resolve => setTimeout(resolve, 22_500));
+      }
+      return await original.apply(this, args);
+    }
     finally { timing(`identity:${operation}`, { durationMs: Math.round(performance.now() - start) }); }
   };
 }

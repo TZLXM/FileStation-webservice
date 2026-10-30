@@ -72,7 +72,7 @@ class ApiClient {
     body?: BodyInit | object,
     headers: Record<string, string> = {},
     signal?: AbortSignal,
-  ): Promise<ApiResponse<T>> {
+  ): Promise<T> {
     const maintenance = maintenanceStore.getState();
     const generation = this.sessionGeneration;
     if (maintenance.active && !maintenanceRecoveryRequest(method, path)) {
@@ -134,23 +134,32 @@ class ApiClient {
   }
 
   async get<T>(path: string, headers?: Record<string, string>, signal?: AbortSignal): Promise<ApiResponse<T>> {
-    return this.request<T>('GET', path, undefined, headers, signal);
+    return this.request<ApiResponse<T>>('GET', path, undefined, headers, signal);
   }
 
   async post<T>(path: string, body?: BodyInit | object, headers?: Record<string, string>, signal?: AbortSignal): Promise<ApiResponse<T>> {
-    return this.request<T>('POST', path, body, headers, signal);
+    return this.request<ApiResponse<T>>('POST', path, body, headers, signal);
   }
 
   async put<T>(path: string, body?: BodyInit | object, headers?: Record<string, string>, signal?: AbortSignal): Promise<ApiResponse<T>> {
-    return this.request<T>('PUT', path, body, headers, signal);
+    return this.request<ApiResponse<T>>('PUT', path, body, headers, signal);
   }
 
   async patch<T>(path: string, body?: BodyInit | object): Promise<ApiResponse<T>> {
-    return this.request<T>('PATCH', path, body);
+    return this.request<ApiResponse<T>>('PATCH', path, body);
   }
 
   async delete<T>(path: string, headers?: Record<string, string>, signal?: AbortSignal): Promise<ApiResponse<T>> {
-    return this.request<T>('DELETE', path, undefined, headers, signal);
+    return this.request<ApiResponse<T>>('DELETE', path, undefined, headers, signal);
+  }
+
+  /** Endpoints such as updates return a raw JSON object, without ApiResponse.data. */
+  async getRaw<T>(path: string, headers?: Record<string, string>, signal?: AbortSignal): Promise<T> {
+    return this.request<T>('GET', path, undefined, headers, signal);
+  }
+
+  async postRaw<T>(path: string, body?: BodyInit | object, headers?: Record<string, string>, signal?: AbortSignal): Promise<T> {
+    return this.request<T>('POST', path, body, headers, signal);
   }
 
   /** v1.6 新增：管理员直接下载（GET /files/:id/content，fetch blob + a[download]） */

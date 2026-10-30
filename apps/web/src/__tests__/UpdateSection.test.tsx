@@ -11,15 +11,15 @@ import { useAuthStore } from '../stores/authStore';
 
 vi.mock('../lib/api', () => ({
   api: {
-    get: vi.fn(),
-    post: vi.fn(),
+    getRaw: vi.fn(),
+    postRaw: vi.fn(),
   },
 }));
 
 const mockedApi = vi.mocked(api);
 
 function response<T>(data: T) {
-  return { code: 'OK', data, request_id: 'test-request' } as never;
+  return data;
 }
 
 function status(overrides: Record<string, unknown> = {}) {
@@ -106,8 +106,8 @@ async function openConfirmation(totpActive = false) {
 describe('UpdateSection', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockedApi.get.mockResolvedValue(response(status()));
-    mockedApi.post.mockImplementation(async (path: string) => {
+    mockedApi.getRaw.mockResolvedValue(response(status()));
+    mockedApi.postRaw.mockImplementation(async (path: string) => {
       if (path === '/updates/prepare') return response(prepared);
       if (path === '/updates/install') return response(accepted);
       if (path === '/updates/check') return response(status());
@@ -131,7 +131,7 @@ describe('UpdateSection', () => {
   });
 
   it('shows bilingual release sections, risk, checked time, and omits empty categories', async () => {
-    mockedApi.get.mockResolvedValue(response(available));
+    mockedApi.getRaw.mockResolvedValue(response(available));
 
     render(<UpdateSection totpActive={false} />);
 
@@ -150,7 +150,7 @@ describe('UpdateSection', () => {
     ['unavailable', 'unmanaged', 'UNMANAGED_INSTALL'],
     ['manual_bootstrap', 'managed', null],
   ])('shows bootstrap guidance for the real unmanaged response and migration decision %s', async (decision, mode, reason) => {
-    mockedApi.get.mockResolvedValue(response(status({
+    mockedApi.getRaw.mockResolvedValue(response(status({
       decision,
       stage: decision === 'unavailable' ? 'failed' : 'idle',
       available_version: decision === 'unavailable' ? null : '0.2.5',
@@ -174,7 +174,7 @@ describe('UpdateSection', () => {
   });
 
   it('shows Docker image upgrade instructions and never offers an in-container update', async () => {
-    mockedApi.get.mockResolvedValue(response(status({
+    mockedApi.getRaw.mockResolvedValue(response(status({
       decision: 'unavailable',
       capability: {
         mode: 'docker',
@@ -196,7 +196,7 @@ describe('UpdateSection', () => {
   });
 
   it('shows unsupported platform capability and the observed platform', async () => {
-    mockedApi.get.mockResolvedValue(response(status({
+    mockedApi.getRaw.mockResolvedValue(response(status({
       decision: 'unsupported_platform',
       capability: {
         mode: 'unsupported',
@@ -230,8 +230,8 @@ describe('UpdateSection', () => {
         reason: 'PUBLISHER_UNCONFIGURED',
       },
     });
-    mockedApi.get.mockResolvedValue(response(failed));
-    mockedApi.post.mockResolvedValueOnce(response(status({
+    mockedApi.getRaw.mockResolvedValue(response(failed));
+    mockedApi.postRaw.mockResolvedValueOnce(response(status({
       decision: 'same_version',
       checked_at: '2026-10-28T08:00:00.000Z',
     })));
@@ -240,14 +240,14 @@ describe('UpdateSection', () => {
 
     expect(await screen.findByText('Update publisher key is not configured')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '立即检查' }));
-    await waitFor(() => expect(mockedApi.post).toHaveBeenCalledWith('/updates/check', { force: true }));
+    await waitFor(() => expect(mockedApi.postRaw).toHaveBeenCalledWith('/updates/check', { force: true }));
     expect(await screen.findByText('已是最新版本')).toBeInTheDocument();
   });
 
   it('prevents duplicate preparation and sends the exact signed selection', async () => {
     let finishPrepare!: (value: unknown) => void;
-    mockedApi.get.mockResolvedValue(response(available));
-    mockedApi.post.mockImplementation((path: string) => {
+    mockedApi.getRaw.mockResolvedValue(response(available));
+    mockedApi.postRaw.mockImplementation((path: string) => {
       if (path === '/updates/prepare') {
         return new Promise((resolve) => {
           finishPrepare = resolve;
@@ -262,8 +262,8 @@ describe('UpdateSection', () => {
     fireEvent.click(prepare);
 
     expect(screen.getByRole('button', { name: '正在下载并验证…' })).toBeDisabled();
-    expect(mockedApi.post).toHaveBeenCalledTimes(1);
-    expect(mockedApi.post).toHaveBeenCalledWith('/updates/prepare', {
+    expect(mockedApi.postRaw).toHaveBeenCalledTimes(1);
+    expect(mockedApi.postRaw).toHaveBeenCalledWith('/updates/prepare', {
       version: '0.2.5',
       manifest_sha256: 'a'.repeat(64),
       artifact_sha256: 'b'.repeat(64),
@@ -277,7 +277,7 @@ describe('UpdateSection', () => {
     [false, false],
     [true, true],
   ])('requires a password and conditionally TOTP when active=%s', async (totpActive, expectsTotp) => {
-    mockedApi.get.mockResolvedValueOnce(response(available))
+    mockedApi.getRaw.mockResolvedValueOnce(response(available))
       .mockResolvedValue(response(status({
         phase: 'MAINTENANCE',
         attempt_id: 'attempt-01',
@@ -305,7 +305,7 @@ describe('UpdateSection', () => {
     fireEvent.submit(form);
     fireEvent.submit(form);
 
-    expect(mockedApi.post).toHaveBeenCalledWith('/updates/install', expectsTotp
+    expect(mockedApi.postRaw).toHaveBeenCalledWith('/updates/install', expectsTotp
       ? {
         prepared_id: prepared.prepared_id,
         password: 'component-local-password',
@@ -322,7 +322,7 @@ describe('UpdateSection', () => {
   });
 
   it('clears password and TOTP component state when confirmation is closed', async () => {
-    mockedApi.get.mockResolvedValue(response(available));
+    mockedApi.getRaw.mockResolvedValue(response(available));
     await openConfirmation(true);
 
     fireEvent.change(screen.getByLabelText('当前密码'), {
@@ -340,8 +340,8 @@ describe('UpdateSection', () => {
   });
 
   it('clears rejected credentials after a failed confirmation and leaves the dialog recoverable', async () => {
-    mockedApi.get.mockResolvedValue(response(available));
-    mockedApi.post.mockImplementation(async (path: string) => {
+    mockedApi.getRaw.mockResolvedValue(response(available));
+    mockedApi.postRaw.mockImplementation(async (path: string) => {
       if (path === '/updates/prepare') return response(prepared);
       if (path === '/updates/install') throw new Error('The current password is invalid');
       return response(null);
@@ -368,7 +368,7 @@ describe('UpdateSection', () => {
       response(status({ phase: 'MAINTENANCE', attempt_id: 'attempt-01', fence: 2, target_version: '0.2.5' })),
       response(status({ phase, attempt_id: 'attempt-01', fence: 2, target_version: '0.2.5' })),
     ];
-    mockedApi.get.mockImplementation(async () => statuses.shift()!);
+    mockedApi.getRaw.mockImplementation(async () => statuses.shift()!);
 
     await openConfirmation(false);
     fireEvent.change(screen.getByLabelText('当前密码'), {
@@ -378,7 +378,7 @@ describe('UpdateSection', () => {
 
     expect(await screen.findByText(message, {}, { timeout: 2_000 })).toBeInTheDocument();
     expect(screen.getByText(/attempt-01/)).toBeInTheDocument();
-    await waitFor(() => expect(mockedApi.get.mock.calls.filter(([path]) => path === '/updates/status').length)
+    await waitFor(() => expect(mockedApi.getRaw.mock.calls.filter(([path]) => path === '/updates/status').length)
       .toBeGreaterThanOrEqual(3));
   });
   it.each([
@@ -386,28 +386,28 @@ describe('UpdateSection', () => {
     ['attempt-01', 1],
     [undefined, undefined],
   ])('does not attribute a mismatching terminal journal %s/%s to the accepted install', async (attempt_id, fence) => {
-    mockedApi.get.mockResolvedValueOnce(response(available))
+    mockedApi.getRaw.mockResolvedValueOnce(response(available))
       .mockResolvedValue(response(status({ phase: 'COMMITTED', attempt_id, fence })));
     await openConfirmation();
     fireEvent.change(screen.getByLabelText('当前密码'), { target: { value: 'local-password' } });
     fireEvent.click(screen.getByRole('button', { name: '确认安装' }));
     expect(await screen.findByText(/更新尝试已被替代或身份无法确认/)).toBeInTheDocument();
     expect(screen.queryByText('更新完成')).not.toBeInTheDocument();
-    const calls = mockedApi.get.mock.calls.length;
+    const calls = mockedApi.getRaw.mock.calls.length;
     await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(mockedApi.get).toHaveBeenCalledTimes(calls);
+    expect(mockedApi.getRaw).toHaveBeenCalledTimes(calls);
   });
   it.each([['committed', '更新完成'], ['rolledBack', '更新失败，已回滚到当前版本']])('follows actual server projection through same-attempt fence advancement to %s', async (terminal, message) => {
     const { stdout } = await promisify(execFile)(process.execPath, [path.resolve(process.cwd(), 'src/__tests__/fixtures/update-status-projection.cjs')], { windowsHide: true });
     const projected = JSON.parse(stdout);
     const sequence = [available, ...[projected.maintenance, projected.handoff, projected[terminal]].map(value => status(value))];
-    mockedApi.get.mockImplementation(async () => response(sequence.shift()!));
+    mockedApi.getRaw.mockImplementation(async () => response(sequence.shift()!));
     await openConfirmation();
     fireEvent.change(screen.getByLabelText('当前密码'), {target:{value:'fixture-password'}});
     fireEvent.click(screen.getByRole('button', {name:'确认安装'}));
     expect(await screen.findByText(message, {}, {timeout:2000})).toBeInTheDocument();
     expect(screen.queryByText(/更新尝试已被替代/)).not.toBeInTheDocument();
-    expect(mockedApi.get).toHaveBeenCalledTimes(4);
+    expect(mockedApi.getRaw).toHaveBeenCalledTimes(4);
   }, 30000);
 
   it.each([
@@ -418,29 +418,29 @@ describe('UpdateSection', () => {
     {attempt_id:'attempt-01',fence:3,target_version:'0.2.6'},
   ])('rejects missing/mismatched identity, target or regressing fence after ownership transfer: %j', async terminal => {
     const sequence = [available, status({phase:'OLD_STOPPED',attempt_id:'attempt-01',fence:3,target_version:'0.2.5'}), status({phase:'COMMITTED',...terminal})];
-    mockedApi.get.mockImplementation(async()=>response(sequence.shift()!));
+    mockedApi.getRaw.mockImplementation(async()=>response(sequence.shift()!));
     await openConfirmation();
     fireEvent.change(screen.getByLabelText('当前密码'), {target:{value:'fixture-password'}});
     fireEvent.click(screen.getByRole('button', {name:'确认安装'}));
     expect(await screen.findByText(/更新尝试已被替代或身份无法确认/)).toBeInTheDocument();
     expect(screen.queryByText('更新完成')).not.toBeInTheDocument();
-    expect(mockedApi.get).toHaveBeenCalledTimes(3);
+    expect(mockedApi.getRaw).toHaveBeenCalledTimes(3);
   });
 
   it('retires accepted install polling when the login session changes', async () => {
     let finish!: (value: unknown) => void;
-    mockedApi.get.mockResolvedValueOnce(response(available))
+    mockedApi.getRaw.mockResolvedValueOnce(response(available))
       .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }) as never);
     await openConfirmation();
     fireEvent.change(screen.getByLabelText('当前密码'), { target: { value: 'local-password' } });
     fireEvent.click(screen.getByRole('button', { name: '确认安装' }));
     await screen.findByText('更新安装已开始');
-    const signal = mockedApi.get.mock.calls[1][2]!;
+    const signal = mockedApi.getRaw.mock.calls[1][2]!;
     act(() => useAuthStore.setState({ accessToken: 'different-session' }));
     expect(signal.aborted).toBe(true);
     await act(async () => finish(response(status({ phase: 'COMMITTED', attempt_id: 'attempt-01', fence: 2 }))));
     expect(screen.queryByText('更新完成')).not.toBeInTheDocument();
     expect(screen.getByText(/登录会话已变化/)).toBeInTheDocument();
-    expect(mockedApi.get).toHaveBeenCalledTimes(2);
+    expect(mockedApi.getRaw).toHaveBeenCalledTimes(2);
   });
 });

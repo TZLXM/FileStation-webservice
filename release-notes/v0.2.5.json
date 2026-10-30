@@ -29,6 +29,10 @@
         {
           "id": "fix:subpath-cache",
           "text": "完善根路径与 /fs/ 子路径配置，并为 index.html、SPA fallback 和失效静态资源设置正确缓存边界。"
+        },
+        {
+          "id": "fix:update-wire-journal",
+          "text": "修复更新页面和维护轮询对原始 JSON 响应的读取，并在 Windows journal 独占追加获取阶段有界重试短暂的读句柄冲突。"
         }
       ],
       "security": [
@@ -39,6 +43,10 @@
         {
           "id": "security:release-provenance",
           "text": "发布必须校验精确候选提交、运行 ID、双平台 SHA-256、固定公钥和受保护签名环境。"
+        },
+        {
+          "id": "security:dependency-advisories",
+          "text": "修复完整安装依赖图中的 Critical/High advisories；精确使用官方 Argon2 0.44.0 以兼容 Node 20.17 的 Windows N-API 9，保留原 Argon2id 参数。"
         }
       ],
       "upgrades": [
@@ -58,7 +66,11 @@
         },
         {
           "id": "known:audit-advisories",
-          "text": "2026-10-28 registry 快照的 full audit 为 4 Critical、7 High、25 Moderate、9 Low，production 为 1 Critical、5 High、19 Moderate；Critical/High 处置或明确风险接受前发布保持 blocked。"
+          "text": "2026-10-30 registry 快照：full 为 0 Critical、0 High、25 Moderate、9 Low，production 为 0 Critical、0 High、16 Moderate、0 Low；audit 仍退出 1，剩余 advisories 与候选和人工发布门保持独立。"
+        },
+        {
+          "id": "known:linux-native-baseline",
+          "text": "Linux 原生兼容性须在目标系统验证；本轮 Bookworm/glibc 2.36 测试镜像需源码重建 sqlite3，不能据此认定未重建 Linux 制品兼容。"
         }
       ]
     },
@@ -81,6 +93,10 @@
         {
           "id": "fix:subpath-cache",
           "text": "Complete root and /fs/ deployments with correct cache boundaries for index.html, SPA fallback, and stale static assets."
+        },
+        {
+          "id": "fix:update-wire-journal",
+          "text": "Fix raw JSON handling in update controls and maintenance polling, and bound retries for transient reader conflicts while acquiring Windows journal append handles."
         }
       ],
       "security": [
@@ -91,6 +107,10 @@
         {
           "id": "security:release-provenance",
           "text": "Require the exact candidate commit, run ID, both platform SHA-256 digests, fixed public key, and protected signing environment."
+        },
+        {
+          "id": "security:dependency-advisories",
+          "text": "Resolve Critical/High advisories in the complete installed dependency graph; pin official Argon2 0.44.0 for Windows N-API 9 on Node 20.17 while preserving Argon2id parameters."
         }
       ],
       "upgrades": [
@@ -110,7 +130,11 @@
         },
         {
           "id": "known:audit-advisories",
-          "text": "The 2026-10-28 registry snapshot has 4 Critical, 7 High, 25 Moderate, and 9 Low findings for the full tree, and 1 Critical, 5 High, and 19 Moderate for production; publication remains blocked until Critical/High findings are resolved or explicitly accepted."
+          "text": "The 2026-10-30 registry snapshot has 0 Critical, 0 High, 25 Moderate and 9 Low findings for the full graph, and 0 Critical, 0 High, 16 Moderate and 0 Low for production; audit still exits 1, and remaining advisories, candidate and manual release gates remain separate."
+        },
+        {
+          "id": "known:linux-native-baseline",
+          "text": "Verify Linux native compatibility on the target system; this Bookworm/glibc 2.36 test image required a sqlite3 source rebuild and does not certify an unrebuilt Linux artifact."
         }
       ]
     }
