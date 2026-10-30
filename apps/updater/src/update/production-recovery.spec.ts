@@ -7,6 +7,7 @@ import path from 'node:path';
 import net from 'node:net';
 import {AttemptJournal, AttemptPhase} from '../state/attempt-journal';
 import {UpdateLock} from '../state/update-lock';
+import {ManagedUpdateHooks} from './orchestrator';
 import {PlatformBootIdentityProvider} from '../state/boot-identity';
 import {NodeDurableFileSystem} from '../platform/durable-fs';
 import {CurrentLinkSwitcher} from '../platform/current-link';
@@ -251,6 +252,36 @@ async function fixture(phase:AttemptPhase,pending?:string, reboot=false, liveOld
   return {root,servicePort,paths,previous,next,journal,run,cleanup,old,oldRequest,pipeCapability,fence:owner.fence};
 }
 
+// Observe early writer rejection/completion and bound the native flush rendezvous.
+async function waitForHeldAppend(held:Promise<void>,writing:Promise<unknown>,timeoutMs:number):Promise<void> {
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  try {
+    await Promise.race([
+      held,
+      writing.then(()=>{throw new Error('append completed before flush was held');}),
+      new Promise<never>((_resolve,reject)=>{timer=setTimeout(()=>reject(new Error('append flush rendezvous timed out')),timeoutMs);}),
+    ]);
+  } finally {if(timer)clearTimeout(timer);}
+}
+// Strict read-only polling; the deadline bounds waiting for the actual intent.
+async function waitForVerificationIntent(root:string,timeoutMs:number,inspect=AttemptJournal.inspect) {
+  const deadline=Date.now()+timeoutMs;
+  const journalPath=path.resolve(root,'update-attempt.journal');
+  for (;;) {
+    if(Date.now()>=deadline)throw new Error('verification intent absent');
+    try {
+      const state=await inspect(root);
+      if(Date.now()>=deadline)throw new Error('verification intent absent');
+      if(state.pending?.action==='verify-committed-restart')return;
+    } catch(error) {
+      const e=error as NodeJS.ErrnoException;
+      if(process.platform!=='win32' || e.code!=='EBUSY' || e.syscall!=='open' || typeof e.path!=='string' || path.resolve(e.path)!==journalPath)throw error;
+    }
+    const remaining=deadline-Date.now();
+    if(remaining<=0)throw new Error('verification intent absent');
+    await new Promise(r=>setTimeout(r,Math.min(50,remaining)));
+  }
+}
 async function publicRecover(v:Awaited<ReturnType<typeof fixture>>, fence?:number, startupDelayMs=0, terminalPositive=false) {
   const cli=path.join(compiled,'cli.js');
   const args=['recover','--root',v.root,'--attempt','attempt-real','--expected-fence',String(fence??v.fence)];
@@ -559,17 +590,91 @@ describe('production recovery entry and stable launcher',()=>{
     try {const result=await v.run();if(result.code!==0)throw new Error(result.output);expect(await realpath(path.join(v.root,'current'))).toBe(v.previous);expect(await readFile(v.paths.database,'utf8')).toBe('verified-db');}
     finally{await v.cleanup();}
   }, singleWorkerCaseBudgetMs);
+  it('does not retry unrelated journal inspection errors',async()=>{
+    const root=path.resolve(tmpdir(),'unrelated-journal-poll');
+    for(const error of [
+      Object.assign(new Error('denied'),{code:'EACCES',syscall:'open',path:path.join(root,'update-attempt.journal')}),
+      Object.assign(new Error('other file busy'),{code:'EBUSY',syscall:'open',path:path.join(root,'other-file')}),
+      Object.assign(new Error('busy read'),{code:'EBUSY',syscall:'read',path:path.join(root,'update-attempt.journal')}),
+      new Error('partial journal tail requires exclusive recovery'),
+    ]){
+      const inspect=jest.fn().mockRejectedValue(error);
+      await expect(waitForVerificationIntent(root,1_000,inspect)).rejects.toBe(error);
+      expect(inspect).toHaveBeenCalledTimes(1);
+    }
+  });
+  it('strictly observes the verification intent after a real exclusive append releases',async()=>{
+    const v=await fixture('COMMITTED');
+    let unblock:()=>void=()=>{};
+    let entered!:()=>void;
+    const held=new Promise<void>(resolve=>{entered=resolve;});
+    class HoldFlush extends NodeDurableFileSystem {
+      armed=false;
+      protected override async flushFile(filename:string,flush:()=>Promise<void>):Promise<void>{
+        if(this.armed){entered();await new Promise<void>(resolve=>{unblock=resolve;});}
+        await super.flushFile(filename,flush);
+      }
+    }
+    const fs=new HoldFlush();let writing:Promise<unknown>|undefined;let timer:ReturnType<typeof setTimeout>|undefined;
+    try {
+      const journal=await AttemptJournal.open(v.root,{fs});fs.armed=true;
+      writing=journal.appendIntent({attemptId:'attempt-real',fence:v.fence,action:'verify-committed-restart',phase:'COMMITTED',payload:{version:'0.2.5',release:v.next}});
+      await waitForHeldAppend(held,writing,30_000);
+      if(process.platform==='win32')await expect(AttemptJournal.inspect(v.root)).rejects.toMatchObject({code:'EBUSY'});
+      if(process.platform==='win32')await expect(waitForVerificationIntent(v.root,150)).rejects.toThrow('verification intent absent');
+      timer=setTimeout(()=>unblock(),350);
+      await waitForVerificationIntent(v.root,5_000);
+      await writing;
+      expect((await AttemptJournal.inspect(v.root)).pending?.action).toBe('verify-committed-restart');
+    } finally {try {if(timer)clearTimeout(timer);unblock();if(writing)await writing;} finally {await v.cleanup();}}
+  }, singleWorkerCaseBudgetMs);
+  it('bounds and propagates an append failure before the flush rendezvous',async()=>{
+    const failure=new Error('append failed before flush');
+    await expect(waitForHeldAppend(new Promise<void>(()=>{}),Promise.reject(failure),1_000)).rejects.toBe(failure);
+    await expect(waitForHeldAppend(new Promise<void>(()=>{}),Promise.resolve(),1_000)).rejects.toThrow('append completed before flush was held');
+    await expect(waitForHeldAppend(new Promise<void>(()=>{}),new Promise<void>(()=>{}),50)).rejects.toThrow('append flush rendezvous timed out');
+  });
+  it('production handoff strictly re-reads after a real exclusive append releases',async()=>{
+    const v=await fixture('SNAPSHOT_READY');
+    let unblock:()=>void=()=>{};let entered!:()=>void;
+    const held=new Promise<void>(resolve=>{entered=resolve;});
+    class HoldFlush extends NodeDurableFileSystem {
+      armed=false;
+      protected override async flushFile(filename:string,flush:()=>Promise<void>):Promise<void>{
+        if(this.armed){entered();await new Promise<void>(resolve=>{unblock=resolve;});}
+        await super.flushFile(filename,flush);
+      }
+    }
+    const fs=new HoldFlush();let writing:Promise<unknown>|undefined;let timer:ReturnType<typeof setTimeout>|undefined;
+    try {
+      const journal=await AttemptJournal.open(v.root,{fs});
+      const intent=await journal.appendIntent({attemptId:'attempt-real',fence:v.fence,action:'close-application',phase:'SNAPSHOT_READY'});
+      fs.armed=true;
+      writing=journal.appendCompletion({attemptId:'attempt-real',fence:v.fence,intentId:intent.id,phase:'HANDOFF_READY'});
+      await waitForHeldAppend(held,writing,30_000);
+      if(process.platform==='win32')await expect(AttemptJournal.inspect(v.root)).rejects.toMatchObject({code:'EBUSY',syscall:'open'});
+      const hooks=new ManagedUpdateHooks('fixture-handoff');
+      if(process.platform==='win32')await expect(hooks.waitForHandoff({attemptId:'attempt-real',installRoot:v.root,handoffIdentity:'fixture-handoff',timeoutMs:150})).rejects.toThrow('timed out waiting for verified HANDOFF_READY');
+      timer=setTimeout(()=>unblock(),500);
+      const state=await hooks.waitForHandoff({attemptId:'attempt-real',installRoot:v.root,handoffIdentity:'fixture-handoff',timeoutMs:120_000});
+      await writing;
+      expect(state).toMatchObject({attemptId:'attempt-real',phase:'HANDOFF_READY',pending:null});
+      expect(await identity.isProcessAlive(state.owner!.pid,state.owner!.processCreatedAt)).toBe(false);
+      expect(state.owner!.bootIdentity).toBe((await identity.current()).value);
+    } finally {try {if(timer)clearTimeout(timer);unblock();if(writing)await writing;} finally {await v.cleanup();}}
+  }, singleWorkerCaseBudgetMs);
   it('holds the OS exclusion through committed startup verification',async()=>{
     const v=await fixture('COMMITTED');const pause=path.join(v.root,'fixture-startup-pause');
     await writeFile(pause,'pause');
     const running=v.run();
     try {
-      const deadline=Date.now()+30000;
-      while((await AttemptJournal.inspect(v.root)).pending?.action!=='verify-committed-restart') {if(Date.now()>deadline)throw new Error('verification intent absent');await new Promise(r=>setTimeout(r,50));}
+      // Intent follows real boot/creation/liveness checks; bound this wait by
+      // the existing whole-worker limit, not one short native-query duration.
+      await waitForVerificationIntent(v.root,recoveryWorkerBudgetMs);
       const {acquireRecoveryGuard}=await import('../platform/recovery-guard');
       await expect(acquireRecoveryGuard(path.join(v.root,'update.recovery.guard'))).rejects.toThrow();
       await rm(pause);const result=await running;if(result.code!==0)throw new Error(result.output);
-    }finally{await rm(pause,{force:true});await running;await v.cleanup();}
+    }finally{try {await rm(pause,{force:true});await running;} finally {await v.cleanup();}}
   }, singleWorkerCaseBudgetMs);
   it.each(['rollback-plan:intent','rollback-database:intent','restore:publication','select-previous:intent',...(process.platform==='win32'?['previous:detach']:[]),'previous:attach','complete-rollback:intent','launch-terminal:intent'])('recovers an actual updater exit at %s',async point=>{
     const v=await fixture('MIGRATING','validate-release');

@@ -2,6 +2,8 @@
 
 Updated: 2026-10-30
 
+- **Windows journal 轮询争用（2026-10-30）：** 用户提供 `c6cdd0e` hosted CI 结果为 updater **147 passed / 1 failed / 1 skipped**；F1-01 已通过，另一项排他保护测试的并发 journal `open` 返回 `EBUSY`。本机 Windows 使用真实 append 独占句柄复现同一错误，释放后严格读取成功且 journal 字节不变；hosted 当时持有该句柄的进程未观测，不能断言。测试轮询只针对 Windows、目标 journal、`open/EBUSY` 有界等待，其他错误与严格解码继续传播；等待上限对齐 300 秒 worker 预算，不改变生产期限或排他验证。真实冲突 RED **1 failed**，修后相关场景 **3 passed / 51 filtered**；server unit **327 passed / 20 todo**、完整 E2E **122 passed**、Web **251 passed**、typecheck/build/diff-check exit 0。独立审阅发现生产交接等待同样会因暂态独占追加而失败；本机真实句柄复现生产读取 RED，生产交接等待仅对 Windows 目标 journal 的 open/EBUSY 在原 handoff 期限内重新严格读取，其余错误与授权检查保持原样。身份和端口查询结束后再次检查同一交接期限，避免接受过期结果；最终源码针对性 13 项及完整 orchestrator/共享句柄 49 项通过，独立最终审阅 APPROVED / PASS。最终构建后的真实子进程交接和排他保护 2 项通过，编译实现的真实独占句柄与身份查询逾期探针 exit 0；hosted CI/candidate 仍需核验。生产 120 秒慢宿主余量与此前旧 fixture writer 异常退出码仍未解决。
+
 - **Windows F1-01 后续验证（2026-10-30）：** 用户提供的 `409d8b9` hosted CI 结果为 Windows updater **146 passed / 1 failed / 1 skipped**；唯一失败是交接后测试等待 60 秒超时，不能仅据此确定生产原因。测试将该等待改为既有的有界 300 秒 worker 预算，case 上限 420 秒，保留 guard、交接顺序、真实进程身份及 proof 检查；新增真实 native 调用后受控延迟 65 秒的回归和回滚数据库、监听进程检查。控制延迟在旧 writer 退出后开始，旧超时 RED 失败；最终文件经原审阅修正诊断读取异常时的清理路径后，正常和慢速两项本地 Windows Node 20.17 测试 **2 passed / 50 filtered**。原审阅代理确认清理问题关闭；独立最终审阅对本测试补丁 APPROVED / PASS，六项清理故障注入符合预期，不代表整条 PR 或发布获批准。
 - 本地旧 fixture writer 退出码 `0xC0000409` 尚未解释，不能称为正常退出；本地选例通过不证明生产更新已全面验证。hosted 测得自然慢查询下 proof 约 97.7 秒发出，生产 120 秒 claim 在更慢宿主的余量仍未证明。新提交的 hosted CI 与无签名 candidate 必须重新验证，未授权发布或接受该风险。本轮本地 server unit **54 suites / 327 passed / 20 todo**、完整 E2E **17 suites / 122 passed**、Web **23 files / 251 passed**、typecheck 和 build 均 exit 0。
 

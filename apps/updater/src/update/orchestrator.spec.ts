@@ -1,4 +1,5 @@
 import {
+  AttemptJournal,
   AttemptJournalSnapshot,
   AttemptPhase,
 } from "../state/attempt-journal";
@@ -64,6 +65,40 @@ function hooks(
   };
 }
 
+describe('handoff journal inspection errors',()=>{
+  afterEach(()=>jest.restoreAllMocks());
+  it('does not accept a strict read that finishes after the original handoff deadline',async()=>{
+    jest.spyOn(AttemptJournal,'inspect').mockImplementation(async()=>{
+      await new Promise(resolve=>setTimeout(resolve,40));
+      return snapshot('HANDOFF_READY');
+    });
+    const hooks=new ManagedUpdateHooks('fixture-handoff');
+    await expect(hooks.waitForHandoff({attemptId:'attempt-orchestrator-01',installRoot:path.resolve('fixture'),handoffIdentity:'fixture-handoff',timeoutMs:10})).rejects.toThrow('timed out waiting for verified HANDOFF_READY');
+  });
+  it.each(['boot','liveness','port'] as const)('rejects an otherwise valid %s check that completes after the handoff deadline',async stage=>{
+    jest.spyOn(AttemptJournal,'inspect').mockResolvedValue(snapshot('HANDOFF_READY'));
+    const pause=async()=>{await new Promise(resolve=>setTimeout(resolve,100));};
+    const identity={
+      current:async()=>{if(stage==='boot')await pause();return {provider:'windows-cim' as const,value:'win32:fixture'};},
+      processCreatedAt:async()=> 'win32:created',
+      isProcessAlive:async()=>{if(stage==='liveness')await pause();return false;},
+      listeningPid:async()=>{if(stage==='port')await pause();return undefined;},
+    };
+    const hooks=new ManagedUpdateHooks('fixture-handoff',{identity});
+    await expect(hooks.waitForHandoff({attemptId:'attempt-orchestrator-01',installRoot:path.resolve('fixture'),handoffIdentity:'fixture-handoff',servicePort:12345,timeoutMs:20})).rejects.toThrow('timed out waiting for verified HANDOFF_READY');
+  });
+  it.each([
+    Object.assign(new Error('denied'),{code:'EACCES',syscall:'open',path:path.resolve('fixture','update-attempt.journal')}),
+    Object.assign(new Error('other busy'),{code:'EBUSY',syscall:'open',path:path.resolve('fixture','other')}),
+    Object.assign(new Error('busy read'),{code:'EBUSY',syscall:'read',path:path.resolve('fixture','update-attempt.journal')}),
+    new Error('journal invalid'),
+  ])('immediately propagates unrelated inspection errors',async error=>{
+    const inspect=jest.spyOn(AttemptJournal,'inspect').mockRejectedValue(error);
+    const hooks=new ManagedUpdateHooks('fixture-handoff');
+    await expect(hooks.waitForHandoff({attemptId:'attempt-orchestrator-01',installRoot:path.resolve('fixture'),handoffIdentity:'fixture-handoff',timeoutMs:1_000})).rejects.toBe(error);
+    expect(inspect).toHaveBeenCalledTimes(1);
+  });
+});
 describe("UpdateOrchestrator recovery policy", () => {
   it.each(['PREPARED','MAINTENANCE','SNAPSHOT_READY'] as const)('normal inherited continuation waits through %s without taking recovery ownership',async phase=>{
     const value=hooks(snapshot(phase)); value.inspect=async()=>snapshot(phase);

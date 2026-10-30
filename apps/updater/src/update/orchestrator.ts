@@ -421,12 +421,21 @@ export class ManagedUpdateHooks implements UpdateOrchestratorHooks {
       catch(error) {
         // A read-only waiter may catch the old writer between append and flush.
         // Retry only an incomplete tail, bounded by the handoff deadline; never repair it.
-        if(error instanceof JournalCorruptError && /partial journal tail/.test(error.message)) {
-          await new Promise(resolve=>setTimeout(resolve,100));
+        const e = error as NodeJS.ErrnoException;
+        const busyJournal = process.platform === 'win32' && e?.code === 'EBUSY' &&
+          e.syscall === 'open' && typeof e.path === 'string' &&
+          path.resolve(e.path) === path.resolve(attempt.installRoot, 'update-attempt.journal');
+        if ((error instanceof JournalCorruptError && /partial journal tail/.test(error.message)) || busyJournal) {
+          // A sharing conflict grants no state or authority: re-read strictly,
+          // within the original absolute handoff deadline, after the writer closes.
+          const remaining = deadline - Date.now();
+          if (remaining > 0) await new Promise(resolve=>setTimeout(resolve,Math.min(100,remaining)));
           continue;
         }
         throw error;
       }
+      // A strict read started before the deadline must not authorize after it.
+      if (Date.now() >= deadline) break;
       if (
         snapshot.attemptId === attempt.attemptId &&
         snapshot.phase === "HANDOFF_READY" &&
@@ -455,6 +464,8 @@ export class ManagedUpdateHooks implements UpdateOrchestratorHooks {
             throw new Error("old update owner still owns the service port");
           }
         }
+        // Native identity and port queries may finish after the same deadline.
+        if (Date.now() >= deadline) break;
         return snapshot;
       }
       if (
