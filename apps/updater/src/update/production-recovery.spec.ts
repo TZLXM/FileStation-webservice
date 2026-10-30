@@ -21,6 +21,11 @@ const recoveryWorkerBudgetMs = 300_000;
 const fixtureOverheadBudgetMs = 120_000;
 const singleWorkerCaseBudgetMs = recoveryWorkerBudgetMs + fixtureOverheadBudgetMs;
 const doubleWorkerCaseBudgetMs = 2 * recoveryWorkerBudgetMs + fixtureOverheadBudgetMs;
+// Pad the measured first real query to 22.5s total, never add another 22.5s
+// on top of an already slow native query.
+function controlledBootPaddingMs(nativeElapsedMs:number):number {
+  return Math.max(0, 22_500 - nativeElapsedMs);
+}
 const compiled=path.resolve(__dirname,'../../dist');
 const durable=new NodeDurableFileSystem();
 const identity=new PlatformBootIdentityProvider();
@@ -85,7 +90,15 @@ async function fixture(phase:AttemptPhase,pending?:string, reboot=false, liveOld
     for(const operation of ['current','processCreatedAt','listeningPid']){
       const original=PlatformBootIdentityProvider.prototype[operation];
       PlatformBootIdentityProvider.prototype[operation]=async function(...args){const before=clock.now();try{
-        if(operation==='current'&&!delayed&&fs.existsSync(slowMarker)){delayed=true;timing('controlled-boot-delay',{delayMs:22500});await new Promise(resolve=>setTimeout(resolve,22500));}
+        if(operation==='current'&&!delayed&&fs.existsSync(slowMarker)){
+          delayed=true;
+          const result=await original.apply(this,args);
+          const nativeMs=clock.now()-before;
+          const paddingMs=(${controlledBootPaddingMs.toString()})(nativeMs);
+          timing('controlled-boot-delay',{nativeDurationMs:Math.round(nativeMs),delayMs:Math.ceil(paddingMs)});
+          if(paddingMs>0)await new Promise(resolve=>setTimeout(resolve,Math.ceil(paddingMs)));
+          return result;
+        }
         return await original.apply(this,args);
       }finally{timing('identity:'+operation,{durationMs:Math.round(clock.now()-before)});}};
     }
@@ -238,12 +251,16 @@ async function fixture(phase:AttemptPhase,pending?:string, reboot=false, liveOld
   return {root,servicePort,paths,previous,next,journal,run,cleanup,old,oldRequest,pipeCapability,fence:owner.fence};
 }
 
-async function publicRecover(v:Awaited<ReturnType<typeof fixture>>, fence?:number) {
-  const child=spawn(process.execPath,[path.join(compiled,'cli.js'),'recover','--root',v.root,'--attempt','attempt-real','--expected-fence',String(fence??v.fence)],{
+async function publicRecover(v:Awaited<ReturnType<typeof fixture>>, fence?:number, startupDelayMs=0, terminalPositive=false) {
+  const cli=path.join(compiled,'cli.js');
+  const args=['recover','--root',v.root,'--attempt','attempt-real','--expected-fence',String(fence??v.fence)];
+  // Controlled local slow-start experiment still invokes the real public CLI.
+  const command=startupDelayMs ? ['-e',`setTimeout(()=>require(${JSON.stringify(cli)}).main(${JSON.stringify(args)}).then(code=>{process.exitCode=code;}).catch(e=>{console.error(e.message);process.exitCode=1;}),${startupDelayMs});`] : [cli,...args];
+  const child=spawn(process.execPath,command,{
     cwd:v.root,windowsHide:true,env:{...process.env,NODE_ENV:'production',JWT_SECRET:'synthetic-service-secret',FILESTATION_PORT:String(v.servicePort)},stdio:['ignore','pipe','pipe'],
   });
   let output='';child.stdout!.on('data',bytes=>output+=bytes);child.stderr!.on('data',bytes=>output+=bytes);
-  try {await exitedWithin(child,60000);} catch(error) {
+  try {await exitedWithin(child,terminalPositive?recoveryWorkerBudgetMs:60_000);} catch(error) {
     child.kill('SIGKILL');await exitedWithin(child);throw new Error(`${error}: ${output}`);
   }
   try {output+=await readFile(path.join(v.root,'fixture-launch-error.txt'),'utf8');}catch{}
@@ -251,6 +268,9 @@ async function publicRecover(v:Awaited<ReturnType<typeof fixture>>, fence?:numbe
 }
 
 describe('production recovery entry and stable launcher',()=>{
+  it.each([[700,21_800],[30_000,0]])('pads a %i ms native boot query by %i ms',(elapsed,expected)=>{
+    expect(controlledBootPaddingMs(elapsed)).toBe(expected);
+  });
   it('controlled slow native boot query preserves historical COMMITTED proof',async()=>{
     const v=await fixture('COMMITTED','verify-committed-restart');
     try {
@@ -258,7 +278,7 @@ describe('production recovery entry and stable launcher',()=>{
       const prefix=await readFile(path.join(v.root,'update-attempt.journal'));
       const result=await v.run();if(result.code!==0)throw new Error(result.output);
       const timings=(await readFile(path.join(v.root,'fixture-terminal-timing.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
-      expect(timings.find(e=>e.event==='controlled-boot-delay')).toMatchObject({delayMs:22500});
+      expect(timings.find(e=>e.event==='controlled-boot-delay')).toMatchObject({nativeDurationMs:expect.any(Number),delayMs:expect.any(Number)});
       const boot=timings.find(e=>e.event==='identity:current');const proofSent=timings.find(e=>e.event==='proof-send');
       expect(boot.durationMs).toBeGreaterThanOrEqual(22500);expect(proofSent.elapsedMs).toBeGreaterThan(boot.elapsedMs);
       const state=await AttemptJournal.inspect(v.root);expect(state.phase).toBe('COMMITTED');expect(state.pending).toBeNull();
@@ -381,7 +401,7 @@ describe('production recovery entry and stable launcher',()=>{
     const prefix=await readFile(filename);
     try {
       await writeFile(filename,Buffer.concat([prefix,Buffer.from(tail)]));
-      const result=await publicRecover(v);
+      const result=await publicRecover(v,undefined,0,true);
       if(result.code!==0) throw new Error(result.output);
       expect(await realpath(path.join(v.root,'current'))).toBe(phase==='COMMITTED'?v.next:v.previous);
       expect(await readFile(v.paths.database,'utf8')).toBe(phase==='MIGRATING'?'verified-db':'changed-db');
@@ -393,7 +413,21 @@ describe('production recovery entry and stable launcher',()=>{
       if(bytes.at(-1)!==10) await writeFile(filename,prefix);
       await v.cleanup();
     }
-  });
+  }, singleWorkerCaseBudgetMs);
+  it('allows a delayed real public recover to complete its verified restart',async()=>{
+    const v=await fixture('COMMITTED');
+    const filename=path.join(v.root,'update-attempt.journal');const prefix=await readFile(filename);
+    try {
+      await writeFile(filename,Buffer.concat([prefix,Buffer.from('{"kind":"intent"')]));
+      const result=await publicRecover(v,undefined,65_000,true);
+      if(result.code!==0)throw new Error(result.output);
+      const state=await AttemptJournal.inspect(v.root);expect(state.phase).toBe('COMMITTED');expect(state.pending).toBeNull();
+      expect(state.records.at(-1)?.result).toMatchObject({version:'0.2.5',health:'ok',pid:expect.any(Number),createdAt:expect.any(String),boot:expect.any(String),nonce:expect.any(String)});
+      expect(await realpath(path.join(v.root,'current'))).toBe(v.next);expect(await readFile(v.paths.database,'utf8')).toBe('changed-db');
+    } finally {
+      const bytes=await readFile(filename);if(bytes.at(-1)!==10)await writeFile(filename,prefix);await v.cleanup();
+    }
+  }, singleWorkerCaseBudgetMs);
   it.each(['live','corrupt','wrong-fence'] as const)('public recover refuses %s without changing journal bytes',async mode=>{
     const v=await fixture('MAINTENANCE',undefined,false,mode==='live');
     const filename=path.join(v.root,'update-attempt.journal');
@@ -429,6 +463,12 @@ describe('production recovery entry and stable launcher',()=>{
       v.old.send('handoff');await exitedWithin(v.old);
       let timer:ReturnType<typeof setTimeout>;
       try {await Promise.race([exited(child),new Promise<never>((_r,reject)=>{timer=setTimeout(()=>reject(new Error('normal continuation exceeded 60s: '+output)),60000);})]);}finally{clearTimeout(timer!);}
+      if(child.exitCode!==0){
+        const state=await AttemptJournal.inspect(v.root);
+        // Only fixed categories and journal action/phase are logged; never pipe payloads.
+        const category=/timed out|timeout/i.test(output)?'timeout':/guard/i.test(output)?'guard':/identity|boot|creation/i.test(output)?'identity':/proof|launcher/i.test(output)?'launcher-proof':/journal/i.test(output)?'journal':/port|listen/i.test(output)?'port':'other';
+        throw new Error(`normal continuation exit=${child.exitCode} signal=${child.signalCode} category=${category} phase=${state.phase} pending=${state.pending?.action ?? 'none'} outputBytes=${Buffer.byteLength(output)}`);
+      }
       expect({code:child.exitCode,output}).toMatchObject({code:0});
       const done=await AttemptJournal.inspect(v.root);expect(done.phase).toBe('ROLLED_BACK');
       const handoff=done.records.findIndex(r=>r.kind==='completion' && r.phase==='HANDOFF_READY');

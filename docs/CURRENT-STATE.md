@@ -2,6 +2,8 @@
 
 Updated: 2026-10-30
 
+- **最新 hosted 结果与后续测试修复（2026-10-30）：** `76db7e7` 的无签名 candidate **41005228060** 成功并生成 Windows/Linux 制品；CI **41005228045** 的 Ubuntu 与主测试通过，Windows updater 组 **139 passed / 5 failed / 1 skipped**（6232.615s）。用户提供的失败日志显示：受控慢查询额外叠加 22.5 秒后 proof 在签名有效期外发送；三个真实 public recover 被测试外层 60 秒等待中断；F1-01 hosted 返回 code 1，原失败输出不足以确认其原因。
+- 本轮只修改 `production-recovery.spec.ts`：受控查询保留真实 native 调用，仅将首次查询总耗时补足至 22.5 秒，不在已经慢于该值的机器上再次固定叠加；public recover 正向测试使用有界 300 秒进程等待和 420 秒 case 上限，拒绝用例保留原边界。F1-01 未改安全检查或超时，仅添加脱敏失败分类。慢启动 RED **1 failed**，修后正向/拒绝 **7 passed**、proof/F1 **4 passed**（两次选例执行）；F1 本机通过不代表 hosted 原因已解决。原 Sol xhigh 已完成 scoped 审阅并 **APPROVED / PASS**。本轮提交前 server unit **54 suites / 327 passed / 20 todo**、full E2E **17 suites / 122 passed**、Web **23 files / 251 passed**、typecheck/build/diff-check 均 exit 0。生产 120 秒 claim 的慢宿主余量仍待无额外人工延迟的真实 hosted 证据，未宣称生产问题已解决或风险接受。新 CI/candidate 必须重新运行并核验。
 ## 依赖安全修复与隔离验证（2026-10-30）
 
 - 用户要求先修复 full/production audit Critical/High，由原代理审阅，再开展隔离测试。实施使用 opencode DeepSeek v4.1 max，沿用 `codex/release-auto-update` worktree，保留原 Task 5/6 报告改动。安全补丁已提交为 `540a390`；原 Sol xhigh 最终安全复审 **APPROVED / PASS**，SEC-S-I01/M01 已关闭。
