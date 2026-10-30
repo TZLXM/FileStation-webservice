@@ -440,15 +440,30 @@ describe('production recovery entry and stable launcher',()=>{
       expect(await readFile(filename)).toEqual(bytes);
     } finally {await writeFile(filename,prefix);await v.cleanup();}
   });
-  it('F1-01 normal inherited pipe waits while the old guard is held and handoff is delayed',async()=>{
+  it.each([['normal',false],['controlled slow',true]])('F1-01 normal inherited pipe %s waits while the old guard is held and handoff is delayed',async(_label,slow)=>{
     const v=await fixture('SNAPSHOT_READY','close-application',false,true);
     let child:ChildProcess|undefined;
     let tailPending=false;
+    let waitStarted=0;
     try {
       // Fail safely after OLD_STOPPED so the fixture need not wait for health.
       await rm(v.next,{recursive:true,force:true});
       const marker=path.join(v.root,'fixture-pipe-consumed');
-      child=spawn(process.execPath,['-e',`process.stdin.once('end',()=>require('fs').writeFileSync(${JSON.stringify(marker)},'received'));require(${JSON.stringify(path.join(compiled,'cli.js'))}).main(['continue','--attempt','attempt-real','--root',${JSON.stringify(v.root)}]).catch(e=>{console.error(e.message);process.exitCode=1;});`],{cwd:v.root,windowsHide:true,stdio:['pipe','pipe','pipe']});
+      const slowGate=path.join(v.root,'fixture-f1-delay-gate');
+      const slowTiming=path.join(v.root,'fixture-f1-delay-timing.jsonl');
+      const latencyProbe=slow ? `
+        const fs=require('fs');const provider=require(${JSON.stringify(path.join(compiled,'state/boot-identity.js'))}).PlatformBootIdentityProvider;
+        const original=provider.prototype.current;let injected=false;
+        provider.prototype.current=async function(...args){
+          const result=await original.apply(this,args);
+          if(!injected){injected=true;const deadline=Date.now()+30000;while(!fs.existsSync(${JSON.stringify(slowGate)})){if(Date.now()>deadline)throw Error('F1 delay gate timed out');await new Promise(r=>setTimeout(r,20));}
+            fs.appendFileSync(${JSON.stringify(slowTiming)},JSON.stringify({event:'delay-start',at:Date.now()})+'\\n');
+            await new Promise(r=>setTimeout(r,65000));
+            fs.appendFileSync(${JSON.stringify(slowTiming)},JSON.stringify({event:'delay-complete',at:Date.now()})+'\\n');
+          }return result;
+        };
+      ` : '';
+      child=spawn(process.execPath,['-e',`${latencyProbe}process.stdin.once('end',()=>require('fs').writeFileSync(${JSON.stringify(marker)},'received'));require(${JSON.stringify(path.join(compiled,'cli.js'))}).main(['continue','--attempt','attempt-real','--root',${JSON.stringify(v.root)}]).catch(e=>{console.error(e.message);process.exitCode=1;});`],{cwd:v.root,windowsHide:true,stdio:['pipe','pipe','pipe']});
       let output='';child.stdout!.on('data',c=>output+=c);child.stderr!.on('data',c=>output+=c);
       child.stdin!.end(JSON.stringify({...JSON.parse(v.pipeCapability.toString()),runtime:{NODE_ENV:'production',JWT_SECRET:'synthetic-service-secret',FILESTATION_PORT:String(v.servicePort)}}));
       const deadline=Date.now()+10000;
@@ -461,8 +476,14 @@ describe('production recovery entry and stable launcher',()=>{
       expect(child.exitCode).toBeNull();
       await v.oldRequest('restore-tail');tailPending=false;
       v.old.send('handoff');await exitedWithin(v.old);
+      waitStarted=Date.now();if(slow)await writeFile(slowGate,'old process exited; continuation wait begins');
       let timer:ReturnType<typeof setTimeout>;
-      try {await Promise.race([exited(child),new Promise<never>((_r,reject)=>{timer=setTimeout(()=>reject(new Error('normal continuation exceeded 60s: '+output)),60000);})]);}finally{clearTimeout(timer!);}
+      try {await Promise.race([exited(child),new Promise<never>((_r,reject)=>{timer=setTimeout(()=>reject(new Error('normal continuation exceeded '+recoveryWorkerBudgetMs+'ms: '+output)),recoveryWorkerBudgetMs);})]);}finally{clearTimeout(timer!);}
+      if(slow){
+        const events=(await readFile(slowTiming,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+        expect(events[0]).toMatchObject({event:'delay-start'});expect(events[0].at).toBeGreaterThanOrEqual(waitStarted);
+        expect(events[1]).toMatchObject({event:'delay-complete'});expect(events[1].at-events[0].at).toBeGreaterThanOrEqual(65_000);
+      }
       if(child.exitCode!==0){
         const state=await AttemptJournal.inspect(v.root);
         // Only fixed categories and journal action/phase are logged; never pipe payloads.
@@ -475,8 +496,25 @@ describe('production recovery entry and stable launcher',()=>{
       const stopped=done.records.findIndex(r=>r.kind==='intent' && r.action==='record-old-stopped');
       expect(handoff).toBeGreaterThan(-1);expect(stopped).toBeGreaterThan(handoff);
       expect(await realpath(path.join(v.root,'current'))).toBe(v.previous);
-    }finally{if(child && child.exitCode===null && child.signalCode===null){child.kill('SIGKILL');await exitedWithin(child);}if(tailPending)await v.oldRequest('restore-tail');await v.cleanup();}
-  });
+      expect(await readFile(v.paths.database,'utf8')).toBe('verified-db');
+      const completed=done.records.filter(record=>record.kind==='completion' && record.result && typeof record.result==='object' && !Array.isArray(record.result) && typeof (record.result as any).nonce==='string').at(-1);
+      expect(completed?.result).toMatchObject({version:'0.2.0',health:'ok',pid:expect.any(Number),createdAt:expect.any(String),boot:expect.any(String),nonce:expect.any(String)});
+      const proof=completed!.result as unknown as DetachedIdentity;
+      expect(await identity.isProcessAlive(proof.pid,proof.createdAt)).toBe(true);
+      expect(await identity.listeningPid!(v.servicePort)).toBe(proof.pid);
+    }finally{
+      try {
+        if(child && child.exitCode===null && child.signalCode===null){child.kill('SIGKILL');await exitedWithin(child);}
+        if(tailPending)await v.oldRequest('restore-tail');
+        if(slow){
+          try {
+            const timing=await readFile(path.join(v.root,'fixture-f1-delay-timing.jsonl'),'utf8');
+            console.info('F1 controlled delay evidence: '+JSON.stringify({waitStarted,finishedAt:Date.now(),oldExitCode:v.old.exitCode,childExitCode:child?.exitCode,childSignal:child?.signalCode,timing:timing.trim().split('\n').filter(Boolean).map(line=>JSON.parse(line))}));
+          } catch { /* Timing is diagnostic only; it must never prevent cleanup. */ }
+        }
+      } finally {await v.cleanup();}
+    }
+  }, singleWorkerCaseBudgetMs);
   it('F1-02 rejected repair contender cannot protect/write or change an in-flight journal tail under the old guard',async()=>{
     const v=await fixture('SNAPSHOT_READY',undefined,false,true);
     const file=path.join(v.root,'update-attempt.journal');const before=await readFile(file);

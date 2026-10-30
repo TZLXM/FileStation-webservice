@@ -2,6 +2,9 @@
 
 Updated: 2026-10-30
 
+- **Windows F1-01 后续验证（2026-10-30）：** 用户提供的 `409d8b9` hosted CI 结果为 Windows updater **146 passed / 1 failed / 1 skipped**；唯一失败是交接后测试等待 60 秒超时，不能仅据此确定生产原因。测试将该等待改为既有的有界 300 秒 worker 预算，case 上限 420 秒，保留 guard、交接顺序、真实进程身份及 proof 检查；新增真实 native 调用后受控延迟 65 秒的回归和回滚数据库、监听进程检查。控制延迟在旧 writer 退出后开始，旧超时 RED 失败；最终文件经原审阅修正诊断读取异常时的清理路径后，正常和慢速两项本地 Windows Node 20.17 测试 **2 passed / 50 filtered**。原审阅代理确认清理问题关闭；独立最终审阅对本测试补丁 APPROVED / PASS，六项清理故障注入符合预期，不代表整条 PR 或发布获批准。
+- 本地旧 fixture writer 退出码 `0xC0000409` 尚未解释，不能称为正常退出；本地选例通过不证明生产更新已全面验证。hosted 测得自然慢查询下 proof 约 97.7 秒发出，生产 120 秒 claim 在更慢宿主的余量仍未证明。新提交的 hosted CI 与无签名 candidate 必须重新验证，未授权发布或接受该风险。本轮本地 server unit **54 suites / 327 passed / 20 todo**、完整 E2E **17 suites / 122 passed**、Web **23 files / 251 passed**、typecheck 和 build 均 exit 0。
+
 - **最新 hosted 结果与后续测试修复（2026-10-30）：** `76db7e7` 的无签名 candidate **41005228060** 成功并生成 Windows/Linux 制品；CI **41005228045** 的 Ubuntu 与主测试通过，Windows updater 组 **139 passed / 5 failed / 1 skipped**（6232.615s）。用户提供的失败日志显示：受控慢查询额外叠加 22.5 秒后 proof 在签名有效期外发送；三个真实 public recover 被测试外层 60 秒等待中断；F1-01 hosted 返回 code 1，原失败输出不足以确认其原因。
 - 本轮只修改 `production-recovery.spec.ts`：受控查询保留真实 native 调用，仅将首次查询总耗时补足至 22.5 秒，不在已经慢于该值的机器上再次固定叠加；public recover 正向测试使用有界 300 秒进程等待和 420 秒 case 上限，拒绝用例保留原边界。F1-01 未改安全检查或超时，仅添加脱敏失败分类。慢启动 RED **1 failed**，修后正向/拒绝 **7 passed**、proof/F1 **4 passed**（两次选例执行）；F1 本机通过不代表 hosted 原因已解决。原 Sol xhigh 已完成 scoped 审阅并 **APPROVED / PASS**。本轮提交前 server unit **54 suites / 327 passed / 20 todo**、full E2E **17 suites / 122 passed**、Web **23 files / 251 passed**、typecheck/build/diff-check 均 exit 0。生产 120 秒 claim 的慢宿主余量仍待无额外人工延迟的真实 hosted 证据，未宣称生产问题已解决或风险接受。新 CI/candidate 必须重新运行并核验。
 ## 依赖安全修复与隔离验证（2026-10-30）
