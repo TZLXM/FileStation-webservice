@@ -16,6 +16,10 @@ import {
   startGatedApplication,
   startValidationApplication,
 } from './maintenance/server-startup';
+import {
+  closeResourceAfterFailure,
+  runWithCleanupOnFailure,
+} from './maintenance/application-cleanup';
 
 interface PreparedStartup {
   mode: 'legacy' | 'managed';
@@ -154,83 +158,111 @@ async function bootstrapNormal() {
   }
 
   // ========== 阶段 1：创建应用（migrationsRun 在此触发） ==========
-  const app = await NestFactory.create(AppModule, { bodyParser: false });
-  app.get(ApplicationShutdownService).attach(app);
-  app.enableShutdownHooks();
-  const configService = app.get(ConfigService);
-
-  setupFullApplication(app, configService);
-
-  // ========== 阶段 3：app.init() 触发数据库初始化 ==========
-  await app.init();
-  if (process.env.FILESTATION_INSTALL_ROOT) {
-    const { UpdateAuditReconciler } = await import(
-      './updates/update-audit-reconciler'
-    );
-    await app
-      .get(UpdateAuditReconciler)
-      .reconcile(process.env.FILESTATION_INSTALL_ROOT);
+  let app: Awaited<ReturnType<typeof NestFactory.create>>;
+  try {
+    app = await NestFactory.create(AppModule, {
+      bodyParser: false,
+      abortOnError: false,
+    });
+  } catch (error) {
+    // Nest has not returned an application handle yet. The executable entry
+    // must terminate so partially initialized providers cannot keep resources.
+    if (require.main === module) process.exit(1);
+    throw error;
   }
-  await app.get(StorageService).activate();
-  await app.get(FileLifecycleService).activate();
+  return runWithCleanupOnFailure(app, async () => {
+    app.get(ApplicationShutdownService).attach(app);
+    app.enableShutdownHooks();
+    const configService = app.get(ConfigService);
 
-  // ========== 阶段 4：init token 覆盖（listen 前写入 DB，防 listen 后窗口期旧 token 仍有效） ==========
-  const authService = app.get(AuthService);
-  const initToken = await authService.ensureInitToken();
+    setupFullApplication(app, configService);
 
-  // ========== 阶段 5：最后才监听 ==========
-  await app.listen(port, host);
-
-  const serveStatic = configService.get<boolean>('app.serveStatic');
-  const displayHost = host === '0.0.0.0' ? 'localhost' : host;
-  logger.log(`FileStation server running on http://${displayHost}:${port}`);
-  logger.log(`Environment: ${configService.get<string>('app.nodeEnv')}`);
-  if (prepared.mode === 'managed') {
-    logger.log(
-      `Managed startup: install=${prepared.root}, release=${prepared.releaseRealpath}`,
-    );
-  }
-  if (serveStatic) {
-    logger.log(`部署模式：单进程（无 Nginx）—— 前端静态文件由本进程托管于 http://${displayHost}:${port}`);
-  } else if (host === '127.0.0.1') {
-    logger.log('部署模式：仅监听回环（Nginx 反代场景，或开发模式 vite 代理）');
-  } else {
-    logger.log(`部署模式：直接监听 ${host}:${port}（无静态托管，前端需单独部署）`);
-  }
-
-  // ========== 阶段 6：listen 成功后才打印 init token（token 只在进程真正激活后显示） ==========
-  // 防 EADDRINUSE 场景：进程打印了 token 却未启动成功，用户拿未激活 token 去初始化
-  if (initToken) {
-    // 初始化页面是前端路由（React /init），不是后端 API（POST /api/v1/auth/init 仅接受 POST）。
-    // 单进程模式（FILESTATION_SERVE_STATIC=true）或 Nginx 同端口托管时，直接用服务端口；
-    // 开发模式前后端分离（vite 5173），设 FILESTATION_WEB_URL=http://localhost:5173 指向开发前端。
-    const webUrl = process.env.FILESTATION_WEB_URL || `http://${displayHost}:${port}`;
-    logger.log('================================');
-    logger.log('FileStation 首次启动（未初始化）');
-    logger.log(`初始化 Token: ${initToken}`);
-    logger.log('有效期：10 分钟，仅本机可完成初始化');
-    logger.log('');
-    logger.log('请在浏览器打开以下地址完成初始化：');
-    logger.log(`  ${webUrl}/init`);
-    logger.log('');
-    logger.log('（输入上面的初始化 Token + 设置管理员用户名/密码）');
-    logger.log('================================');
-  }
-  const { DataSource } = await import('typeorm');
-  const db = app.get(DataSource);
-  const integrity = await db.query('PRAGMA integrity_check');
-  const foreignKeys = await db.query('PRAGMA foreign_key_check');
-  const runtimeVersion = (await import('../package.json')).version;
-  return { app, prepared, configService, initToken, reconcileUpdateAudit: async () => {
-    if(prepared.mode==='managed') {
-      const {UpdateAuditReconciler}=await import('./updates/update-audit-reconciler');
-      await app.get(UpdateAuditReconciler).reconcile(prepared.root);
+    // ========== 阶段 3：app.init() 触发数据库初始化 ==========
+    await app.init();
+    if (process.env.FILESTATION_INSTALL_ROOT) {
+      const { UpdateAuditReconciler } = await import(
+        './updates/update-audit-reconciler'
+      );
+      await app
+        .get(UpdateAuditReconciler)
+        .reconcile(process.env.FILESTATION_INSTALL_ROOT);
     }
-  }, restartHealth: {
-    version: runtimeVersion,
-    release: prepared.releaseRealpath,
-    health: integrity.length===1 && integrity[0].integrity_check==='ok' && foreignKeys.length===0 && app.getHttpServer().listening ? 'ok' : 'failed',
-  } };
+    await app.get(StorageService).activate();
+    await app.get(FileLifecycleService).activate();
+
+    // ========== 阶段 4：init token 覆盖（listen 前写入 DB，防 listen 后窗口期旧 token 仍有效） ==========
+    const authService = app.get(AuthService);
+    const initToken = await authService.ensureInitToken();
+
+    // ========== 阶段 5：最后才监听 ==========
+    await app.listen(port, host);
+
+    const serveStatic = configService.get<boolean>('app.serveStatic');
+    const displayHost = host === '0.0.0.0' ? 'localhost' : host;
+    logger.log(`FileStation server running on http://${displayHost}:${port}`);
+    logger.log(`Environment: ${configService.get<string>('app.nodeEnv')}`);
+    if (prepared.mode === 'managed') {
+      logger.log(
+        `Managed startup: install=${prepared.root}, release=${prepared.releaseRealpath}`,
+      );
+    }
+    if (serveStatic) {
+      logger.log(`部署模式：单进程（无 Nginx）—— 前端静态文件由本进程托管于 http://${displayHost}:${port}`);
+    } else if (host === '127.0.0.1') {
+      logger.log('部署模式：仅监听回环（Nginx 反代场景，或开发模式 vite 代理）');
+    } else {
+      logger.log(`部署模式：直接监听 ${host}:${port}（无静态托管，前端需单独部署）`);
+    }
+
+    // ========== 阶段 6：listen 成功后才打印 init token（token 只在进程真正激活后显示） ==========
+    // 防 EADDRINUSE 场景：进程打印了 token 却未启动成功，用户拿未激活 token 去初始化
+    if (initToken) {
+      // 初始化页面是前端路由（React /init），不是后端 API（POST /api/v1/auth/init 仅接受 POST）。
+      // 单进程模式（FILESTATION_SERVE_STATIC=true）或 Nginx 同端口托管时，直接用服务端口；
+      // 开发模式前后端分离（vite 5173），设 FILESTATION_WEB_URL=http://localhost:5173 指向开发前端。
+      const webUrl = process.env.FILESTATION_WEB_URL || `http://${displayHost}:${port}`;
+      logger.log('================================');
+      logger.log('FileStation 首次启动（未初始化）');
+      logger.log(`初始化 Token: ${initToken}`);
+      logger.log('有效期：10 分钟，仅本机可完成初始化');
+      logger.log('');
+      logger.log('请在浏览器打开以下地址完成初始化：');
+      logger.log(`  ${webUrl}/init`);
+      logger.log('');
+      logger.log('（输入上面的初始化 Token + 设置管理员用户名/密码）');
+      logger.log('================================');
+    }
+    const { DataSource } = await import('typeorm');
+    const db = app.get(DataSource);
+    const integrity = await db.query('PRAGMA integrity_check');
+    const foreignKeys = await db.query('PRAGMA foreign_key_check');
+    const runtimeVersion = (await import('../package.json')).version;
+    return {
+      app,
+      prepared,
+      configService,
+      initToken,
+      reconcileUpdateAudit: async () => {
+        if (prepared.mode === 'managed') {
+          const { UpdateAuditReconciler } = await import(
+            './updates/update-audit-reconciler'
+          );
+          await app.get(UpdateAuditReconciler).reconcile(prepared.root);
+        }
+      },
+      restartHealth: {
+        version: runtimeVersion,
+        release: prepared.releaseRealpath,
+        health:
+          integrity.length === 1 &&
+          integrity[0].integrity_check === 'ok' &&
+          foreignKeys.length === 0 &&
+          app.getHttpServer().listening
+            ? 'ok'
+            : 'failed',
+      },
+    };
+  });
 }
 
 async function bootstrapUpdate(
@@ -254,13 +286,15 @@ async function bootstrapUpdate(
       host: '127.0.0.1',
       port: Number(process.env.FILESTATION_PORT ?? 0),
     });
-    const address = handle.app.getHttpServer().address();
-    const port =
-      address && typeof address === 'object' ? address.port : 0;
-    logger.log(
-      `Update validation listening on 127.0.0.1:${port} (release=${prepared.releaseRealpath})`,
-    );
-    return handle;
+    return runWithCleanupOnFailure(handle, async () => {
+      const address = handle.app.getHttpServer().address();
+      const port =
+        address && typeof address === 'object' ? address.port : 0;
+      logger.log(
+        `Update validation listening on 127.0.0.1:${port} (release=${prepared.releaseRealpath})`,
+      );
+      return handle;
+    });
   }
 
   const handle = await startGatedApplication({
@@ -274,19 +308,28 @@ async function bootstrapUpdate(
       await app.get(AuthService).ensureInitToken();
     },
   });
-  void handle.committed.then(
-    () => logger.log('Matching durable COMMITTED observed; normal service activated'),
-    (error) =>
-      logger.error(
-        `Gated startup failed: ${
-          error instanceof Error ? error.message : 'unknown error'
-        }`,
-      ),
-  );
-  logger.log(
-    `Update gated service listening in maintenance mode (release=${prepared.releaseRealpath})`,
-  );
-  return handle;
+  return runWithCleanupOnFailure(handle, async () => {
+    void handle.committed.then(
+      () =>
+        logger.log(
+          'Matching durable COMMITTED observed; normal service activated',
+        ),
+      async (error) => {
+        process.exitCode = 1;
+        const cleanupError = await closeResourceAfterFailure(handle, error);
+        logger.error(
+          `Gated startup failed: ${
+            error instanceof Error ? error.message : 'unknown error'
+          }`,
+        );
+        if (cleanupError !== undefined) process.exit(1);
+      },
+    );
+    logger.log(
+      `Update gated service listening in maintenance mode (release=${prepared.releaseRealpath})`,
+    );
+    return handle;
+  });
 }
 
 export async function bootstrap(
@@ -310,6 +353,6 @@ if (require.main === module) {
     const message =
       error instanceof Error ? error.message : 'FileStation startup failed';
     process.stderr.write(`FileStation startup failed: ${message}\n`);
-    process.exitCode = 1;
+    process.exit(1);
   });
 }

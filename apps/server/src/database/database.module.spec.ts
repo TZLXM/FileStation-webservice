@@ -3,10 +3,32 @@ import { DatabaseModule } from './database.module';
 import { ConfigModule } from '@nestjs/config';
 import configuration from '../config/configuration';
 import { DataSource } from 'typeorm';
+import { AdminAccount } from '../accounts/entities/admin-account.entity';
+import { ApiToken } from '../api-tokens/entities/api-token.entity';
+import { AuditLog } from '../audit/entities/audit-log.entity';
+import { Authenticator } from '../auth/entities/authenticator.entity';
+import { LoginChallenge } from '../auth/entities/login-challenge.entity';
+import { RecoveryCode } from '../auth/entities/recovery-code.entity';
+import { Session } from '../auth/entities/session.entity';
+import { SystemMeta } from '../auth/entities/system-meta.entity';
+import { File } from '../files/entities/file.entity';
+import { UploadPart } from '../files/entities/upload-part.entity';
+import { UploadSession } from '../files/entities/upload-session.entity';
+import { Folder } from '../folders/entities/folder.entity';
+import { Setting } from '../settings/entities/setting.entity';
+import { DownloadSession } from '../shares/entities/download-session.entity';
+import { DownloadTicket } from '../shares/entities/download-ticket.entity';
+import { Share } from '../shares/entities/share.entity';
+import { InitialSchema1700000000000 } from './migrations/1700000000000-initial-schema';
 import { OneTotpAuthenticatorPerAccount1700000000001 } from './migrations/1700000000001-one-totp-authenticator-per-account';
+import { UpdateAuditIdempotency1800000000000 } from './migrations/1800000000000-update-audit-idempotency';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { v4 as uuidv4 } from 'uuid';
+import { promisify } from 'util';
+import { execFile } from 'child_process';
+
+const execFileAsync = promisify(execFile);
 
 describe('DatabaseModule', () => {
   let module: TestingModule;
@@ -53,6 +75,80 @@ describe('DatabaseModule', () => {
   it('should be defined', () => {
     expect(module).toBeDefined();
   });
+
+  it('registers every entity by reference so case-variant module paths cannot split class identity', () => {
+    expect(dataSource.options.entities).toEqual([
+      AdminAccount,
+      ApiToken,
+      Authenticator,
+      AuditLog,
+      DownloadSession,
+      DownloadTicket,
+      File,
+      Folder,
+      LoginChallenge,
+      RecoveryCode,
+      Session,
+      Setting,
+      Share,
+      SystemMeta,
+      UploadPart,
+      UploadSession,
+    ]);
+    expect(dataSource.getMetadata(File).target).toBe(File);
+    expect(dataSource.getMetadata(SystemMeta).target).toBe(SystemMeta);
+  });
+
+  it('registers every migration by reference in execution order', () => {
+    expect(dataSource.options.migrations).toEqual([
+      InitialSchema1700000000000,
+      OneTotpAuthenticatorPerAccount1700000000001,
+      UpdateAuditIdempotency1800000000000,
+    ]);
+    expect(dataSource.migrations.map((migration) => migration.name)).toEqual([
+      'InitialSchema1700000000000',
+      'OneTotpAuthenticatorPerAccount1700000000001',
+      'UpdateAuditIdempotency1800000000000',
+    ]);
+  });
+
+  (process.platform === 'win32' ? it : it.skip)(
+    'keeps repository identity through managed cwd and case-variant entity paths',
+    async () => {
+      const fixture = join(
+        __dirname,
+        'database.module.case-variant.fixture.cjs',
+      );
+      const { stdout } = await execFileAsync(
+        process.execPath,
+        [fixture, testDir, join(__dirname, '../../../..')],
+        {
+          cwd: testDir,
+          timeout: 30_000,
+          windowsHide: true,
+          env: {
+            ...process.env,
+            NODE_ENV: 'test',
+            FILESTATION_MANAGED_LAUNCH: 'true',
+            FILESTATION_INSTALL_ROOT: testDir,
+            FILESTATION_DB_PATH: ':memory:',
+          },
+        },
+      );
+      const result = JSON.parse(stdout.trim().split(/\r?\n/u).at(-1)!);
+      expect(result).toEqual({
+        metadataCount: 16,
+        fileTargetIdentity: true,
+        systemMetaTargetIdentity: true,
+        migrationClasses: [
+          'InitialSchema1700000000000',
+          'OneTotpAuthenticatorPerAccount1700000000001',
+          'UpdateAuditIdempotency1800000000000',
+        ],
+      });
+    },
+    45_000,
+  );
 
   it('should have WAL mode enabled', async () => {
     const result = await dataSource.query('PRAGMA journal_mode');

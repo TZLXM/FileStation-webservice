@@ -2,6 +2,8 @@
 
 Updated: 2026-10-30
 
+- **2026-11-01 Windows 托管验收阻断与修复：** 精确 candidate `69651931ec4e5156f54a13c399d096c326a9ce54` 的 bootstrap、快照和依赖复制通过，但真实托管启动暴露 Windows `D:\Program`/`D:\program` 路径大小写造成 TypeORM 实体类身份分裂；已改为显式注册 16 个实体和 3 个迁移。启动失败清理已覆盖普通/gated/validation/updater、create 阶段、10 秒关闭超时和非零退出；COMMITTED 恢复规则未改变。最终 server unit **57 suites / 345 passed / 20 todo**、E2E **17 suites / 122 passed**、Web **23 files / 251 passed**、typecheck/build 通过；server unit 仍有既有 worker 强制退出警告。修复尚未生成新 candidate 或完成真实托管启动、更新和回滚验收，正式发布继续阻断。
+
 - **6378ea7 真实场景准备与 bootstrap 预演（2026-10-31）：** 同提交 hosted CI（重跑后）与无签名 candidate 均成功；candidate 绑定 Windows/Linux 制品，正式 evidence 尚未填写。Windows Node 22 在专属短路径、合成 HTTP/SQLite 旧进程和工作树产物上验证活进程拒绝、停止后 dry-run、bootstrap、幂等、SQLite 快照及 launcher dry-run；因无法证明出站网络隔离，未启动正常应用；证据 `C:\fsb-1031-a781b0\REPORT.md`。Linux Node 20.17 无网络只读根容器，在合成 SQLite writer 上通过活进程拒绝、dry-run、bootstrap、快照、路径权限及幂等；这是使用源码和重建 sqlite3 的预演，不是原始 candidate 或非 Docker installed 验收。首次 Windows Git archive 因 autocrlf 输出 CRLF 导致 bash 失败；Git blob 为 LF，字节保持导出重试通过，失败日志保留。两平台合成运行数据及专属容器已清理，证据保留。
 - **验收缺口：** 0.2.5 要求旧版先 bootstrap，同版本不会自动更新；当前 candidate 无签名，现有受保护签名发布任务又依赖完整发布证据，缺少发布前可用的签名候选与受控分发通道。真实 Windows/Linux confirmed update、提交前 rollback、相同候选制品验收与私钥配对仍待解决；不得把预演记作 release evidence passed。先前 CI 并发 E2E 曾因测试 gate 与 Supertest 自动关闭监听的循环等待超时，重跑通过；受控复现支持测试时序问题，根因与原 CI 无运行时跟踪不能完全断言。版本标签与普通推送的未来工作见 `docs/FUTURE-WORK.md`，当前工作流未修改。
 
@@ -505,3 +507,4 @@ Task 9 orchestrator, maintenance snapshots/restoration, global WriteBarrier and 
 - 实际托管启动失败：bootstrap 的通用排除规则删除了 `node_modules/typeorm/cache` 中的运行代码，启动报缺少 `QueryResultCacheFactory`。相同规则影响源码备份和独立 updater 依赖；bootstrap 成功及清单自洽不能证明备份可恢复。已有缺损托管目录必须保留供诊断，不得直接认定幂等成功或依赖该备份恢复。
 - 已停止失败的托管启动并恢复原隔离非托管测试服务；后端和反代入口返回 HTTP 200。真实托管启动、同制品更新和回滚仍未通过，禁止据此次 bootstrap 宣称发布验收完成。
 - 后续本地修复调整依赖复制排除规则，记录并校验四棵复制树、拒绝旧复制策略，纳入环境文件和清单空间预算；拒绝链接复制根，并在首次发布前验证恢复资产。Windows 聚焦 bootstrap 全套 45 项通过（之后新增的链接与失败清理 4 项另行通过）；服务端 unit 327、full E2E 122、Web 251、根 typecheck/build 在最后一轮局部 updater 变更之前通过，最终 updater typecheck/build 通过。独立复审关闭已确认的链接根 P1，但修复制品尚未在真实服务器重测，也尚未完成真实更新及回滚验收。
+- 候选 `69651931ec4e5156f54a13c399d096c326a9ce54` 的 CI `41202993358` 和无签名 candidate `41202993342` 双平台成功。2026-10-31 Windows 真实重测中，同制品 bootstrap 完成、快照完整性为 ok，旧 TypeORM cache 缺失已消除；但托管启动失败，受控诊断确认 Node 将同一实体模块以 `D:\Program` 和 `D:\program` 两种路径分别加载，TypeORM 连接中的实体类与 Nest 服务请求的同名实体类不相同。启动失败后进程未自行退出，亦需修复清理。原隔离非托管站点已恢复；新托管启动、同制品更新和回滚验收仍未通过，正式发布继续阻断。

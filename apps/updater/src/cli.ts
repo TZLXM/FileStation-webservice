@@ -118,6 +118,49 @@ function snapshotEnvironment(): NodeJS.ProcessEnv {
   return result;
 }
 
+interface CloseableApplicationHandle {
+  close?: () => Promise<void>;
+  app?: {
+    close?: () => Promise<void>;
+  };
+}
+
+async function closeApplicationHandleAfterFailure(
+  handle: CloseableApplicationHandle,
+  originalError: unknown,
+): Promise<boolean> {
+  const close =
+    typeof handle.close === "function"
+      ? () => handle.close!()
+      : typeof handle.app?.close === "function"
+        ? () => handle.app!.close!()
+        : undefined;
+  if (!close) return false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.resolve().then(close),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('startup cleanup timed out')), 10_000); }),
+    ]);
+    return false;
+  } catch (cleanupError) {
+    if (originalError instanceof Error && originalError.cause === undefined) {
+      try {
+        Object.defineProperty(originalError, "cause", {
+          configurable: true,
+          value: cleanupError,
+          writable: true,
+        });
+      } catch {
+        // Cleanup diagnostics must not replace the original launch failure.
+      }
+    }
+    return true;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function runServerSnapshot(
   sourceRoot: string,
   database: string,
@@ -381,21 +424,32 @@ export async function main(
     metadata,
     importer: dependencies.importer,
   });
-  const imported=launched.imported as {bootstrap?:()=>Promise<{app?:{getHttpServer:()=>{listening:boolean}};restartHealth?:{version:string;release:string;health:string};reconcileUpdateAudit?:()=>Promise<void>}>};
+  const imported=launched.imported as {bootstrap?:()=>Promise<{app?:{getHttpServer:()=>{listening:boolean};close?:()=>Promise<void>};restartHealth?:{version:string;release:string;health:string};reconcileUpdateAudit?:()=>Promise<void>;close?:()=>Promise<void>}>};
   if(typeof imported?.bootstrap==='function') {
     const handle=await imported.bootstrap();
-    if(inherited) {
-      if(!handle.app?.getHttpServer().listening || !handle.restartHealth || handle.restartHealth.health!=='ok') throw new Error('terminal startup health is not ready');
-      const identity=new PlatformBootIdentityProvider();
-      const proof={...handle.restartHealth,pid:process.pid,createdAt:await identity.processCreatedAt(process.pid),boot:(await identity.current()).value,attemptId:inherited.launch!.attemptId,fence:inherited.launch!.fence,nonce:inherited.launch!.nonce};
-      process.send!({proof,receipt:inherited.authority.receipt(proof as never)});
-      process.once('message',async message=>{
-        if((message as {event?:string}).event==='verification-durable') {
-          // The normal app has already activated. A bounded, explicit callback
-          // catches the verification event appended after initial reconciliation.
-          await handle.reconcileUpdateAudit?.();
-        }
-      });
+    try {
+      if(inherited) {
+        if(!handle.app?.getHttpServer().listening || !handle.restartHealth || handle.restartHealth.health!=='ok') throw new Error('terminal startup health is not ready');
+        const identity=new PlatformBootIdentityProvider();
+        const proof={...handle.restartHealth,pid:process.pid,createdAt:await identity.processCreatedAt(process.pid),boot:(await identity.current()).value,attemptId:inherited.launch!.attemptId,fence:inherited.launch!.fence,nonce:inherited.launch!.nonce};
+        process.send!({proof,receipt:inherited.authority.receipt(proof as never)});
+        process.once('message',message=>{
+          if((message as {event?:string}).event==='verification-durable') {
+            // The normal app has already activated. A bounded, explicit callback
+            // catches the verification event appended after initial reconciliation.
+            void handle.reconcileUpdateAudit?.().catch(async error=>{
+              const cleanupFailed=await closeApplicationHandleAfterFailure(handle,error);
+              const detail=error instanceof Error?error.message:'operation failed';
+              process.stderr.write(`filestation-updater: ${detail}\n`);
+              process.exitCode=1;
+              if(cleanupFailed && require.main === module) process.exit(1);
+            });
+          }
+        });
+      }
+    } catch (error) {
+      await closeApplicationHandleAfterFailure(handle, error);
+      throw error;
     }
   } else if(inherited) throw new Error('stable launcher server has no bootstrap entry');
   return 0;
@@ -414,6 +468,6 @@ if (require.main === module) {
             ? error.message
             : "operation failed";
       process.stderr.write(`filestation-updater: ${detail}\n`);
-      process.exitCode = 1;
+      process.exit(1);
     });
 }

@@ -11,9 +11,9 @@ let mockExecutable: string;
 jest.mock('fs/promises',()=>({...jest.requireActual('fs/promises'),realpath:async (p:string)=>p.endsWith('main.ts') ? mockExecutable : jest.requireActual('fs/promises').realpath(p)}));
 
 describe('actual authorized bootstrap disk preflight before module startup',()=>{
-  let root:string; let environment:NodeJS.ProcessEnv; let argv:string[];
+  let root:string; let environment:NodeJS.ProcessEnv; let argv:string[]; let exitCode:number|string|undefined;
   beforeEach(async()=>{
-    environment={...process.env}; argv=process.argv;
+    environment={...process.env}; argv=process.argv; exitCode=process.exitCode; process.exitCode=0;
     root=await fs.realpath(await fs.mkdtemp(path.join(tmpdir(),'filestation-authorized-preflight-')));
     const release=path.join(root,'releases','v0.2.5');
     mockExecutable=path.join(release,'apps/server/dist/main.js');
@@ -28,7 +28,7 @@ describe('actual authorized bootstrap disk preflight before module startup',()=>
     (startValidationApplication as jest.Mock).mockRejectedValue(new Error('startup-import-boundary'));
     (startGatedApplication as jest.Mock).mockRejectedValue(new Error('startup-import-boundary'));
   });
-  afterEach(async()=>{process.env=environment;process.argv=argv;jest.restoreAllMocks();jest.clearAllMocks();await fs.rm(root,{recursive:true,force:true});});
+  afterEach(async()=>{process.env=environment;process.argv=argv;process.exitCode=exitCode;jest.restoreAllMocks();jest.clearAllMocks();await fs.rm(root,{recursive:true,force:true});});
 
   async function run(mode:'validate'|'gated') {
     const journal=await AttemptJournal.open(root);
@@ -55,5 +55,58 @@ describe('actual authorized bootstrap disk preflight before module startup',()=>
     delete process.env.JWT_SECRET;
     await expect(run(mode)).rejects.toThrow(/service environment/i);
     expect(startValidationApplication).not.toHaveBeenCalled();expect(startGatedApplication).not.toHaveBeenCalled();
+  });
+
+  it('closes a validation handle when post-start inspection fails',async()=>{
+    const close=jest.fn(async()=>undefined);const originalError=new Error('address inspection failed');
+    (startValidationApplication as jest.Mock).mockResolvedValue({app:{getHttpServer:()=>{throw originalError;}},close});
+    await expect(run('validate')).rejects.toBe(originalError);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes a gated handle when committed startup fails after it was returned',async()=>{
+    let rejectCommitted!:(error:unknown)=>void;
+    const committed=new Promise<void>((_resolve,reject)=>{rejectCommitted=reject;});
+    const close=jest.fn(async()=>undefined);const originalError=new Error('gated commit activation failed');
+    (startGatedApplication as jest.Mock).mockResolvedValue({app:{},committed,close});
+    const handle=await run('gated');
+    expect(handle).toEqual(expect.objectContaining({close}));
+    rejectCommitted(originalError);
+    await new Promise<void>(resolve=>setImmediate(resolve));
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('forces failure exit when gated cleanup cannot close its listener',async()=>{
+    let rejectCommitted!:(error:unknown)=>void;
+    const committed=new Promise<void>((_resolve,reject)=>{rejectCommitted=reject;});
+    const originalError=new Error('gated commit activation failed');
+    const cleanupError=new Error('gated close failed');
+    const close=jest.fn(async()=>{throw cleanupError;});
+    const exit=jest.spyOn(process,'exit').mockImplementation((()=>undefined) as never);
+    (startGatedApplication as jest.Mock).mockResolvedValue({app:{},committed,close});
+    const handle=await run('gated');
+    expect(handle).toEqual(expect.objectContaining({close}));
+    rejectCommitted(originalError);
+    await new Promise<void>(resolve=>setImmediate(resolve));
+    await new Promise<void>(resolve=>setImmediate(resolve));
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(process.exitCode).toBe(1);
+    expect((originalError as Error&{cause?:unknown}).cause).toBe(cleanupError);
+  });
+
+  it('leaves a successfully COMMITTED gated application open',async()=>{
+    let resolveCommitted!:()=>void;
+    const committed=new Promise<void>(resolve=>{resolveCommitted=resolve;});
+    const close=jest.fn(async()=>undefined);
+    (startGatedApplication as jest.Mock).mockResolvedValue({app:{},committed,close});
+    const handle=await run('gated');
+    expect(handle).toEqual(expect.objectContaining({close}));
+    resolveCommitted();
+    await committed;
+    await new Promise<void>(resolve=>setImmediate(resolve));
+    expect(close).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(0);
   });
 });

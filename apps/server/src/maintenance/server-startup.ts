@@ -10,6 +10,7 @@ import {
   TrustedStartupAccess,
   UpdateStartupIntent,
 } from './startup-authority';
+import { runWithCleanupOnFailure } from './application-cleanup';
 
 export interface GatedStartupOptions {
   access: TrustedStartupAccess;
@@ -134,72 +135,83 @@ export async function startGatedApplication(
     intent: options.intent,
   });
   const RootModule = createGatedRootModule(protocolModule, appModule);
-  const app = await NestFactory.create(RootModule, { bodyParser: false });
-  const { ApplicationShutdownService } = await import(
-    '../updates/application-shutdown.service'
-  );
-  app.get(ApplicationShutdownService).attach(app);
-  app.enableShutdownHooks();
-  setupFullApplication(app, app.get(ConfigService));
-
-  const barrier = app.get(WriteBarrierService);
-  barrier.enterMaintenance(options.intent.attempt);
-  await app.init();
-  await app.listen(options.port ?? 0, options.host ?? '127.0.0.1');
-
-  const controller = new AbortController();
-  const committed = waitForMatchingCommit(
-    options.intent,
-    options.commitPollIntervalMs ?? 500,
-    controller.signal,
-  ).then(async () => {
-    const authority = barrier.beginCommittedActivation(options.intent.attempt);
-    try {
-      const [{ StorageService }, { FileLifecycleService }] = await Promise.all([
-        import('../files/storage.service'),
-        import('../files/file-lifecycle.service'),
-      ]);
-      await barrier.withCommittedActivation(
-        authority,
-        'startup-scan',
-        async () => {
-          await app.get(StorageService).activate();
-          await app.get(FileLifecycleService).activate();
-          await options.onCommitted?.(app);
-        },
-      );
-      barrier.reopenAfterCommitted(options.intent.attempt);
-      const { UpdateAuditReconciler } = await import(
-        '../updates/update-audit-reconciler'
-      );
-      await app
-        .get(UpdateAuditReconciler)
-        .reconcile(options.intent.attempt.installRoot);
-    } finally {
-      barrier.finishCommittedActivation(authority);
-    }
-  }).catch((error: unknown) => {
-    if (
-      controller.signal.aborted &&
-      error instanceof Error &&
-      error.name === 'AbortError'
-    ) {
-      return;
-    }
+  let app: Awaited<ReturnType<typeof NestFactory.create>>;
+  try {
+    app = await NestFactory.create(RootModule, {
+      bodyParser: false,
+      abortOnError: false,
+    });
+  } catch (error) {
+    if (require.main === module) process.exit(1);
     throw error;
-  });
+  }
+  return runWithCleanupOnFailure(app, async () => {
+    const { ApplicationShutdownService } = await import(
+      '../updates/application-shutdown.service'
+    );
+    app.get(ApplicationShutdownService).attach(app);
+    app.enableShutdownHooks();
+    setupFullApplication(app, app.get(ConfigService));
 
-  let closed = false;
-  return {
-    app,
-    committed,
-    async close(): Promise<void> {
-      if (closed) return;
-      closed = true;
-      controller.abort();
-      await app.close();
-    },
-  };
+    const barrier = app.get(WriteBarrierService);
+    barrier.enterMaintenance(options.intent.attempt);
+    await app.init();
+    await app.listen(options.port ?? 0, options.host ?? '127.0.0.1');
+
+    const controller = new AbortController();
+    const committed = waitForMatchingCommit(
+      options.intent,
+      options.commitPollIntervalMs ?? 500,
+      controller.signal,
+    ).then(async () => {
+      const authority = barrier.beginCommittedActivation(options.intent.attempt);
+      try {
+        const [{ StorageService }, { FileLifecycleService }] = await Promise.all([
+          import('../files/storage.service'),
+          import('../files/file-lifecycle.service'),
+        ]);
+        await barrier.withCommittedActivation(
+          authority,
+          'startup-scan',
+          async () => {
+            await app.get(StorageService).activate();
+            await app.get(FileLifecycleService).activate();
+            await options.onCommitted?.(app);
+          },
+        );
+        barrier.reopenAfterCommitted(options.intent.attempt);
+        const { UpdateAuditReconciler } = await import(
+          '../updates/update-audit-reconciler'
+        );
+        await app
+          .get(UpdateAuditReconciler)
+          .reconcile(options.intent.attempt.installRoot);
+      } finally {
+        barrier.finishCommittedActivation(authority);
+      }
+    }).catch((error: unknown) => {
+      if (
+        controller.signal.aborted &&
+        error instanceof Error &&
+        error.name === 'AbortError'
+      ) {
+        return;
+      }
+      throw error;
+    });
+
+    let closed = false;
+    return {
+      app,
+      committed,
+      async close(): Promise<void> {
+        if (closed) return;
+        closed = true;
+        controller.abort();
+        await app.close();
+      },
+    };
+  });
 }
 
 export async function startValidationApplication(
@@ -212,18 +224,26 @@ export async function startValidationApplication(
     import('@nestjs/core'),
     import('../update-validation.module'),
   ]);
-  const app = await NestFactory.create(
-    UpdateValidationModule.register({
-      access: options.access,
-      intent: options.intent,
-    }),
-    { bodyParser: false },
-  );
-  app.enableShutdownHooks();
-  app.setGlobalPrefix('api/v1');
-  await app.listen(options.port ?? 0, options.host ?? '127.0.0.1');
-  return {
-    app,
-    close: () => app.close(),
-  };
+  let app: Awaited<ReturnType<typeof NestFactory.create>>;
+  try {
+    app = await NestFactory.create(
+      UpdateValidationModule.register({
+        access: options.access,
+        intent: options.intent,
+      }),
+      { bodyParser: false, abortOnError: false },
+    );
+  } catch (error) {
+    if (require.main === module) process.exit(1);
+    throw error;
+  }
+  return runWithCleanupOnFailure(app, async () => {
+    app.enableShutdownHooks();
+    app.setGlobalPrefix('api/v1');
+    await app.listen(options.port ?? 0, options.host ?? '127.0.0.1');
+    return {
+      app,
+      close: () => app.close(),
+    };
+  });
 }
