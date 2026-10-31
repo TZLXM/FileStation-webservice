@@ -75,6 +75,8 @@ export interface BootstrapManagedInstallOptions {
   verifySpace?: (input: {
     paths: BootstrapPathPlan;
     sourceBytes: number;
+    environmentBytes: number;
+    manifestBytes: number;
     databaseBytes: number;
     backupId: string;
   }) => Promise<SpaceVerification>;
@@ -125,6 +127,7 @@ interface CopyEntry {
 
 interface CopyOptions {
   sourceRoot: string;
+  policyRoot: string;
   destinationRoot: string;
   fs: DurableFileSystem;
   excludedPaths: string[];
@@ -182,21 +185,12 @@ function isExcludedRelative(relative: string): boolean {
   const normalized = normalizeRelative(relative);
   const segments = normalized.split("/").filter(Boolean);
   const basename = segments.at(-1)?.toLowerCase() ?? "";
-  if (
-    segments.some((segment) => {
-      const value = segment.toLowerCase();
-      return (
-        value === ".git" ||
-        value === "logs" ||
-        value === "cache" ||
-        value === ".cache" ||
-        value === "coverage" ||
-        value === "node_modules/.cache"
-      );
-    })
-  ) {
-    return true;
-  }
+  const lower = normalized.toLowerCase();
+  if (segments.some(segment => segment.toLowerCase() === ".git")) return true;
+  if (segments.some((segment, index) => segment.toLowerCase() === "node_modules" && segments[index + 1]?.toLowerCase() === ".cache")) return true;
+  if (["logs", "cache", ".cache", "coverage", "node_modules/.cache", "apps/server/logs", "apps/updater/logs"].some(
+    prefix => lower === prefix || lower.startsWith(`${prefix}/`),
+  )) return true;
   if (
     normalized === "data/storage" ||
     normalized.startsWith("data/storage/") ||
@@ -206,9 +200,8 @@ function isExcludedRelative(relative: string): boolean {
     return true;
   }
   return (
-    basename === ".env" ||
-    basename.startsWith(".env.") ||
-    basename.endsWith(".log") ||
+    ((basename === ".env" || basename.startsWith(".env.")) &&
+      !(segments.some(segment => segment.toLowerCase() === "node_modules") && [".env.defaults", ".env.example"].includes(basename))) ||
     basename === "managed-install.json" ||
     basename === ".bootstrap-in-progress.json"
   );
@@ -253,10 +246,11 @@ async function copySafeTree(options: CopyOptions): Promise<CopyEntry[]> {
     for (const name of names) {
       const source = path.join(sourceDirectory, name);
       const relative = path.relative(options.sourceRoot, source);
+      const policyRelative = path.relative(options.policyRoot, source);
       if (
         (options.releaseOnly
-          ? isReleaseExcluded(relative)
-          : isExcludedRelative(relative)) ||
+          ? isReleaseExcluded(policyRelative)
+          : isExcludedRelative(policyRelative)) ||
         (await excludedRuntimePath(source, options.excludedPaths))
       ) {
         continue;
@@ -316,20 +310,30 @@ async function copySafeTree(options: CopyOptions): Promise<CopyEntry[]> {
   return entries;
 }
 
-async function measureTree(root: string, excluded: string[]): Promise<number> {
+async function measureTree(root: string, excluded: string[], installRoot: string): Promise<{ sourceBytes: number; manifestBytes: number }> {
   let total = 0;
+  let manifestBytes = 65536;
   const walk = async (directory: string): Promise<void> => {
     for (const name of await readdir(directory)) {
       const filename = path.join(directory, name);
       if (isExcludedRelative(path.relative(root, filename)) || await excludedRuntimePath(filename, excluded)) continue;
       const metadata = await lstat(filename);
+      if (metadata.isSymbolicLink() || metadata.isFile()) {
+        const targetLength = metadata.isSymbolicLink() ? (await readlink(filename)).length : 0;
+        // Four copies at most; bound JSON escaping and both path and link target.
+        manifestBytes += 4 * (1024 + 12 * (filename.length + installRoot.length + targetLength));
+        if (!Number.isSafeInteger(manifestBytes)) throw new Error("bootstrap manifest budget exceeds safe integer");
+      }
       if (metadata.isSymbolicLink()) continue;
       if (metadata.isDirectory()) await walk(filename);
-      else if (metadata.isFile()) total += metadata.size;
+      else if (metadata.isFile()) {
+        total += metadata.size;
+        if (!Number.isSafeInteger(total)) throw new Error("bootstrap source size exceeds safe integer");
+      }
     }
   };
   await walk(root);
-  return total;
+  return { sourceBytes: total, manifestBytes };
 }
 
 async function pathSize(filename: string): Promise<number> {
@@ -341,13 +345,29 @@ async function pathSize(filename: string): Promise<number> {
   }
 }
 
-async function defaultVerifySpace(input: {
+export async function defaultVerifySpace(input: {
   paths: BootstrapPathPlan;
   sourceBytes: number;
+  environmentBytes?: number;
+  manifestBytes?: number;
   databaseBytes: number;
   backupId: string;
 }): Promise<SpaceVerification> {
   const installRoot = input.paths.installRoot;
+  // Each actual copy is bounded by sourceBytes: release, legacy backup,
+  // standalone updater, and node_modules.
+  const sourceCopyBudgetBytes = input.sourceBytes * 4 + (input.environmentBytes ?? 0) + (input.manifestBytes ?? 0);
+  if (
+    !Number.isSafeInteger(input.sourceBytes) ||
+    input.sourceBytes < 1 ||
+    !Number.isSafeInteger(input.environmentBytes ?? 0) || (input.environmentBytes ?? 0) < 0 ||
+    !Number.isSafeInteger(input.manifestBytes ?? 0) || (input.manifestBytes ?? 0) < 0 ||
+    !Number.isSafeInteger(sourceCopyBudgetBytes)
+  ) {
+    throw new Error(
+      "bootstrap source-copy budget must be a positive safe integer",
+    );
+  }
   const plans = await planRequiredSpace(
     {
       installRoot,
@@ -383,7 +403,7 @@ async function defaultVerifySpace(input: {
       artifacts: [
         {
           archive_size: input.sourceBytes,
-          unpacked_size: input.sourceBytes,
+          unpacked_size: sourceCopyBudgetBytes - input.sourceBytes,
         },
       ],
     },
@@ -605,6 +625,15 @@ export async function bootstrapManagedInstall(
 
   const managedEnv = renderManagedEnv(envBytes?.toString("utf8"), pathPlan.proposed);
   const excludedPaths = [...runtimeExclusions(pathPlan.previous), ...runtimeExclusions(pathPlan.proposed)];
+  for (const relative of ["apps", "apps/updater", "node_modules"]) {
+    const candidate = path.join(pathPlan.legacyRoot, relative);
+    try {
+      if ((await lstat(candidate)).isSymbolicLink())
+        throw new Error(`bootstrap copy root or ancestor is a link: ${relative}`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
   await assertOldProcessStopped(options);
   const releaseVersion = await readReleaseVersion(
     pathPlan.legacyRoot,
@@ -613,6 +642,7 @@ export async function bootstrapManagedInstall(
   const fingerprint = sha256(
     Buffer.from(
       JSON.stringify({
+        copyPolicyVersion: 2,
         legacyRoot: pathPlan.legacyRoot,
         installRoot: pathPlan.installRoot,
         paths: pathPlan.proposed,
@@ -673,11 +703,13 @@ export async function bootstrapManagedInstall(
       `legacy database is missing at canonical path ${pathPlan.proposed.database}`,
     );
   });
-  const sourceBytes = await measureTree(pathPlan.legacyRoot, excludedPaths);
+  const { sourceBytes, manifestBytes } = await measureTree(pathPlan.legacyRoot, excludedPaths, pathPlan.installRoot);
   const verifySpace = options.verifySpace ?? defaultVerifySpace;
   const space = await verifySpace({
     paths: pathPlan,
     sourceBytes,
+    environmentBytes: (envBytes?.length ?? 0) + Buffer.byteLength(managedEnv, "utf8"),
+    manifestBytes,
     databaseBytes,
     backupId,
   });
@@ -737,6 +769,7 @@ export async function bootstrapManagedInstall(
 
     const releaseEntries = await copySafeTree({
       sourceRoot: pathPlan.legacyRoot,
+      policyRoot: pathPlan.legacyRoot,
       destinationRoot: releaseRealpath,
       fs,
       excludedPaths,
@@ -750,27 +783,29 @@ export async function bootstrapManagedInstall(
     const legacyBackupRoot = path.join(backupRoot, "legacy-source");
     const sourceEntries = await copySafeTree({
       sourceRoot: pathPlan.legacyRoot,
+      policyRoot: pathPlan.legacyRoot,
       destinationRoot: legacyBackupRoot,
       fs,
       excludedPaths,
     });
-    await copySafeTree({
+    const updaterEntries = await copySafeTree({
       sourceRoot: path.join(pathPlan.legacyRoot, "apps/updater"),
+      policyRoot: pathPlan.legacyRoot,
       destinationRoot: path.join(pathPlan.installRoot, "updater"),
       fs,
       excludedPaths,
     });
     const nodeModules = path.join(pathPlan.legacyRoot, "node_modules");
-    if (await exists(nodeModules)) {
-      await copySafeTree({
+    const nodeModulesEntries = await exists(nodeModules)
+      ? await copySafeTree({
         sourceRoot: nodeModules,
+        policyRoot: pathPlan.legacyRoot,
         destinationRoot: path.join(pathPlan.installRoot, "node_modules"),
         fs,
         excludedPaths,
         symlinkBoundary: pathPlan.legacyRoot,
         destinationBoundary: releaseRealpath,
-      });
-    }
+      }) : null;
 
     if (envBytes) {
       const envBackup = path.join(backupRoot, "env", "legacy.env");
@@ -815,6 +850,7 @@ export async function bootstrapManagedInstall(
     );
     const manifest = {
       schemaVersion: 1,
+      copyPolicyVersion: 2,
       kind: "bootstrap-backup",
       backupId,
       installId,
@@ -828,6 +864,8 @@ export async function bootstrapManagedInstall(
       canonicalPathChanges: pathPlan.changes,
       sourceEntries,
       releaseEntries,
+      updaterEntries,
+      nodeModulesEntries,
       exclusions: [
         ...excludedPaths,
         ".git",
@@ -888,6 +926,7 @@ export async function bootstrapManagedInstall(
     if (!sameCanonicalPath(actualCurrent, releaseRealpath)) {
       throw new Error("managed current link does not resolve to the bootstrap release");
     }
+    await verifyExistingBootstrap(metadata, pathPlan.proposed, releaseRealpath, actualCurrent, fs, pathPlan.previous);
     await fs.unlink(path.join(pathPlan.installRoot, ".bootstrap-in-progress.json"));
     await fs.unlink(bootstrapLock);
     lockHeld = false;

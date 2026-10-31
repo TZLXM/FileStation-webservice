@@ -32,6 +32,8 @@ export async function verifyExistingBootstrap(
   if (!sameCanonicalPath(current, release)) throw new Error("bootstrap current is not the expected release");
   const backup = path.join(metadata.installRoot, "backups", metadata.bootstrapBackupId);
   const manifest = JSON.parse((await fs.readFile(path.join(backup, "MANIFEST.json"))).toString("utf8"));
+  if (manifest.copyPolicyVersion !== 2)
+    throw new Error("bootstrap backup copy policy is obsolete or missing");
   if (manifest.schemaVersion !== 1 || manifest.kind !== "bootstrap-backup" ||
       manifest.backupId !== metadata.bootstrapBackupId || manifest.installId !== metadata.installId ||
       JSON.stringify(manifest.canonicalPaths) !== JSON.stringify(planned) ||
@@ -58,8 +60,15 @@ export async function verifyExistingBootstrap(
     if (manifest.env.storedPath !== "env/legacy.env") throw new Error("invalid env backup path");
     await verifyFile(path.join(backup, "env/legacy.env"), manifest.env.sha256, manifest.env.size);
   } else if (manifest.env?.present !== false) throw new Error("invalid env backup manifest");
-  for (const [tree, entries] of [[path.join(backup, "legacy-source"), manifest.sourceEntries], [release, manifest.releaseEntries]] as const) {
-    if (!Array.isArray(entries) || !entries.length) throw new Error("bootstrap recovery tree manifest missing");
+  if (!Array.isArray(manifest.updaterEntries) || !(manifest.nodeModulesEntries === null || Array.isArray(manifest.nodeModulesEntries)))
+    throw new Error("bootstrap standalone copy manifest missing");
+  for (const [tree, entries, linkBoundary, required] of [
+    [path.join(backup, "legacy-source"), manifest.sourceEntries, path.join(backup, "legacy-source"), true],
+    [release, manifest.releaseEntries, release, true],
+    [path.join(metadata.installRoot, "updater"), manifest.updaterEntries, path.join(metadata.installRoot, "updater"), true],
+    ...(manifest.nodeModulesEntries === null ? [] : [[path.join(metadata.installRoot, "node_modules"), manifest.nodeModulesEntries, release, false]]),
+  ] as const) {
+    if (!Array.isArray(entries) || (required && !entries.length)) throw new Error("bootstrap recovery tree manifest missing");
     for (const entry of entries) {
       if (typeof entry.path !== "string" || path.isAbsolute(entry.path) || !pathWithin(tree, path.resolve(tree, entry.path)))
         throw new Error("invalid bootstrap manifest entry path");
@@ -67,7 +76,7 @@ export async function verifyExistingBootstrap(
       if (entry.type === "file") await verifyFile(filename, entry.sha256, entry.size);
       else if (entry.type === "symlink") {
         if (typeof entry.target !== "string" || !(await fs.lstat(filename)).isSymbolicLink() ||
-            !pathWithin(tree, await fs.realpath(filename)) ||
+            !pathWithin(linkBoundary, await fs.realpath(filename)) ||
             !sameCanonicalPath(path.resolve(path.dirname(filename), await fs.readlink(filename)), path.resolve(path.dirname(filename), entry.target)))
           throw new Error("bootstrap dependency link escaped its recovery tree");
       } else throw new Error("invalid bootstrap manifest entry type");

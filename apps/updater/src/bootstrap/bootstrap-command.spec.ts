@@ -297,6 +297,144 @@ describe("managed bootstrap", () => {
     expect(managedEnv).toContain("JWT_SECRET=fixture-only-secret");
   });
 
+  it("preserves dependency files named cache, logs, coverage and env templates while excluding runtime caches", async () => {
+    fixture = await sourceFixture();
+    const copiedFiles = [
+      "node_modules/cache/index.js",
+      "node_modules/logs/index.js",
+      "node_modules/coverage/index.js",
+      "node_modules/typeorm/cache/QueryResultCacheFactory.js",
+      "node_modules/fixture-package/logs/driver.log",
+      "node_modules/fixture-package/coverage/report.json",
+      "node_modules/fixture-package/.env.defaults",
+      "apps/updater/node_modules/fixture-package/.env.defaults",
+    ];
+    for (const relative of copiedFiles) {
+      const filename = path.join(fixture.legacyRoot, relative);
+      await mkdir(path.dirname(filename), { recursive: true });
+      await writeFile(filename, `fixture ${relative}\n`);
+    }
+    const runtimeCaches = [
+      "cache/private.bin",
+      ".cache/private.bin",
+      "coverage/private.bin",
+      "logs/private.log",
+      "node_modules/.cache/private.bin",
+      ".env.production",
+      "apps/updater/logs/private.log",
+      "apps/server/logs/private.log",
+      "node_modules/fixture-package/.env",
+      "node_modules/fixture-package/.env.production",
+      "apps/updater/node_modules/.cache/private.bin",
+    ];
+    for (const relative of runtimeCaches) {
+      const filename = path.join(fixture.legacyRoot, relative);
+      await mkdir(path.dirname(filename), { recursive: true });
+      await writeFile(filename, "runtime cache must not be copied\n");
+    }
+
+    const result = await bootstrapManagedInstall(commonOptions(fixture));
+    const backupRoot = path.join(
+      result.installRoot,
+      "backups",
+      result.backupId,
+    );
+    for (const tree of [
+      result.releaseRealpath,
+      path.join(backupRoot, "legacy-source"),
+      result.installRoot,
+    ]) {
+      for (const relative of copiedFiles.filter(
+        (candidate) => tree !== result.installRoot || candidate.startsWith("node_modules/"),
+      )) {
+        await expect(readFile(path.join(tree, relative), "utf8")).resolves.toBe(
+          `fixture ${relative}\n`,
+        );
+      }
+      for (const relative of runtimeCaches.filter(candidate => tree !== result.installRoot || !candidate.startsWith("apps/"))) {
+        await expect(lstat(path.join(tree, relative))).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      }
+    }
+    await expect(readFile(path.join(result.installRoot, "updater/node_modules/fixture-package/.env.defaults"), "utf8"))
+      .resolves.toBe("fixture apps/updater/node_modules/fixture-package/.env.defaults\n");
+    const manifest = JSON.parse(
+      await readFile(path.join(backupRoot, "MANIFEST.json"), "utf8"),
+    );
+    for (const entries of [manifest.releaseEntries, manifest.sourceEntries]) {
+      expect(entries).toEqual(
+        expect.arrayContaining([
+          ...copiedFiles.map((relative) =>
+            expect.objectContaining({
+              path: relative,
+              type: "file",
+            }),
+          ),
+        ]),
+      );
+    }
+  });
+
+  it("fails closed on an installation created by the obsolete copy policy", async () => {
+    fixture = await sourceFixture();
+    const dependencyFile =
+      "node_modules/typeorm/cache/QueryResultCacheFactory.js";
+    const dependencyPath = path.join(fixture.legacyRoot, dependencyFile);
+    await mkdir(path.dirname(dependencyPath), { recursive: true });
+    await writeFile(dependencyPath, "fixture typeorm cache factory\n");
+    const result = await bootstrapManagedInstall(commonOptions(fixture));
+    const backupRoot = path.join(
+      result.installRoot,
+      "backups",
+      result.backupId,
+    );
+    const manifestPath = path.join(backupRoot, "MANIFEST.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    delete manifest.copyPolicyVersion;
+    for (const field of ["releaseEntries", "sourceEntries"] as const) {
+      manifest[field] = manifest[field].filter(
+        (entry: { path: string }) => entry.path !== dependencyFile,
+      );
+    }
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    for (const tree of [
+      result.releaseRealpath,
+      path.join(backupRoot, "legacy-source"),
+      result.installRoot,
+    ]) {
+      await rm(path.join(tree, dependencyFile), { force: true });
+    }
+
+    await expect(
+      bootstrapManagedInstall(commonOptions(fixture)),
+    ).rejects.toThrow(/different or incomplete metadata|copy policy/i);
+    await expect(
+      lstat(path.join(result.releaseRealpath, dependencyFile)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each(["node_modules", "apps", "apps/updater"])("rejects a linked copy root or ancestor %s before creating the managed install", async (relative) => {
+    fixture = await sourceFixture();
+    const modules = path.join(fixture.legacyRoot, relative);
+    const target = path.join(fixture.legacyRoot, ".cache/deps");
+    await mkdir(path.dirname(target), { recursive: true });
+    await rename(modules, target);
+    await symlink(target, modules, process.platform === "win32" ? "junction" : "dir");
+    await expect(bootstrapManagedInstall(commonOptions(fixture))).rejects.toThrow(/copy root.*link/i);
+    await expect(lstat(fixture.installRoot)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects and cleans a bootstrap with a link to excluded content", async () => {
+    fixture = await sourceFixture();
+    const target = path.join(fixture.legacyRoot, ".cache/hidden");
+    await mkdir(target, { recursive: true });
+    await symlink(target, path.join(fixture.legacyRoot, "packages/hidden"), process.platform === "win32" ? "junction" : "dir");
+    await expect(bootstrapManagedInstall(commonOptions(fixture))).rejects.toThrow();
+    await expect(lstat(fixture.installRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(path.join(fixture.root, ".managed.bootstrap.lock"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("records reviewed absolute custom paths without copying storage", async () => {
     fixture = await sourceFixture();
     const custom = path.join(fixture.root, "custom");
@@ -542,7 +680,7 @@ describe("managed bootstrap", () => {
     await expect(readFile(path.join(restored, "src.txt"), "utf8")).resolves.toBe("fixture source\n");
   });
 
-  it.each(["paths", "current", "manifest", "snapshot", "source", "env"])("rejects damaged idempotent installation: %s", async (damage) => {
+  it.each(["paths", "current", "manifest", "snapshot", "source", "env", "updater", "node_modules"])("rejects damaged idempotent installation: %s", async (damage) => {
     fixture = await sourceFixture();
     const result = await bootstrapManagedInstall(commonOptions(fixture));
     const backup = path.join(result.installRoot, "backups", result.backupId);
@@ -554,6 +692,10 @@ describe("managed bootstrap", () => {
     } else if (damage === "current") {
       await unlink(path.join(result.installRoot, "current"));
       await symlink(fixture.legacyRoot, path.join(result.installRoot, "current"), process.platform === "win32" ? "junction" : "dir");
+    } else if (damage === "updater") {
+      await rm(path.join(result.installRoot, "updater/dist/cli.js"));
+    } else if (damage === "node_modules") {
+      await rm(path.join(result.installRoot, "node_modules/fixture-package/index.js"));
     } else {
       const filename = { manifest: "MANIFEST.json", snapshot: "database.sqlite", source: "legacy-source/src.txt", env: "env/legacy.env" }[damage as "manifest" | "snapshot" | "source" | "env"];
       await writeFile(path.join(backup, filename), "corruption");

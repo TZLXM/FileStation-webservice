@@ -2,6 +2,9 @@
 
 Updated: 2026-10-30
 
+- **6378ea7 真实场景准备与 bootstrap 预演（2026-10-31）：** 同提交 hosted CI（重跑后）与无签名 candidate 均成功；candidate 绑定 Windows/Linux 制品，正式 evidence 尚未填写。Windows Node 22 在专属短路径、合成 HTTP/SQLite 旧进程和工作树产物上验证活进程拒绝、停止后 dry-run、bootstrap、幂等、SQLite 快照及 launcher dry-run；因无法证明出站网络隔离，未启动正常应用；证据 `C:\fsb-1031-a781b0\REPORT.md`。Linux Node 20.17 无网络只读根容器，在合成 SQLite writer 上通过活进程拒绝、dry-run、bootstrap、快照、路径权限及幂等；这是使用源码和重建 sqlite3 的预演，不是原始 candidate 或非 Docker installed 验收。首次 Windows Git archive 因 autocrlf 输出 CRLF 导致 bash 失败；Git blob 为 LF，字节保持导出重试通过，失败日志保留。两平台合成运行数据及专属容器已清理，证据保留。
+- **验收缺口：** 0.2.5 要求旧版先 bootstrap，同版本不会自动更新；当前 candidate 无签名，现有受保护签名发布任务又依赖完整发布证据，缺少发布前可用的签名候选与受控分发通道。真实 Windows/Linux confirmed update、提交前 rollback、相同候选制品验收与私钥配对仍待解决；不得把预演记作 release evidence passed。先前 CI 并发 E2E 曾因测试 gate 与 Supertest 自动关闭监听的循环等待超时，重跑通过；受控复现支持测试时序问题，根因与原 CI 无运行时跟踪不能完全断言。版本标签与普通推送的未来工作见 `docs/FUTURE-WORK.md`，当前工作流未修改。
+
 - **d61932f 双平台 CI 调查（2026-10-31）：** 无签名 candidate Windows/Linux 构建、制品和来源记录通过；CI 主测试通过，Windows updater 组 160 passed / 1 skipped 后 internal protocol unit 的 audit fixture staging 校验失败，Ubuntu updater 组 155 passed / 1 failed / 4 skipped，F1-03 报 Linux process unavailable。Windows 用 junction TEMP 受控复现路径别名与真实路径不一致，fixture 根改为 realpath，生产 staging 校验不变；相关两套 7 passed、其他安装测试 18 passed。Linux 用真实子进程与已打开的 proc stat 复现退出后 read ESRCH；身份提供者将 Linux stat ESRCH 与 ENOENT 同样认定为进程不存在，权限、I/O、损坏仍失败关闭；CI 原始 errno 未记录，不能断言就是该次失败的原因。Linux 定向身份/恢复验证和 Windows 相关身份套件通过，测试 child 等待加独立上限；两项修复均经独立审阅。Windows server unit 327 passed / 20 todo、E2E 122 passed、Web 251 passed、typecheck/build/diff-check exit 0。新提交 hosted CI/candidate 尚待验证；生产慢宿主 120 秒余量与旧 fixture 退出码仍独立未决。
 
 - **Windows journal 轮询争用（2026-10-30）：** 用户提供 `c6cdd0e` hosted CI 结果为 updater **147 passed / 1 failed / 1 skipped**；F1-01 已通过，另一项排他保护测试的并发 journal `open` 返回 `EBUSY`。本机 Windows 使用真实 append 独占句柄复现同一错误，释放后严格读取成功且 journal 字节不变；hosted 当时持有该句柄的进程未观测，不能断言。测试轮询只针对 Windows、目标 journal、`open/EBUSY` 有界等待，其他错误与严格解码继续传播；等待上限对齐 300 秒 worker 预算，不改变生产期限或排他验证。真实冲突 RED **1 failed**，修后相关场景 **3 passed / 51 filtered**；server unit **327 passed / 20 todo**、完整 E2E **122 passed**、Web **251 passed**、typecheck/build/diff-check exit 0。独立审阅发现生产交接等待同样会因暂态独占追加而失败；本机真实句柄复现生产读取 RED，生产交接等待仅对 Windows 目标 journal 的 open/EBUSY 在原 handoff 期限内重新严格读取，其余错误与授权检查保持原样。身份和端口查询结束后再次检查同一交接期限，避免接受过期结果；最终源码针对性 13 项及完整 orchestrator/共享句柄 49 项通过，独立最终审阅 APPROVED / PASS。最终构建后的真实子进程交接和排他保护 2 项通过，编译实现的真实独占句柄与身份查询逾期探针 exit 0；hosted CI/candidate 仍需核验。生产 120 秒慢宿主余量与此前旧 fixture writer 异常退出码仍未解决。
@@ -496,3 +499,9 @@ Task 9 orchestrator, maintenance snapshots/restoration, global WriteBarrier and 
 ---
 
 *此文档每次功能变更后必须更新*
+# 2026-10-31 Windows 真实托管部署验收发现
+
+- 使用候选 source commit `6378ea7d22e7dd79f8cf7afc41b83440272ea018`、run `41100346503` 的 Windows 无签名候选包，在隔离 Windows 测试目录完成 bootstrap dry-run 和实际 bootstrap；原进程运行时被正确拒绝，数据路径保持不变。
+- 实际托管启动失败：bootstrap 的通用排除规则删除了 `node_modules/typeorm/cache` 中的运行代码，启动报缺少 `QueryResultCacheFactory`。相同规则影响源码备份和独立 updater 依赖；bootstrap 成功及清单自洽不能证明备份可恢复。已有缺损托管目录必须保留供诊断，不得直接认定幂等成功或依赖该备份恢复。
+- 已停止失败的托管启动并恢复原隔离非托管测试服务；后端和反代入口返回 HTTP 200。真实托管启动、同制品更新和回滚仍未通过，禁止据此次 bootstrap 宣称发布验收完成。
+- 后续本地修复调整依赖复制排除规则，记录并校验四棵复制树、拒绝旧复制策略，纳入环境文件和清单空间预算；拒绝链接复制根，并在首次发布前验证恢复资产。Windows 聚焦 bootstrap 全套 45 项通过（之后新增的链接与失败清理 4 项另行通过）；服务端 unit 327、full E2E 122、Web 251、根 typecheck/build 在最后一轮局部 updater 变更之前通过，最终 updater typecheck/build 通过。独立复审关闭已确认的链接根 P1，但修复制品尚未在真实服务器重测，也尚未完成真实更新及回滚验收。
