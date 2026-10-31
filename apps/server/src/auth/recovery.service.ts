@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Optional, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import * as argon2 from 'argon2';
@@ -11,18 +11,27 @@ import { SqliteImmediateTransactionService, SqliteTransactionConnection } from '
 import { hasActiveRecoveryIpReservation, settleExpiredRecoveryIpReservations, settleRecoveryIpSuccess } from './recovery-ip-reservations';
 import { RecoveryCode } from './entities/recovery-code.entity';
 import { TotpService } from './totp.service';
+import {
+  MaintenanceUnavailableError,
+  WriteBarrierService,
+} from '../maintenance/write-barrier.service';
+import {
+  WriteFreezeService,
+  WriteFrozenError,
+} from '../maintenance/write-freeze.service';
 
 const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const RECOVERY_CODE_COUNT = 10;
 const RECOVERY_CODE_TTL_MS = 24 * 60 * 60 * 1000;
 const RECOVERY_LOCK_THRESHOLD = 5;
 const RECOVERY_LOCK_MS = 15 * 60 * 1000;
-const ARGON2_OPTIONS = {
+const ARGON2_OPTIONS: argon2.Options & { raw: false } = {
   type: argon2.argon2id,
   memoryCost: 19_456,
   timeCost: 2,
   parallelism: 1,
-} satisfies argon2.HashOptions;
+  raw: false,
+};
 const DUMMY_RECOVERY_VALUE = 'filestation invalid recovery code comparison';
 
 interface RecoveryFailureState {
@@ -56,12 +65,34 @@ export class RecoveryService {
     private readonly totpService: TotpService,
     private readonly auditService: AuditService,
     private readonly sqliteTransactions: SqliteImmediateTransactionService,
+    @Optional()
+    private readonly writeBarrier?: WriteBarrierService,
+    @Optional()
+    private readonly writeFreeze?: WriteFreezeService,
   ) {}
 
   @Cron(CronExpression.EVERY_MINUTE)
   async cleanupExpiredIpReservations(): Promise<void> {
-    await this.sqliteTransactions.run((connection) =>
-      settleExpiredRecoveryIpReservations(connection, Date.now()));
+    const cleanup = async () => {
+      this.writeFreeze?.assertWritable();
+      await this.sqliteTransactions.run((connection) =>
+        settleExpiredRecoveryIpReservations(connection, Date.now()));
+    };
+    try {
+      if (this.writeBarrier) {
+        await this.writeBarrier.withLease('cron:recovery-cleanup', cleanup);
+      } else {
+        await cleanup();
+      }
+    } catch (error) {
+      if (
+        error instanceof MaintenanceUnavailableError ||
+        error instanceof WriteFrozenError
+      ) {
+        return;
+      }
+      throw error;
+    }
   }
 
   async generate(accountId: string, password: string, totpCode?: string): Promise<string[]> {

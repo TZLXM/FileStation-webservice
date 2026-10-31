@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { ShareInfo } from '@filestation/shared';
+import { withBasePath } from '../lib/base-url';
 
 export default function SharePage() {
   const { id } = useParams<{ id: string }>();
@@ -57,7 +58,7 @@ export default function SharePage() {
 
       // 使用票据 URL 下载
       const a = document.createElement('a');
-      a.href = response.data!.ticket_url;
+      a.href = withBasePath(response.data!.ticket_url);
       a.download = shareInfo?.filename || 'download';
       a.click();
     } catch (err: any) {

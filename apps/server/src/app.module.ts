@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ServeStaticModule } from '@nestjs/serve-static';
-import { resolve } from 'path';
+import { basename, resolve } from 'path';
 import { existsSync } from 'fs';
 import configuration from './config/configuration';
 import { DatabaseModule } from './database/database.module';
@@ -16,6 +16,32 @@ import { SettingsModule } from './settings/settings.module';
 import { ApiTokensModule } from './api-tokens/api-tokens.module';
 import { AuditModule } from './audit/audit.module';
 import { McpModule } from './mcp/mcp.module';
+import { MaintenanceModule } from './maintenance/maintenance.module';
+import { UpdatesModule } from './updates/updates.module';
+
+const HASHED_STATIC_ASSET =
+  /-[a-z0-9_-]{8,}\.(?:js|mjs|css|map|woff2?|ttf|otf|png|jpe?g|gif|webp|svg|ico|wasm)$/i;
+
+export function applyStaticCacheHeaders(
+  response: { setHeader(name: string, value: string): unknown },
+  filePath: string,
+): void {
+  const filename = basename(filePath);
+  if (filename === 'index.html') {
+    response.setHeader('Cache-Control', 'no-store');
+    response.setHeader('Pragma', 'no-cache');
+    response.setHeader('Expires', '0');
+    return;
+  }
+  if (HASHED_STATIC_ASSET.test(filename)) {
+    response.setHeader(
+      'Cache-Control',
+      'public, max-age=31536000, immutable',
+    );
+    return;
+  }
+  response.setHeader('Cache-Control', 'no-cache');
+}
 
 // Nginx 可选项（v1.8）：FILESTATION_SERVE_STATIC=true 时由本进程托管前端构建产物。
 // 条件在此（模块加载时）读取，而不是走 ConfigService——ServeStaticModule.forRoot 的
@@ -23,18 +49,18 @@ import { McpModule } from './mcp/mcp.module';
 const serveStaticImports =
   process.env.FILESTATION_SERVE_STATIC === 'true'
     ? (() => {
-        // 默认路径基于模块位置（apps/server/dist → 仓库根 → apps/web/dist），
+        // 默认路径基于模块位置（apps/server/dist → 仓库根 → apps/web/dist-root），
         // 与启动目录无关——npm run start（仓库根）和 cd apps/server && node dist/main.js
         // 解析结果一致。FILESTATION_WEB_DIST 可用绝对路径或相对仓库根的路径覆盖。
         const custom = process.env.FILESTATION_WEB_DIST;
         const rootPath = custom
           ? resolve(__dirname, '..', '..', '..', custom)
-          : resolve(__dirname, '..', '..', 'web', 'dist');
+          : resolve(__dirname, '..', '..', 'web', 'dist-root');
         if (!existsSync(rootPath)) {
           // 不抛错——API 仍可用，启动日志在 main.ts 里提示前端产物缺失
           console.warn(
             `[ServeStatic] FILESTATION_SERVE_STATIC=true 但未找到前端构建产物: ${rootPath}` +
-              `（先运行 npm run build 生成 apps/web/dist）`,
+              `（先运行 npm run build 生成 apps/web/dist-root 与 dist-fs）`,
           );
         }
         return [
@@ -43,6 +69,10 @@ const serveStaticImports =
             // setGlobalPrefix('api/v1') 后所有非 /api 路径均不匹配控制器，
             // serve-static 自动将未命中路径回退到 index.html（SPA 路由如 /init、/files）。
             exclude: ['/api/(.*)'],
+            serveStaticOptions: {
+              cacheControl: false,
+              setHeaders: applyStaticCacheHeaders,
+            },
           }),
         ];
       })()
@@ -54,6 +84,7 @@ const serveStaticImports =
       load: [configuration],
       isGlobal: true,
     }),
+    MaintenanceModule,
     ScheduleModule.forRoot(), // @Cron 生效前提（FileLifecycleService）
     ...serveStaticImports,
     DatabaseModule,
@@ -67,6 +98,7 @@ const serveStaticImports =
     ApiTokensModule,
     AuditModule,
     McpModule,
+    UpdatesModule,
   ],
 })
 export class AppModule {}

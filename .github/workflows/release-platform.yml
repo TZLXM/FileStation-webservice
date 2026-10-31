@@ -1,0 +1,181 @@
+name: Release platform artifacts
+
+on:
+  workflow_call:
+    inputs:
+      source_commit:
+        description: Exact lowercase 40-character Git commit to build
+        required: true
+        type: string
+      version:
+        description: Stable SemVer without the v prefix
+        required: true
+        type: string
+    outputs:
+      artifacts-json:
+        description: Array of artifact metadata
+        value: ${{ jobs.summarize.outputs.artifacts-json }}
+      platform-digests:
+        description: JSON object containing platform SHA-256 digests
+        value: ${{ jobs.summarize.outputs.platform-digests }}
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  NODE_VERSION: 20.17.0
+  NPM_VERSION: 10.9.2
+  SOURCE_DATE_EPOCH: "1704067200"
+
+jobs:
+  build:
+    name: Build and smoke ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-latest
+            archive: linux-x64.tar.gz
+          - platform: windows-x64
+            runner: windows-latest
+            archive: win-x64.zip
+
+    steps:
+      - name: Check out exact source commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+
+      - name: Verify checked-out source commit
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+
+      - name: Set up fixed Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install fixed npm
+        run: npm install --global npm@${{ env.NPM_VERSION }} --no-audit --no-fund
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run release-tool tests
+        run: node --test scripts/release/release-tools.test.mjs scripts/release/resolve-candidate.test.mjs
+
+      - name: Build application
+        run: npm run build
+
+      - name: Assert root and /fs/ Web deployment bundles
+        run: >-
+          node -e "const fs=require('node:fs');for(const directory of
+          ['apps/web/dist-root','apps/web/dist-fs']){if(!fs.existsSync(directory+'/index.html'))
+          throw new Error('missing '+directory+'/index.html')}"
+
+      - name: Run controlled updater integration and artifact tests
+        run: >-
+          npm test --workspace=@filestation/updater --
+          --runInBand
+          test/update-flow.integration.spec.ts
+          test/artifact-smoke.spec.ts
+
+      - name: Package relocatable artifact
+        run: >-
+          node scripts/release/package-artifact.mjs
+          --version "${{ inputs.version }}"
+          --platform "${{ matrix.platform }}"
+          --output release-artifacts
+          --source-date-epoch "${{ env.SOURCE_DATE_EPOCH }}"
+          --install-production
+          --release-url "https://github.com/${{ github.repository }}/releases/tag/v${{ inputs.version }}"
+
+      - name: Assert archive exists
+        shell: bash
+        run: test -f "release-artifacts/filestation-v${{ inputs.version }}-${{ matrix.archive }}"
+
+      - name: Extract Linux artifact into a fresh absolute temporary path
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_root="$(mktemp -d)"
+          tar -xzf "release-artifacts/filestation-v${{ inputs.version }}-linux-x64.tar.gz" -C "$artifact_root"
+          smoke_root="$(find "$artifact_root" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$smoke_root"
+          node "$smoke_root/scripts/release/smoke-artifact.mjs" --artifact-root "$smoke_root"
+
+      - name: Extract Windows artifact into a fresh absolute temporary path
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $artifactRoot = Join-Path $env:RUNNER_TEMP "filestation-smoke-${{ github.run_id }}-${{ github.run_attempt }}"
+          New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+          Expand-Archive -LiteralPath "release-artifacts\filestation-v${{ inputs.version }}-win-x64.zip" -DestinationPath $artifactRoot
+          $smokeRoot = Get-ChildItem -LiteralPath $artifactRoot -Directory | Select-Object -First 1
+          if ($null -eq $smokeRoot) { throw "Artifact root was not found" }
+          node (Join-Path $smokeRoot.FullName "scripts/release/smoke-artifact.mjs") --artifact-root $smokeRoot.FullName
+
+      - name: Upload unsigned platform artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: filestation-v${{ inputs.version }}-${{ matrix.platform }}
+          path: |
+            release-artifacts/filestation-v${{ inputs.version }}-${{ matrix.archive }}
+            release-artifacts/artifact-metadata-${{ matrix.platform }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attest unsigned platform artifact provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release-artifacts/filestation-v${{ inputs.version }}-${{ matrix.archive }}
+
+  summarize:
+    name: Summarize artifact provenance
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: filestation-v${{ inputs.version }}-*
+          path: download
+          merge-multiple: true
+
+      - name: Build metadata and digest outputs
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -s 'sort_by(.platform)' download/artifact-metadata-*.json > artifact-metadata.json
+          artifacts_json="$(jq -c '.' artifact-metadata.json)"
+          platform_digests="$(jq -c 'map({key: .platform, value: ("sha256:" + .sha256)}) | from_entries' artifact-metadata.json)"
+          test "$(jq 'length' artifact-metadata.json)" = "2"
+          printf 'artifacts-json=%s\n' "$artifacts_json" >> "$GITHUB_OUTPUT"
+          printf 'platform-digests=%s\n' "$platform_digests" >> "$GITHUB_OUTPUT"
+
+      - name: Upload combined metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: filestation-v${{ inputs.version }}-metadata
+          path: artifact-metadata.json
+          if-no-files-found: error
+          retention-days: 30
+
+    outputs:
+      artifacts-json: ${{ steps.metadata.outputs.artifacts-json }}
+      platform-digests: ${{ steps.metadata.outputs.platform-digests }}

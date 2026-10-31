@@ -1,0 +1,15 @@
+{
+  "testEnvironment": "node",
+  "testMatch": ["**/src/**/*.spec.ts", "**/test/**/*.spec.ts"],
+  "transform": {
+    "^.+\\.ts$": [
+      "ts-jest",
+      {
+        "tsconfig": {
+          "rootDir": ".",
+          "paths": {}
+        }
+      }
+    ]
+  }
+}

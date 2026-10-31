@@ -5,6 +5,8 @@ node_modules/
 # Build outputs
 dist/
 **/dist/
+apps/web/dist-root/
+apps/web/dist-fs/
 build/
 **/build/
 
@@ -46,6 +48,11 @@ temp/
 # Testing
 coverage/
 .nyc_output/
+/.jest-cache-wave/
+/.tmp-jest-core/
+/.tmp-jest-server/
+/.tmp-jest-updater/
+/.tmp-jest/
 
 # Uploads (runtime)
 uploads/

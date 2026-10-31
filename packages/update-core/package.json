@@ -1,0 +1,28 @@
+{
+  "name": "@filestation/update-core",
+  "version": "0.2.5",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "browser": false,
+  "engines": {
+    "node": ">=20.17.0"
+  },
+  "scripts": {
+    "test": "jest --config jest.config.json",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@filestation/shared": "*",
+    "canonicalize": "^2.1.0",
+    "semver": "^7.7.2",
+    "koffi": "^2.14.1"
+  },
+  "devDependencies": {
+    "@types/semver": "^7.7.0",
+    "@types/jest": "^29.5.2",
+    "jest": "^29.5.0",
+    "ts-jest": "^29.1.0"
+  }
+}

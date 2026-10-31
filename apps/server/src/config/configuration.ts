@@ -1,4 +1,5 @@
 import { registerAs } from '@nestjs/config';
+import packageMetadata from '../../package.json';
 
 export default registerAs('app', () => {
   const nodeEnv = process.env.NODE_ENV || 'development';
@@ -12,11 +13,11 @@ export default registerAs('app', () => {
   const port = parseInt(process.env.FILESTATION_PORT || '8080', 10);
 
   // Nginx 可选项（v1.8）：无 Nginx 直连部署时设 FILESTATION_SERVE_STATIC=true，
-  // 由本进程托管 apps/web/dist 构建产物（SPA 回退到 index.html）。
+  // 由本进程托管 apps/web/dist-root 构建产物（SPA 回退到 index.html）。
   // 注意：setGlobalPrefix('api/v1') 之后所有非 /api 路径都不会匹配控制器，
   // 因此 serve-static 的 SPA 回退不会与 API 路由冲突。
   const serveStatic = process.env.FILESTATION_SERVE_STATIC === 'true';
-  const webDistPath = process.env.FILESTATION_WEB_DIST || '../web/dist';
+  const webDistPath = process.env.FILESTATION_WEB_DIST || 'apps/web/dist-root';
 
   // 监听地址：默认 127.0.0.1（Nginx 反代场景）；
   // 无 Nginx 局域网直连时设 FILESTATION_HOST=0.0.0.0 对外开放。
@@ -43,5 +44,11 @@ export default registerAs('app', () => {
     jwtSecret: jwtSecret || 'dev-secret-change-in-production',
     jwtExpiresIn: '24h',
     refreshTokenExpiresIn: '7d',
+    productVersion: packageMetadata.version,
+    updateInstallRoot: process.env.FILESTATION_INSTALL_ROOT,
+    updateJournalRoot: process.env.FILESTATION_INSTALL_ROOT,
+    updateManualCheckIntervalMs: 60_000,
+    updatePreparedTtlMs: 15 * 60 * 1000,
+    updateDownloadTimeoutMs: 60_000,
   };
 });

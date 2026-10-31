@@ -1,25 +1,54 @@
-import { Injectable, BadRequestException, OnApplicationBootstrap } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  Optional,
+  OnApplicationBootstrap,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createWriteStream, createReadStream, promises as fs } from 'fs';
 import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { createHash } from 'crypto';
+import { WriteBarrierService } from '../maintenance/write-barrier.service';
+import { WriteFreezeService } from '../maintenance/write-freeze.service';
 
 @Injectable()
 export class StorageService implements OnApplicationBootstrap {
   private readonly storagePath: string;
   private readonly tempPath: string;
+  private activated = false;
 
-  constructor(private configService: ConfigService) {
+  constructor(
+    private configService: ConfigService,
+    @Optional()
+    private readonly writeFreeze?: WriteFreezeService,
+    @Optional()
+    private readonly writeBarrier?: WriteBarrierService,
+  ) {
     this.storagePath = this.configService.get<string>('app.storagePath') || './data/storage';
     this.tempPath = this.configService.get<string>('app.tempPath') || './data/temp';
   }
 
-  async onApplicationBootstrap(): Promise<void> {
-    await this.ensureDirectories();
+  onApplicationBootstrap(): void {
+    // Storage I/O is activated explicitly by the normal startup path. Gated
+    // and validate processes must remain free of storage bootstrap writes.
+  }
+
+  async activate(): Promise<void> {
+    if (this.activated) return;
+    const create = async () => {
+      await this.ensureDirectories();
+      this.activated = true;
+    };
+    if (this.writeBarrier) {
+      await this.writeBarrier.withLease('startup-storage', create);
+    } else {
+      await create();
+    }
   }
 
   async ensureDirectories(): Promise<void> {
+    this.writeFreeze?.assertWritable();
     await fs.mkdir(this.storagePath, { recursive: true });
     await fs.mkdir(this.tempPath, { recursive: true });
   }
@@ -54,11 +83,13 @@ export class StorageService implements OnApplicationBootstrap {
   }
 
   async createUploadTempDir(uploadId: string): Promise<void> {
+    this.writeFreeze?.assertWritable();
     await fs.mkdir(this.getUploadTempDir(uploadId), { recursive: true });
   }
 
   /** 写 owner 专属临时文件（write + fsync）并校验 checksum。不做 rename，仅在事务外调用。 */
   async writePartToTemp(uploadId: string, partNumber: number, uniqueId: string, data: Buffer, expectedChecksum: string): Promise<void> {
+    this.writeFreeze?.assertWritable();
     const tempPath = this.getPartTempPath(uploadId, partNumber, uniqueId);
     const handle = await fs.open(tempPath, 'w');
     try {
@@ -81,24 +112,29 @@ export class StorageService implements OnApplicationBootstrap {
 
   /** 把 owner 的临时文件原子 rename 到正式分块路径。仅在事务外调用。 */
   async renamePart(uploadId: string, partNumber: number, uniqueId: string): Promise<void> {
+    this.writeFreeze?.assertWritable();
     await fs.rename(this.getPartTempPath(uploadId, partNumber, uniqueId), this.getPartPath(uploadId, partNumber));
   }
 
   /** 删除 owner 自己的临时文件（幂等），绝不删正式分块。 */
   async deleteTempPart(uploadId: string, partNumber: number, uniqueId: string): Promise<void> {
+    this.writeFreeze?.assertWritable();
     await fs.unlink(this.getPartTempPath(uploadId, partNumber, uniqueId)).catch(() => {});
   }
 
   /** 删除正式分块（仅供 abort/cleanup 使用，禁止在事务内或 uploadPart 正常路径调用）。 */
   async deletePart(uploadId: string, partNumber: number): Promise<void> {
+    this.writeFreeze?.assertWritable();
     await fs.unlink(this.getPartPath(uploadId, partNumber)).catch(() => {});
   }
 
   async deleteUploadTempDir(uploadId: string): Promise<void> {
+    this.writeFreeze?.assertWritable();
     await fs.rm(this.getUploadTempDir(uploadId), { recursive: true, force: true });
   }
 
   async combineParts(uploadId: string, totalParts: number, finalPath: string, signal?: AbortSignal): Promise<void> {
+    this.writeFreeze?.assertWritable();
     this.throwIfAborted(signal);
     const writeStream = createWriteStream(finalPath);
     let succeeded = false;
@@ -189,6 +225,7 @@ export class StorageService implements OnApplicationBootstrap {
 
   /** ENOENT 幂等：已被手动删除视为成功（防生命周期任务死循环重试）；其他错误抛出。 */
   async deleteFile(storedName: string): Promise<void> {
+    this.writeFreeze?.assertWritable();
     try {
       await fs.unlink(this.getFinalPath(storedName));
     } catch (err: any) {

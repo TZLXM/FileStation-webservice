@@ -9,6 +9,7 @@ import { RecoveryCode } from '../auth/entities/recovery-code.entity';
 import { AuditLog } from '../audit/entities/audit-log.entity';
 import { InitialSchema1700000000000 } from '../database/migrations/1700000000000-initial-schema';
 import { OneTotpAuthenticatorPerAccount1700000000001 } from '../database/migrations/1700000000001-one-totp-authenticator-per-account';
+import { UpdateAuditIdempotency1800000000000 } from '../database/migrations/1800000000000-update-audit-idempotency';
 
 // 真实迁移建库（synchronize: false + migrationsRun）：
 // 迁移 DDL 是权威 schema，实体必须贴合它
@@ -23,7 +24,11 @@ describe('Phase 2 entities alignment (real migration)', () => {
       type: 'sqlite',
       database: join(dir, 'test.db'),
       entities: [ApiToken, Authenticator, RecoveryCode, AuditLog],
-      migrations: [InitialSchema1700000000000, OneTotpAuthenticatorPerAccount1700000000001],
+      migrations: [
+        InitialSchema1700000000000,
+        OneTotpAuthenticatorPerAccount1700000000001,
+        UpdateAuditIdempotency1800000000000,
+      ],
       migrationsRun: true,
       synchronize: false,
     });

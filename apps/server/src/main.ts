@@ -1,17 +1,140 @@
-import { NestFactory } from '@nestjs/core';
-import { ValidationPipe, Logger } from '@nestjs/common';
-import { AppModule } from './app.module';
-import { ConfigService } from '@nestjs/config';
-import { AuthService } from './auth/auth.service';
-import { StorageService } from './files/storage.service';
-import { RangeNotSatisfiableFilter } from './common/http/range-not-satisfiable.filter';
-import cookieParser from 'cookie-parser';
-import * as fs from 'fs/promises';
-import { dirname } from 'path';
-import { installNonMcpBodyParsers } from './common/http/body-parsers';
-import { setupSwagger } from './common/swagger/setup-swagger';
+import { realpath } from 'fs/promises';
+import {
+  loadInstallEnvironment,
+  loadManagedInstallMetadata,
+  validateManagedDataOnDisk,
+  validateManagedLaunchOnDisk,
+} from './bootstrap/managed-preflight';
+import { detectStartupMode } from './bootstrap/startup-mode';
+import {
+  ParsedStartupExecution,
+  parseStartupExecution,
+  TrustedStartupAccess,
+  UpdateStartupIntent,
+} from './maintenance/startup-authority';
+import {
+  startGatedApplication,
+  startValidationApplication,
+} from './maintenance/server-startup';
+import {
+  closeResourceAfterFailure,
+  runWithCleanupOnFailure,
+} from './maintenance/application-cleanup';
 
-async function bootstrap() {
+interface PreparedStartup {
+  mode: 'legacy' | 'managed';
+  root: string;
+  releaseRealpath?: string;
+}
+
+function applyEnvironment(values: Readonly<Record<string, string>>): void {
+  for (const [key, value] of Object.entries(values)) {
+    process.env[key] = value;
+  }
+}
+
+async function prepareStartup(): Promise<PreparedStartup> {
+  const cwdRealpath = await realpath(process.cwd());
+  const executableRealpath = await realpath(__filename);
+  const startup = await detectStartupMode({
+    cwd: cwdRealpath,
+    executableRealpath,
+  });
+  const invocationEnvironment = { ...process.env };
+  const environment = await loadInstallEnvironment(startup.root, { processEnvironment: invocationEnvironment });
+  applyEnvironment(environment.values);
+  if (startup.mode === 'legacy') {
+    return { mode: 'legacy', root: startup.root };
+  }
+
+  const metadata = await loadManagedInstallMetadata(startup.root);
+  const currentRealpath = await realpath(metadata.currentPath);
+  const plan = await validateManagedLaunchOnDisk({
+    cwd: cwdRealpath,
+    executableRealpath,
+    installMetadata: metadata,
+    environment: environment.values,
+    processEnvironment: invocationEnvironment,
+    currentRealpath,
+    configuredPaths: {
+      database: environment.values.FILESTATION_DB_PATH,
+      storage: environment.values.FILESTATION_STORAGE_PATH,
+      temp: environment.values.FILESTATION_TEMP_PATH,
+    },
+  });
+  applyEnvironment(plan.environment);
+  return {
+    mode: 'managed',
+    root: startup.root,
+    releaseRealpath: plan.releaseRealpath,
+  };
+}
+
+async function prepareAuthorizedUpdateStartup(
+  intent: UpdateStartupIntent,
+): Promise<PreparedStartup> {
+  const cwdRealpath = await realpath(process.cwd());
+  const executableRealpath = await realpath(__filename);
+  const installRoot = await realpath(intent.attempt.installRoot);
+  if (installRoot !== intent.attempt.installRoot) {
+    throw new Error('authorized update install root must be canonical');
+  }
+  const startup = await detectStartupMode({
+    cwd: cwdRealpath,
+    executableRealpath,
+    environment: {
+      ...process.env,
+      FILESTATION_INSTALL_ROOT: installRoot,
+    },
+  });
+  if (startup.mode !== 'managed') {
+    throw new Error('update validation and gated startup require a managed install');
+  }
+  const invocationEnvironment = { ...process.env };
+  const environment = await loadInstallEnvironment(startup.root, {
+    processEnvironment: invocationEnvironment,
+  });
+  applyEnvironment(environment.values);
+  const metadata = await loadManagedInstallMetadata(startup.root);
+  const currentRealpath = await realpath(metadata.currentPath);
+  const plan = await validateManagedDataOnDisk({
+    cwd: cwdRealpath,
+    executableRealpath,
+    installMetadata: metadata,
+    environment: environment.values,
+    processEnvironment: invocationEnvironment,
+    currentRealpath,
+    configuredPaths: {
+      database: environment.values.FILESTATION_DB_PATH,
+      storage: environment.values.FILESTATION_STORAGE_PATH,
+      temp: environment.values.FILESTATION_TEMP_PATH,
+    },
+  });
+  applyEnvironment(plan.environment);
+  return {
+    mode: 'managed',
+    root: startup.root,
+    releaseRealpath: plan.releaseRealpath,
+  };
+}
+
+async function bootstrapNormal() {
+  const prepared = await prepareStartup();
+  const { NestFactory } = await import('@nestjs/core');
+  const { Logger } = await import('@nestjs/common');
+  const { AppModule } = await import('./app.module');
+  const { ConfigService } = await import('@nestjs/config');
+  const { AuthService } = await import('./auth/auth.service');
+  const { StorageService } = await import('./files/storage.service');
+  const { FileLifecycleService } = await import(
+    './files/file-lifecycle.service'
+  );
+  const { setupFullApplication } = await import(
+    './common/http/application-setup'
+  );
+  const { ApplicationShutdownService } = await import(
+    './updates/application-shutdown.service'
+  );
   const logger = new Logger('Bootstrap');
 
   // ========== 阶段 0：端口预检（防 EADDRINUSE 时 init token 未激活的混淆） ==========
@@ -34,84 +157,202 @@ async function bootstrap() {
     process.exit(1);
   }
 
-  // ========== 阶段 1：目录预创建（NestFactory.create 之前，纯配置读取，无 DI） ==========
-  // DatabaseModule 连接 SQLite 前 db 父目录必须存在，否则报 SQLITE_CANTOPEN
-  const storagePath = process.env.FILESTATION_STORAGE_PATH || './data/storage';
-  const tempPath = process.env.FILESTATION_TEMP_PATH || './data/temp';
-  const dbPath = process.env.FILESTATION_DB_PATH || './data/filestation.db';
-  await fs.mkdir(storagePath, { recursive: true });
-  await fs.mkdir(tempPath, { recursive: true });
-  await fs.mkdir(dirname(dbPath), { recursive: true });
-  logger.log(`Directories ensured: storage=${storagePath}, temp=${tempPath}, db=${dirname(dbPath)}`);
-
-  // ========== 阶段 2：创建应用（migrationsRun 在此触发） ==========
-  const app = await NestFactory.create(AppModule, { bodyParser: false });
-  const configService = app.get(ConfigService);
-
-  // Ordinary routes retain the default 100KB parser limit. MCP is parsed only
-  // inside its controller, after its disabled/method/auth gates.
-  installNonMcpBodyParsers(app);
-  app.use(cookieParser());
-  app.setGlobalPrefix('api/v1'); // 唯一前缀来源
-  setupSwagger(app);
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      transform: true,
-      forbidNonWhitelisted: true,
-      transformOptions: { enableImplicitConversion: false }, // DTO @Type 显式转换
-    }),
-  );
-  app.useGlobalFilters(new RangeNotSatisfiableFilter()); // 416 + Content-Range
-  const corsOrigins = configService.get<string[]>('app.corsOrigins') ?? [];
-  if (corsOrigins.length > 0) {
-    app.enableCors({ origin: corsOrigins, credentials: true });
+  // ========== 阶段 1：创建应用（migrationsRun 在此触发） ==========
+  let app: Awaited<ReturnType<typeof NestFactory.create>>;
+  try {
+    app = await NestFactory.create(AppModule, {
+      bodyParser: false,
+      abortOnError: false,
+    });
+  } catch (error) {
+    // Nest has not returned an application handle yet. The executable entry
+    // must terminate so partially initialized providers cannot keep resources.
+    if (require.main === module) process.exit(1);
+    throw error;
   }
-  // CORS 为空 = 同源部署（静态托管或 FILESTATION_CORS_ORIGINS 未配置且非开发模式），
-  // 浏览器不发 CORS 预检，无需 enableCors。
+  return runWithCleanupOnFailure(app, async () => {
+    app.get(ApplicationShutdownService).attach(app);
+    app.enableShutdownHooks();
+    const configService = app.get(ConfigService);
 
-  // ========== 阶段 3：app.init() 触发 OnApplicationBootstrap ==========
-  // DatabaseInitializer（PRAGMA + foreign_keys 校验）、StorageService.ensureDirectories、
-  // FileLifecycleService 启动扫描 在此执行，migrationsRun 已完成
-  await app.init();
+    setupFullApplication(app, configService);
 
-  // ========== 阶段 4：init token 覆盖（listen 前写入 DB，防 listen 后窗口期旧 token 仍有效） ==========
-  const authService = app.get(AuthService);
-  const initToken = await authService.ensureInitToken();
+    // ========== 阶段 3：app.init() 触发数据库初始化 ==========
+    await app.init();
+    if (process.env.FILESTATION_INSTALL_ROOT) {
+      const { UpdateAuditReconciler } = await import(
+        './updates/update-audit-reconciler'
+      );
+      await app
+        .get(UpdateAuditReconciler)
+        .reconcile(process.env.FILESTATION_INSTALL_ROOT);
+    }
+    await app.get(StorageService).activate();
+    await app.get(FileLifecycleService).activate();
 
-  // ========== 阶段 5：最后才监听 ==========
-  await app.listen(port, host);
+    // ========== 阶段 4：init token 覆盖（listen 前写入 DB，防 listen 后窗口期旧 token 仍有效） ==========
+    const authService = app.get(AuthService);
+    const initToken = await authService.ensureInitToken();
 
-  const serveStatic = configService.get<boolean>('app.serveStatic');
-  const displayHost = host === '0.0.0.0' ? 'localhost' : host;
-  logger.log(`FileStation server running on http://${displayHost}:${port}`);
-  logger.log(`Environment: ${configService.get<string>('app.nodeEnv')}`);
-  if (serveStatic) {
-    logger.log(`部署模式：单进程（无 Nginx）—— 前端静态文件由本进程托管于 http://${displayHost}:${port}`);
-  } else if (host === '127.0.0.1') {
-    logger.log('部署模式：仅监听回环（Nginx 反代场景，或开发模式 vite 代理）');
-  } else {
-    logger.log(`部署模式：直接监听 ${host}:${port}（无静态托管，前端需单独部署）`);
-  }
+    // ========== 阶段 5：最后才监听 ==========
+    await app.listen(port, host);
 
-  // ========== 阶段 6：listen 成功后才打印 init token（token 只在进程真正激活后显示） ==========
-  // 防 EADDRINUSE 场景：进程打印了 token 却未启动成功，用户拿未激活 token 去初始化
-  if (initToken) {
-    // 初始化页面是前端路由（React /init），不是后端 API（POST /api/v1/auth/init 仅接受 POST）。
-    // 单进程模式（FILESTATION_SERVE_STATIC=true）或 Nginx 同端口托管时，直接用服务端口；
-    // 开发模式前后端分离（vite 5173），设 FILESTATION_WEB_URL=http://localhost:5173 指向开发前端。
-    const webUrl = process.env.FILESTATION_WEB_URL || `http://${displayHost}:${port}`;
-    logger.log('================================');
-    logger.log('FileStation 首次启动（未初始化）');
-    logger.log(`初始化 Token: ${initToken}`);
-    logger.log('有效期：10 分钟，仅本机可完成初始化');
-    logger.log('');
-    logger.log('请在浏览器打开以下地址完成初始化：');
-    logger.log(`  ${webUrl}/init`);
-    logger.log('');
-    logger.log('（输入上面的初始化 Token + 设置管理员用户名/密码）');
-    logger.log('================================');
-  }
+    const serveStatic = configService.get<boolean>('app.serveStatic');
+    const displayHost = host === '0.0.0.0' ? 'localhost' : host;
+    logger.log(`FileStation server running on http://${displayHost}:${port}`);
+    logger.log(`Environment: ${configService.get<string>('app.nodeEnv')}`);
+    if (prepared.mode === 'managed') {
+      logger.log(
+        `Managed startup: install=${prepared.root}, release=${prepared.releaseRealpath}`,
+      );
+    }
+    if (serveStatic) {
+      logger.log(`部署模式：单进程（无 Nginx）—— 前端静态文件由本进程托管于 http://${displayHost}:${port}`);
+    } else if (host === '127.0.0.1') {
+      logger.log('部署模式：仅监听回环（Nginx 反代场景，或开发模式 vite 代理）');
+    } else {
+      logger.log(`部署模式：直接监听 ${host}:${port}（无静态托管，前端需单独部署）`);
+    }
+
+    // ========== 阶段 6：listen 成功后才打印 init token（token 只在进程真正激活后显示） ==========
+    // 防 EADDRINUSE 场景：进程打印了 token 却未启动成功，用户拿未激活 token 去初始化
+    if (initToken) {
+      // 初始化页面是前端路由（React /init），不是后端 API（POST /api/v1/auth/init 仅接受 POST）。
+      // 单进程模式（FILESTATION_SERVE_STATIC=true）或 Nginx 同端口托管时，直接用服务端口；
+      // 开发模式前后端分离（vite 5173），设 FILESTATION_WEB_URL=http://localhost:5173 指向开发前端。
+      const webUrl = process.env.FILESTATION_WEB_URL || `http://${displayHost}:${port}`;
+      logger.log('================================');
+      logger.log('FileStation 首次启动（未初始化）');
+      logger.log(`初始化 Token: ${initToken}`);
+      logger.log('有效期：10 分钟，仅本机可完成初始化');
+      logger.log('');
+      logger.log('请在浏览器打开以下地址完成初始化：');
+      logger.log(`  ${webUrl}/init`);
+      logger.log('');
+      logger.log('（输入上面的初始化 Token + 设置管理员用户名/密码）');
+      logger.log('================================');
+    }
+    const { DataSource } = await import('typeorm');
+    const db = app.get(DataSource);
+    const integrity = await db.query('PRAGMA integrity_check');
+    const foreignKeys = await db.query('PRAGMA foreign_key_check');
+    const runtimeVersion = (await import('../package.json')).version;
+    return {
+      app,
+      prepared,
+      configService,
+      initToken,
+      reconcileUpdateAudit: async () => {
+        if (prepared.mode === 'managed') {
+          const { UpdateAuditReconciler } = await import(
+            './updates/update-audit-reconciler'
+          );
+          await app.get(UpdateAuditReconciler).reconcile(prepared.root);
+        }
+      },
+      restartHealth: {
+        version: runtimeVersion,
+        release: prepared.releaseRealpath,
+        health:
+          integrity.length === 1 &&
+          integrity[0].integrity_check === 'ok' &&
+          foreignKeys.length === 0 &&
+          app.getHttpServer().listening
+            ? 'ok'
+            : 'failed',
+      },
+    };
+  });
 }
 
-bootstrap();
+async function bootstrapUpdate(
+  execution: Exclude<ParsedStartupExecution, { mode: 'normal' }>,
+  access: TrustedStartupAccess,
+) {
+  const intent: UpdateStartupIntent = {
+    mode: execution.mode,
+    attempt: execution.attempt,
+  };
+  await access.authorizeStartup(intent);
+  const prepared = await prepareAuthorizedUpdateStartup(intent);
+  const { Logger } = await import('@nestjs/common');
+  const logger = new Logger('Bootstrap');
+
+  if (execution.mode === 'validate') {
+    const handle = await startValidationApplication({
+      access,
+      intent,
+      startupAuthorized: true,
+      host: '127.0.0.1',
+      port: Number(process.env.FILESTATION_PORT ?? 0),
+    });
+    return runWithCleanupOnFailure(handle, async () => {
+      const address = handle.app.getHttpServer().address();
+      const port =
+        address && typeof address === 'object' ? address.port : 0;
+      logger.log(
+        `Update validation listening on 127.0.0.1:${port} (release=${prepared.releaseRealpath})`,
+      );
+      return handle;
+    });
+  }
+
+  const handle = await startGatedApplication({
+    access,
+    intent,
+    startupAuthorized: true,
+    host: process.env.FILESTATION_HOST || '127.0.0.1',
+    port: parseInt(process.env.FILESTATION_PORT || '8080', 10),
+    onCommitted: async (app) => {
+      const { AuthService } = await import('./auth/auth.service');
+      await app.get(AuthService).ensureInitToken();
+    },
+  });
+  return runWithCleanupOnFailure(handle, async () => {
+    void handle.committed.then(
+      () =>
+        logger.log(
+          'Matching durable COMMITTED observed; normal service activated',
+        ),
+      async (error) => {
+        process.exitCode = 1;
+        const cleanupError = await closeResourceAfterFailure(handle, error);
+        logger.error(
+          `Gated startup failed: ${
+            error instanceof Error ? error.message : 'unknown error'
+          }`,
+        );
+        if (cleanupError !== undefined) process.exit(1);
+      },
+    );
+    logger.log(
+      `Update gated service listening in maintenance mode (release=${prepared.releaseRealpath})`,
+    );
+    return handle;
+  });
+}
+
+export async function bootstrap(
+  startupAccess?: TrustedStartupAccess,
+) {
+  const execution = parseStartupExecution(process.argv.slice(2));
+  if (execution.mode === 'normal') {
+    return bootstrapNormal();
+  }
+  const { InheritedTrustedStartupAccess } = await import(
+    './maintenance/inherited-startup-access'
+  );
+  const access =
+    startupAccess ??
+    (await InheritedTrustedStartupAccess.fromInherited(process.stdin));
+  return bootstrapUpdate(execution, access);
+}
+
+if (require.main === module) {
+  void bootstrap().catch((error) => {
+    const message =
+      error instanceof Error ? error.message : 'FileStation startup failed';
+    process.stderr.write(`FileStation startup failed: ${message}\n`);
+    process.exit(1);
+  });
+}

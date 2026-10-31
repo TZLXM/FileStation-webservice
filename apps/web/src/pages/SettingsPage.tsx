@@ -5,6 +5,7 @@ import ApiTokensSection from './settings/ApiTokensSection';
 import AgentSection from './settings/AgentSection';
 import TotpSection from './settings/TotpSection';
 import RecoverySection from './settings/RecoverySection';
+import UpdateSection from './settings/UpdateSection';
 
 interface Settings {
   site: { name: string; icon: string | null; theme_color: string };
@@ -187,6 +188,7 @@ export default function SettingsPage() {
 
           <TotpSection totpActive={settings.security.totp_active} onChanged={refreshTotpStatus} />
           <RecoverySection totpActive={settings.security.totp_active} />
+          <UpdateSection totpActive={settings.security.totp_active} />
           <ApiTokensSection />
           <AgentSection agent={settings.agent} onSaved={refreshAgentSettings} />
 

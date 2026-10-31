@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../../lib/api';
+import { absoluteAppUrl } from '../../lib/base-url';
 
 interface AgentSettings {
   mcp_enabled: boolean;
@@ -21,7 +22,7 @@ export default function AgentSection({ agent, onSaved }: AgentSectionProps) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const mcpUrl = `${window.location.origin}/api/v1/mcp`;
+  const mcpUrl = absoluteAppUrl('/api/v1/mcp');
   const parsedMaxMb = Number(maxMb);
   const validMaxMb = Number.isInteger(parsedMaxMb) && parsedMaxMb >= 1 && parsedMaxMb <= 512;
 

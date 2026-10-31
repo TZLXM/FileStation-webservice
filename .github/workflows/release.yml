@@ -1,0 +1,244 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: 20.17.0
+  NPM_VERSION: 10.9.2
+
+jobs:
+  verify:
+    name: Verify release gate and tag source
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      source-commit: ${{ steps.release.outputs.source-commit }}
+    steps:
+      - name: Check out tag commit with complete history
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Set up fixed Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install fixed npm
+        run: npm install --global npm@${{ env.NPM_VERSION }} --no-audit --no-fund
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Resolve exact pending candidate
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          evidence="release-evidence/v${version}.json"
+          source_commit="$(node -e "process.stdout.write(require('./${evidence}').candidate.sourceCommit || '')")"
+          test "${#source_commit}" = "40"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "source-commit=$source_commit" >> "$GITHUB_OUTPUT"
+          node scripts/release/validate-version.mjs \
+            --version "$version" \
+            --tag "$GITHUB_REF_NAME" \
+            --evidence "$evidence" \
+            --candidate-source "$source_commit"
+          node scripts/release/validate-release-notes.mjs --version "$version"
+
+      - name: Verify structured release gate
+        shell: bash
+        run: npm run verify:release-gate -- --version "${{ steps.release.outputs.version }}"
+
+      - name: Release gate tests
+        run: node --test scripts/ci/verify-release-gate.test.mjs
+
+      - name: Release tool tests
+        run: node --test scripts/release/release-tools.test.mjs scripts/release/resolve-candidate.test.mjs
+
+      - name: Build server updater prerequisites
+        run: |
+          npm run build:shared
+          npm run build --workspace=@filestation/update-core
+          npm run build --workspace=@filestation/updater
+          npm run build --workspace=@filestation/server
+
+      - name: Server unit tests
+        run: npm test --workspace=@filestation/server -- --runInBand
+
+      - name: Server E2E tests
+        run: npm run test:e2e --workspace=@filestation/server
+
+      - name: Web unit tests
+        working-directory: apps/web
+        run: npx --no-install vitest run --no-cache
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Check tag diff whitespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin master --depth=1
+          merge_base="$(git merge-base origin/master HEAD)"
+          git diff --check "${merge_base}...HEAD"
+
+  build:
+    name: Rebuild recorded candidate source
+    needs: verify
+    uses: ./.github/workflows/release-platform.yml
+    with:
+      source_commit: ${{ needs.verify.outputs.source-commit }}
+      version: ${{ needs.verify.outputs.version }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+
+  sign-and-publish:
+    name: Verify digests, sign, and publish
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release-signing
+    permissions:
+      contents: write
+      actions: read
+
+    steps:
+      - name: Check out tag metadata without candidate artifact inputs
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Set up fixed Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install fixed npm
+        run: npm install --global npm@${{ env.NPM_VERSION }} --no-audit --no-fund
+
+      - name: Install build dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build shared release metadata tools
+        run: npm run build:shared
+
+      - name: Download rebuilt platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: filestation-v${{ needs.verify.outputs.version }}-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Verify rebuilt artifacts match candidate evidence
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const crypto = require("node:crypto");
+            const fs = require("node:fs");
+            const metadata = JSON.parse(
+              fs.readFileSync("release-artifacts/artifact-metadata.json", "utf8"),
+            );
+            const evidence = JSON.parse(
+              fs.readFileSync(
+                `release-evidence/v${process.env.VERSION}.json`,
+                "utf8",
+              ),
+            );
+            if (!Array.isArray(metadata) || metadata.length !== 2) {
+              throw new Error("rebuilt metadata must contain exactly two platforms");
+            }
+            for (const platform of ["linux-x64", "windows-x64"]) {
+              const matches = metadata.filter((item) => item.platform === platform);
+              if (matches.length !== 1) {
+                throw new Error(`rebuilt metadata missing/duplicated ${platform}`);
+              }
+              const item = matches[0];
+              const bytes = fs.readFileSync(
+                `release-artifacts/${item.filename}`,
+              );
+              const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+              if (
+                bytes.length !== item.archive_size ||
+                digest !== item.sha256 ||
+                evidence.candidate.platformDigests?.[platform] !==
+                  `sha256:${digest}`
+              ) {
+                throw new Error(`rebuilt digest mismatch for ${platform}`);
+              }
+            }
+          '
+
+      - name: Render reviewed bilingual release body
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run release:notes -- \
+            --version "${{ needs.verify.outputs.version }}" \
+            --repository "https://github.com/${GITHUB_REPOSITORY}" \
+            --output release-body.md
+
+      - name: Build and sign canonical manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SIGNING_PRIVATE_KEY_BASE64: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p signed-release
+          node scripts/release/build-manifest.mjs \
+            --notes "release-notes/v${{ needs.verify.outputs.version }}.json" \
+            --version "${{ needs.verify.outputs.version }}" \
+            --commit "$GITHUB_SHA" \
+            --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/$GITHUB_REF_NAME" \
+            --upgrade-guide-url "https://github.com/${GITHUB_REPOSITORY}/blob/$GITHUB_REF_NAME/docs/UPDATING.md" \
+            --artifacts release-artifacts/artifact-metadata.json \
+            --artifact-dir release-artifacts \
+            --output-dir signed-release \
+            --evidence "release-evidence/v${{ needs.verify.outputs.version }}.json"
+
+      - name: Publish verified Release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(
+            release-artifacts/filestation-v${{ needs.verify.outputs.version }}-linux-x64.tar.gz
+            release-artifacts/filestation-v${{ needs.verify.outputs.version }}-win-x64.zip
+            signed-release/update-manifest.json
+            signed-release/update-manifest.json.sig
+          )
+          test "${#assets[@]}" = "4"
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --verify-tag \
+            --title "FileStation $GITHUB_REF_NAME" \
+            --notes-file release-body.md

@@ -1,0 +1,110 @@
+{
+  "version": "0.2.0",
+  "database_migration": true,
+  "breaking_changes": false,
+  "minimum_node": "20.17.0",
+  "requires_manual_bootstrap": true,
+  "automatic_update_from": "0.2.5",
+  "update_protocol": 1,
+  "min_updater_version": "0.2.5",
+  "migration_workspace_multiplier": 3,
+  "migration_workspace_min_bytes": 268435456,
+  "release_summaries": {
+    "zh-CN": {
+      "features": [
+        {
+          "id": "feat:release-baseline",
+          "text": "完成 Phase 2 发布基线：管理员双因素认证、一次性恢复码、细粒度 API Token、审计查询和默认关闭的内嵌 MCP。"
+        },
+        {
+          "id": "feat:transfer-reliability",
+          "text": "加入分块上传、服务端恢复、Web 断点续传、Range 下载和分享访问控制。"
+        }
+      ],
+      "fixes": [
+        {
+          "id": "fix:concurrent-transfers",
+          "text": "修复并发上传、下载额度抢占和最终化恢复之间的竞态。"
+        },
+        {
+          "id": "fix:lan-checksum",
+          "text": "修复无 WebCrypto 的 LAN HTTP 浏览器无法计算上传分块 SHA-256 的问题。"
+        }
+      ],
+      "security": [
+        {
+          "id": "security:release-gate",
+          "text": "增加结构化发布门、严格权限检查和文件响应安全头；依赖审计的 Critical/High 已清零。"
+        }
+      ],
+      "upgrades": [
+        {
+          "id": "upgrade:node-runtime",
+          "text": "要求 Node.js 20.17.0 或更高版本，并从 v0.2.5 起支持面向 managed layout 的自动更新。"
+        },
+        {
+          "id": "upgrade:manual-bootstrap",
+          "text": "旧式源码部署升级到 managed layout 前需要一次手动 bootstrap。"
+        }
+      ],
+      "known_issues": [
+        {
+          "id": "known:manual-acceptance",
+          "text": "发布门要求使用同一候选制品提供 375px、TOTP/恢复码和刷新后续传的人工验收证据。"
+        },
+        {
+          "id": "known:audit-advisories",
+          "text": "现有 Moderate/Low 依赖审计告警仍需按 CURRENT-STATE 的风险记录继续处理。"
+        }
+      ]
+    },
+    "en": {
+      "features": [
+        {
+          "id": "feat:release-baseline",
+          "text": "Complete the Phase 2 baseline with administrator two-factor authentication, one-time recovery codes, scoped API tokens, audit queries, and an opt-in embedded MCP service."
+        },
+        {
+          "id": "feat:transfer-reliability",
+          "text": "Add chunked uploads, server-side recovery, browser resume after refresh, Range downloads, and controlled share access."
+        }
+      ],
+      "fixes": [
+        {
+          "id": "fix:concurrent-transfers",
+          "text": "Fix races across concurrent uploads, download-quota claims, and finalization recovery."
+        },
+        {
+          "id": "fix:lan-checksum",
+          "text": "Fix upload chunk SHA-256 calculation in LAN HTTP browsers without WebCrypto."
+        }
+      ],
+      "security": [
+        {
+          "id": "security:release-gate",
+          "text": "Add a structured release gate, strict permission checks, and safe file-response headers; no Critical or High audit findings remain."
+        }
+      ],
+      "upgrades": [
+        {
+          "id": "upgrade:node-runtime",
+          "text": "Require Node.js 20.17.0 or newer; managed-layout automatic updates begin with v0.2.5."
+        },
+        {
+          "id": "upgrade:manual-bootstrap",
+          "text": "Legacy source deployments require a one-time manual bootstrap before moving to the managed layout."
+        }
+      ],
+      "known_issues": [
+        {
+          "id": "known:manual-acceptance",
+          "text": "The release gate requires manual acceptance evidence from the same candidate artifact at 375px, for TOTP/recovery, and for resume after refresh."
+        },
+        {
+          "id": "known:audit-advisories",
+          "text": "Existing Moderate/Low dependency audit advisories remain tracked in CURRENT-STATE."
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,1338 @@
+import assert from "node:assert/strict";
+import { createHash, createPublicKey, generateKeyPairSync } from "node:crypto";
+import {
+  copyFile,
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import test, { after } from "node:test";
+
+import {
+  buildManifest,
+  canonicalizeJson,
+  loadFixedPublicKey,
+  readArtifactMetadata,
+  requireConfiguredPublicKey,
+  signManifest,
+  validateArtifactMetadata,
+  verifyManifestSignature,
+} from "./build-manifest.mjs";
+import { draftReleaseNotes } from "./draft-release-notes.mjs";
+import {
+  packageArtifact,
+  parsePackageArguments,
+  prepareArtifactDirectory,
+  isForbiddenArtifactPath,
+  resolveNpmInvocation,
+} from "./package-artifact.mjs";
+import { renderReleaseNotes } from "./render-release-notes.mjs";
+import { redactSmokeOutput } from "./smoke-artifact.mjs";
+import {
+  determineDatabaseMigration,
+  resolvePriorStableTag,
+  validateCandidateTagDiff,
+  validateVersion,
+} from "./validate-version.mjs";
+import { validateReleaseNotes } from "./validate-release-notes.mjs";
+
+const fixtureRoot = await mkdtemp(path.join(tmpdir(), "filestation-release-tools-"));
+const sourceCommit = "0123456789abcdef0123456789abcdef01234567";
+const tagCommit = "abcdef0123456789abcdef0123456789abcdef01";
+
+test('bilingual changelog preserves reviewed dual-bundle paths and timeless acceptance gate', async () => {
+  const changelog = await readFile(new URL('../../CHANGELOG.md', import.meta.url), 'utf8');
+  const notes = JSON.parse(await readFile(new URL('../../release-notes/v0.2.5.json', import.meta.url), 'utf8'));
+  for (const language of ['zh-CN', 'en']) {
+    const upgrades = notes.release_summaries[language].upgrades.map(item => item.text).join('\n');
+    for (const bundle of ['dist-root', 'dist-fs']) {
+      assert.ok(upgrades.includes(bundle));
+      assert.equal(changelog.split(`current/apps/web/${bundle}`).length - 1, 2);
+    }
+  }
+  assert.ok(!changelog.includes('current/apps/web/dist`'));
+  const oldNotes = await readFile(new URL('../../release-notes/v0.2.0.json', import.meta.url), 'utf8');
+  for (const text of [changelog, oldNotes]) {
+    assert.ok(!text.includes('still requires manual acceptance'));
+    assert.ok(!text.includes('发布前仍需使用'));
+    assert.ok(text.includes('375px'));
+  }
+});
+
+after(async () => {
+  await rm(fixtureRoot, { recursive: true, force: true });
+});
+
+function localizedSummary(language) {
+  const english = language === "en";
+  return {
+    features: [
+      {
+        id: "feat-release-tools",
+        text: english
+          ? "Add deterministic release tooling."
+          : "新增确定性的发布工具。",
+      },
+    ],
+    fixes: [
+      {
+        id: "fix-release-gate",
+        text: english
+          ? "Reject incomplete release evidence."
+          : "拒绝不完整的发布证据。",
+      },
+    ],
+  };
+}
+
+function validNotes(version = "0.2.0") {
+  return {
+    version,
+    database_migration: true,
+    breaking_changes: false,
+    minimum_node: "20.17.0",
+    requires_manual_bootstrap: true,
+    automatic_update_from: "0.2.5",
+    update_protocol: 1,
+    min_updater_version: "0.2.5",
+    migration_workspace_multiplier: 3,
+    migration_workspace_min_bytes: 268435456,
+    release_summaries: {
+      "zh-CN": localizedSummary("zh-CN"),
+      en: localizedSummary("en"),
+    },
+  };
+}
+
+function artifact(platform) {
+  const windows = platform === "windows-x64";
+  return {
+    platform,
+    os: windows ? "windows" : "linux",
+    arch: "x64",
+    filename: `filestation-v0.2.0-${windows ? "win" : "linux"}-x64.${windows ? "zip" : "tar.gz"}`,
+    url: `https://github.com/example/FileStation/releases/download/v0.2.0/filestation-v0.2.0-${windows ? "win" : "linux"}-x64.${windows ? "zip" : "tar.gz"}`,
+    archive_size: windows ? 200 : 100,
+    unpacked_size: windows ? 500 : 400,
+    sha256: windows ? "2".repeat(64) : "1".repeat(64),
+    format: windows ? "zip" : "tar.gz",
+  };
+}
+
+function manifestInput() {
+  return {
+    notes: validNotes(),
+    version: "0.2.0",
+    commit: tagCommit,
+    publishedAt: "2026-10-27T00:00:00.000Z",
+    releaseUrl: "https://github.com/example/FileStation/releases/tag/v0.2.0",
+    upgradeGuideUrl:
+      "https://github.com/example/FileStation/blob/v0.2.0/docs/UPDATING.md",
+    artifacts: [artifact("linux-x64"), artifact("windows-x64")],
+  };
+}
+
+function workspaceManifests(version = "0.2.0") {
+  return Object.fromEntries(
+    [
+      "package.json",
+      "apps/updater/package.json",
+      "apps/server/package.json",
+      "apps/web/package.json",
+      "packages/shared/package.json",
+      "packages/update-core/package.json",
+    ].map((file) => [file, { name: file, version }]),
+  );
+}
+
+test("version validation requires the tag and all six product manifests to agree", () => {
+  assert.deepEqual(
+    validateVersion({
+      tag: "v0.2.0",
+      manifests: workspaceManifests(),
+      breakingChanges: false,
+    }),
+    { version: "0.2.0", tag: "v0.2.0", productManifestCount: 6 },
+  );
+
+  assert.throws(
+    () =>
+      validateVersion({
+        tag: "v0.2.1",
+        manifests: workspaceManifests(),
+        breakingChanges: false,
+      }),
+    /tag/i,
+  );
+
+  const manifests = workspaceManifests();
+  manifests["apps/web/package.json"].version = "0.2.5";
+  assert.throws(
+    () =>
+      validateVersion({
+        tag: "v0.2.0",
+        manifests,
+        breakingChanges: false,
+      }),
+    /apps\/web\/package\.json|workspace/i,
+  );
+});
+
+test("version validation rejects a missing update-core manifest", () => {
+  const manifests = workspaceManifests();
+  delete manifests["packages/update-core/package.json"];
+  assert.throws(
+    () => validateVersion({ tag: "v0.2.0", manifests, breakingChanges: false }),
+    /workspace manifest is missing: packages\/update-core\/package\.json/,
+  );
+});
+
+test("version validation rejects a missing updater manifest", () => {
+  const manifests = workspaceManifests();
+  delete manifests["apps/updater/package.json"];
+  assert.throws(
+    () => validateVersion({ tag: "v0.2.0", manifests, breakingChanges: false }),
+    /workspace manifest is missing: apps\/updater\/package\.json/,
+  );
+});
+
+test("version validation rejects a mismatched update-core product version", () => {
+  const manifests = workspaceManifests();
+  manifests["packages/update-core/package.json"].version = "9.9.9";
+  assert.throws(
+    () => validateVersion({ tag: "v0.2.0", manifests, breakingChanges: false }),
+    /packages\/update-core\/package\.json version "9\.9\.9" does not match tag v0\.2\.0/,
+  );
+});
+
+test("version validation rejects a mismatched updater product version", () => {
+  const manifests = workspaceManifests();
+  manifests["apps/updater/package.json"].version = "9.9.9";
+  assert.throws(
+    () => validateVersion({ tag: "v0.2.0", manifests, breakingChanges: false }),
+    /apps\/updater\/package\.json version "9\.9\.9" does not match tag v0\.2\.0/,
+  );
+});
+
+test("version validation excludes third-party tooling but includes all product workspaces", () => {
+  const manifests = workspaceManifests();
+  manifests["packages/release-tool/package.json"] = { name: "third-party-tool", version: "9.9.9" };
+  manifests["node_modules/canonicalize/package.json"] = { name: "canonicalize", version: "2.1.0" };
+  assert.equal(
+    validateVersion({ tag: "v0.2.0", manifests, breakingChanges: false }).productManifestCount,
+    6,
+  );
+});
+
+test("version validation rejects prereleases and breaking patch releases", () => {
+  assert.throws(
+    () =>
+      validateVersion({
+        tag: "v0.2.0-rc.1",
+        manifests: workspaceManifests(),
+        breakingChanges: false,
+      }),
+    /stable SemVer/i,
+  );
+  assert.throws(
+    () =>
+      validateVersion({
+        tag: "v0.2.1",
+        manifests: workspaceManifests("0.2.1"),
+        breakingChanges: true,
+      }),
+    /patch.*breaking/i,
+  );
+});
+
+test("release-note validation omits empty categories and pairs stable item IDs", () => {
+  const notes = validNotes();
+  assert.doesNotThrow(() => validateReleaseNotes(notes));
+  assert.deepEqual(Object.keys(notes.release_summaries["zh-CN"]), [
+    "features",
+    "fixes",
+  ]);
+  assert.deepEqual(Object.keys(notes.release_summaries.en), [
+    "features",
+    "fixes",
+  ]);
+
+  notes.release_summaries.en.fixes[0].id = "different-id";
+  assert.throws(() => validateReleaseNotes(notes), /item ID|same fact/i);
+});
+
+test("release-note validation rejects an empty category in only one language", () => {
+  const notes = validNotes();
+  notes.release_summaries["zh-CN"].security = [
+    { id: "security-one", text: "修复一个安全问题。" },
+  ];
+
+  assert.throws(() => validateReleaseNotes(notes), /security|category/i);
+});
+
+test("patch notes fail closed when breaking changes are declared", () => {
+  const notes = validNotes("0.2.1");
+  notes.breaking_changes = true;
+  notes.release_summaries["zh-CN"].breaking = [
+    { id: "breaking-one", text: "需要人工迁移。" },
+  ];
+  notes.release_summaries.en.breaking = [
+    { id: "breaking-one", text: "Manual migration is required." },
+  ];
+
+  assert.throws(() => validateReleaseNotes(notes), /patch.*breaking/i);
+});
+
+test("no-migration notes require both migration workspace fields to be zero", () => {
+  const notes = validNotes("0.2.1");
+  notes.database_migration = false;
+  notes.migration_workspace_multiplier = 0;
+  notes.migration_workspace_min_bytes = 0;
+
+  assert.doesNotThrow(() => validateReleaseNotes(notes));
+
+  notes.migration_workspace_min_bytes = 268435456;
+  assert.throws(
+    () => validateReleaseNotes(notes),
+    /migration workspace fields.*zero/i,
+  );
+});
+
+test("release notes reject a minimum Node version below 20.17.0", () => {
+  const notes = validNotes();
+  notes.minimum_node = "20.16.0";
+
+  assert.throws(() => validateReleaseNotes(notes), /minimum_node|20\.17\.0/i);
+});
+
+test("draft notes assign matching stable IDs to both languages and omit empty categories", () => {
+  const draft = draftReleaseNotes({
+    targetVersion: "0.2.1",
+    previousTag: "v0.2.0",
+    commits: [
+      {
+        sha: "a".repeat(40),
+        subject: "feat(server): add resumable upload",
+        body: "",
+      },
+      {
+        sha: "b".repeat(40),
+        subject: "fix(web): avoid cache failure",
+        body: "",
+      },
+      {
+        sha: "c".repeat(40),
+        subject: "docs: explain deployment",
+        body: "",
+      },
+    ],
+  });
+
+  const zh = draft.release_summaries["zh-CN"];
+  const en = draft.release_summaries.en;
+  assert.deepEqual(Object.keys(zh), ["features", "fixes"]);
+  assert.deepEqual(Object.keys(en), ["features", "fixes"]);
+  assert.equal(zh.features[0].id, en.features[0].id);
+  assert.equal(zh.fixes[0].id, en.fixes[0].id);
+  assert.equal(zh.features[0].id, `feat:${"a".repeat(40)}`);
+  assert.match(zh.features[0].text, /待审阅/);
+  assert.match(en.features[0].text, /Review/);
+  assert.throws(() => validateReleaseNotes(draft), /review|待审阅/i);
+});
+
+test("draft notes consume conventional PR metadata with stable paired IDs", () => {
+  const draft = draftReleaseNotes({
+    targetVersion: "0.2.1",
+    previousTag: "v0.2.0",
+    commits: [],
+    pullRequests: [
+      {
+        number: 42,
+        title: "fix(server): reject stale update manifests",
+        body: "No automatic translation.",
+      },
+    ],
+  });
+
+  assert.equal(
+    draft.release_summaries["zh-CN"].fixes[0].id,
+    "fix:pr-42",
+  );
+  assert.equal(draft.release_summaries.en.fixes[0].id, "fix:pr-42");
+  assert.match(draft.release_summaries["zh-CN"].fixes[0].text, /待审阅/);
+  assert.match(draft.release_summaries.en.fixes[0].text, /Review/);
+});
+
+test("v0.2.5 draft conservatively requires one-time manual bootstrap", () => {
+  const draft = draftReleaseNotes({
+    targetVersion: "0.2.5",
+    previousTag: "v0.2.0",
+    commits: [],
+    databaseMigration: false,
+  });
+
+  assert.equal(draft.requires_manual_bootstrap, true);
+});
+
+test("prior stable tag selection chooses the unique highest reachable release", async () => {
+  const selected = await resolvePriorStableTag({
+    targetVersion: "0.2.5",
+    head: sourceCommit,
+    tags: [
+      { name: "v0.1.0", commit: "1".repeat(40) },
+      { name: "v0.2.0", commit: "2".repeat(40) },
+      { name: "v0.2.5-rc.1", commit: "3".repeat(40) },
+      { name: "v0.3.0", commit: "4".repeat(40) },
+    ],
+    isAncestor: async (_candidate, head) => head === sourceCommit,
+  });
+
+  assert.equal(selected.name, "v0.2.0");
+});
+
+test("prior tag selection fails closed for an unreachable or ambiguous candidate", async () => {
+  await assert.rejects(
+    resolvePriorStableTag({
+      targetVersion: "0.2.5",
+      tags: [
+        { name: "v0.1.0", commit: "1".repeat(40) },
+        { name: "v0.2.0", commit: "2".repeat(40) },
+      ],
+      head: sourceCommit,
+      isAncestor: async (candidate) => candidate === "1".repeat(40),
+    }),
+    /unreachable|ancestor/i,
+  );
+
+  await assert.rejects(
+    resolvePriorStableTag({
+      targetVersion: "0.2.5",
+      tags: [
+        { name: "v0.2.0", commit: "1".repeat(40) },
+        { name: "v0.2.0-alt", commit: "2".repeat(40) },
+      ],
+      head: sourceCommit,
+      isAncestor: async () => true,
+    }),
+    /ambiguous|v0\.2\.0/i,
+  );
+});
+
+test("initial releases always include migrations and later releases derive them from the prior tag", async () => {
+  assert.equal(
+    await determineDatabaseMigration({
+      targetVersion: "0.2.0",
+      tags: [],
+      head: sourceCommit,
+      isAncestor: async () => false,
+      getChangedPaths: async () => [],
+    }),
+    true,
+  );
+
+  assert.equal(
+    await determineDatabaseMigration({
+      targetVersion: "0.2.5",
+      tags: [{ name: "v0.2.0", commit: sourceCommit }],
+      head: tagCommit,
+      isAncestor: async () => true,
+      getChangedPaths: async (_from, _to, prefix) =>
+        prefix === "apps/server/src/database/migrations"
+          ? ["apps/server/src/database/migrations/2-change.ts"]
+          : [],
+    }),
+    true,
+  );
+
+  assert.equal(
+    await determineDatabaseMigration({
+      targetVersion: "0.2.5",
+      tags: [{ name: "v0.2.0", commit: sourceCommit }],
+      head: tagCommit,
+      isAncestor: async () => true,
+      getChangedPaths: async () => [],
+    }),
+    false,
+  );
+});
+
+test("candidate-to-tag diff permits only release evidence and CURRENT-STATE", () => {
+  assert.doesNotThrow(() =>
+    validateCandidateTagDiff({
+      candidateCommit: sourceCommit,
+      tagCommit,
+      changedPaths: [
+        "release-evidence/v0.2.0.json",
+        "docs/CURRENT-STATE.md",
+      ],
+    }),
+  );
+
+  assert.throws(
+    () =>
+      validateCandidateTagDiff({
+        candidateCommit: sourceCommit,
+        tagCommit,
+        changedPaths: ["apps/server/src/main.ts"],
+      }),
+    /candidate.*tag|artifact input/i,
+  );
+});
+
+test("rendering release notes is deterministic and only emits non-empty bilingual sections", () => {
+  const notes = validNotes();
+  const first = renderReleaseNotes(notes, {
+    repositoryUrl: "https://github.com/example/FileStation",
+    previousTag: "v0.1.0",
+  });
+  const second = renderReleaseNotes(notes, {
+    repositoryUrl: "https://github.com/example/FileStation",
+    previousTag: "v0.1.0",
+  });
+
+  assert.equal(first, second);
+  assert.match(first, /## 新增功能/);
+  assert.match(first, /## Features/);
+  assert.match(first, /## 问题修复/);
+  assert.match(first, /## Bug Fixes/);
+  assert.doesNotMatch(first, /## 不兼容变更/);
+  assert.match(
+    first,
+    /https:\/\/github\.com\/example\/FileStation\/compare\/v0\.1\.0\.\.\.v0\.2\.0/,
+  );
+});
+
+test("RFC 8785 canonicalization sorts keys and preserves canonical Unicode", () => {
+  assert.equal(
+    canonicalizeJson({
+      z: [true, null],
+      b: "é",
+      a: 1,
+      nested: { y: 2, x: 1 },
+    }),
+    '{"a":1,"b":"é","nested":{"x":1,"y":2},"z":[true,null]}',
+  );
+  assert.throws(() => canonicalizeJson({ unsafe: 9007199254740992 }), /safe integer/i);
+  assert.throws(() => canonicalizeJson({ missing: undefined }), /undefined/i);
+});
+
+test("manifest building and Ed25519 signatures reject tampering and non-64-byte values", () => {
+  const manifest = buildManifest(manifestInput());
+  const payload = canonicalizeJson(manifest);
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const privateKeyBase64 = privateKey
+    .export({ format: "der", type: "pkcs8" })
+    .toString("base64");
+  const publicKeyBase64 = publicKey
+    .export({ format: "der", type: "spki" })
+    .toString("base64");
+
+  const signature = signManifest({
+    payload,
+    privateKeyBase64,
+    expectedPublicKeyBase64: publicKeyBase64,
+  });
+  assert.equal(signature.length, 64);
+  assert.equal(
+    verifyManifestSignature({
+      payload,
+      signature,
+      publicKeyBase64,
+    }),
+    true,
+  );
+  assert.equal(canonicalizeJson(buildManifest(manifestInput())), payload);
+  assert.deepEqual(
+    signManifest({
+      payload,
+      privateKeyBase64,
+      expectedPublicKeyBase64: publicKeyBase64,
+    }),
+    signature,
+  );
+
+  const tampered = Buffer.from(payload);
+  tampered[tampered.length - 5] ^= 1;
+  assert.equal(
+    verifyManifestSignature({
+      payload: tampered.toString("utf8"),
+      signature,
+      publicKeyBase64,
+    }),
+    false,
+  );
+  assert.throws(
+    () =>
+      verifyManifestSignature({
+        payload,
+        signature: Buffer.concat([signature, Buffer.from([0])]),
+        publicKeyBase64,
+      }),
+    /64 bytes/i,
+  );
+  assert.throws(
+    () =>
+      verifyManifestSignature({
+        payload,
+        signature: signature.subarray(0, 63),
+        publicKeyBase64,
+      }),
+    /64 bytes/i,
+  );
+
+  const wrongKey = generateKeyPairSync("ed25519").publicKey
+    .export({ format: "der", type: "spki" })
+    .toString("base64");
+  assert.throws(
+    () =>
+      signManifest({
+        payload,
+        privateKeyBase64,
+        expectedPublicKeyBase64: wrongKey,
+      }),
+    /binding|does not match/i,
+  );
+});
+
+test("an unconfigured public-key fixture fails closed", async () => {
+  const file = path.join(fixtureRoot, "unconfigured-key.ts");
+  await writeFile(file, 'export const UPDATE_PUBLIC_KEY_STATUS = "unconfigured";\nexport const UPDATE_PUBLIC_KEY_SPKI_BASE64 = "UNCONFIGURED";');
+  const fixed = await loadFixedPublicKey(file);
+  assert.equal(fixed.status, "unconfigured");
+  assert.equal(fixed.publicKeyBase64, null);
+  assert.throws(
+    () => requireConfiguredPublicKey(fixed),
+    /UNCONFIGURED|public key/i,
+  );
+});
+
+test("manifest artifacts require exact GitHub release paths, sizes, and SHA-256", () => {
+  const valid = artifact("linux-x64");
+  assert.doesNotThrow(() =>
+    validateArtifactMetadata(valid, {
+      version: "0.2.0",
+      releaseUrl: "https://github.com/example/FileStation/releases/tag/v0.2.0",
+    }),
+  );
+
+  for (const mutation of [
+    { url: "https://downloads.example.com/file.tar.gz" },
+    { url: `${valid.url}?redirect=https://evil.example` },
+    { archive_size: -1 },
+    { unpacked_size: 1.5 },
+    { sha256: "sha256:not-a-digest" },
+    { filename: "../escape.tar.gz" },
+  ]) {
+    assert.throws(
+      () =>
+        validateArtifactMetadata(
+          { ...valid, ...mutation },
+          {
+            version: "0.2.0",
+            releaseUrl:
+              "https://github.com/example/FileStation/releases/tag/v0.2.0",
+          },
+        ),
+      /artifact|URL|size|sha256|filename/i,
+    );
+  }
+});
+
+test("candidate digests must exactly match rebuilt media and candidate evidence", async () => {
+  const design = ["linux-x64", "windows-x64"];
+  const metadata = design.map(artifact);
+  const evidence = {
+    candidate: {
+      sourceCommit,
+      runId: "12345",
+      platformDigests: {
+        "linux-x64": `sha256:${metadata[0].sha256}`,
+        "windows-x64": `sha256:${metadata[1].sha256}`,
+      },
+    },
+  };
+
+  assert.deepEqual(
+    await readArtifactMetadata({
+      artifacts: metadata,
+      expectedEvidence: evidence,
+    }),
+    metadata,
+  );
+
+  evidence.candidate.platformDigests["windows-x64"] = `sha256:${"3".repeat(64)}`;
+  await assert.rejects(
+    readArtifactMetadata({ artifacts: metadata, expectedEvidence: evidence }),
+    /digest|windows-x64/i,
+  );
+});
+
+test("artifact file lookup validates filenames before reading the filesystem", async () => {
+  const metadata = ["linux-x64", "windows-x64"].map(artifact);
+  metadata[0].filename = "../outside.tar.gz";
+  const evidence = {
+    candidate: {
+      sourceCommit,
+      runId: "12345",
+      platformDigests: {
+        "linux-x64": `sha256:${metadata[0].sha256}`,
+        "windows-x64": `sha256:${metadata[1].sha256}`,
+      },
+    },
+  };
+
+  await assert.rejects(
+    readArtifactMetadata({
+      artifacts: metadata,
+      expectedEvidence: evidence,
+      artifactDirectory: fixtureRoot,
+      version: "0.2.0",
+      releaseUrl:
+        "https://github.com/example/FileStation/releases/tag/v0.2.0",
+    }),
+    /artifact\.filename|filename/i,
+  );
+});
+
+async function writeFixtureFile(root, relativePath, contents) {
+  const target = path.join(root, relativePath);
+  await mkdir(path.dirname(target), { recursive: true });
+  await writeFile(target, contents);
+}
+
+async function createRepositoryFixture() {
+  const root = path.join(fixtureRoot, `repo-${crypto.randomUUID()}`);
+  await writeFixtureFile(
+    root,
+    "package.json",
+    JSON.stringify({ name: "fixture", version: "0.2.0", private: true }, null, 2),
+  );
+  await writeFixtureFile(
+    root,
+    "package-lock.json",
+    JSON.stringify({ lockfileVersion: 3, packages: {} }, null, 2),
+  );
+  for (const workspace of [
+    "apps/updater/package.json",
+    "apps/server/package.json",
+    "apps/web/package.json",
+    "packages/shared/package.json",
+    "packages/update-core/package.json",
+  ]) {
+    await writeFixtureFile(
+      root,
+      workspace,
+      JSON.stringify({ version: "0.2.0", private: true }, null, 2),
+    );
+  }
+  for (const required of [
+    "apps/server/dist/main.js",
+    "apps/updater/dist/cli.js",
+    "apps/updater/dist/launcher.js",
+    "apps/web/dist-root/index.html",
+    "apps/web/dist-root/assets/root-0123456789ab.js",
+    "apps/web/dist-fs/index.html",
+    "apps/web/dist-fs/assets/fs-0123456789ab.js",
+    "packages/shared/dist/index.js",
+    "packages/update-core/dist/index.js",
+    "scripts/release/smoke-artifact.mjs",
+    "scripts/release/create-smoke-db.mjs",
+    "scripts/release/validate-version.mjs",
+    "scripts/release/start-artifact.mjs",
+    "scripts/bootstrap-update.ps1",
+    "scripts/bootstrap-update.sh",
+    "scripts/start-filestation.ps1",
+    "scripts/start-filestation.sh",
+    "release-notes/v0.2.0.json",
+  ]) {
+    await writeFixtureFile(root, required, `fixture:${required}\n`);
+  }
+  await writeFixtureFile(
+    root,
+    "node_modules/sqlite3/build/Release/node_sqlite3.node",
+    "native-fixture",
+  );
+  await writeFixtureFile(root, ".env", "JWT_SECRET=fixture-secret\n");
+  await writeFixtureFile(root, "data/filestation.db", "fixture-database");
+  await writeFixtureFile(root, "apps/server/test/secret.test.js", "test");
+  await writeFixtureFile(root, "server.log", "log");
+
+  return root;
+}
+
+test("staging path filters use repository-relative segments", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  const nestedSource = path.join(
+    fixtureRoot,
+    "tests",
+    `repo-${crypto.randomUUID()}`,
+  );
+  await mkdir(nestedSource, { recursive: true });
+  await copyFile(
+    path.join(repositoryRoot, "package.json"),
+    path.join(nestedSource, "package.json"),
+  );
+  await cp(repositoryRoot, nestedSource, {
+    recursive: true,
+    force: true,
+  });
+  const destination = path.join(fixtureRoot, `stage-${crypto.randomUUID()}`);
+  await prepareArtifactDirectory({
+    repositoryRoot: nestedSource,
+    destination,
+    version: "0.2.0",
+    platform: "linux-x64",
+    productionNodeModulesDirectory: path.join(nestedSource, "node_modules"),
+  });
+  assert.equal(
+    await readFile(
+      path.join(
+        destination,
+        "node_modules/sqlite3/build/Release/node_sqlite3.node",
+      ),
+      "utf8",
+    ),
+    "native-fixture",
+  );
+});
+
+test("staging accepts a namespaced dependency root without leaking ancestor segments", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  const destination = path.join(fixtureRoot, `namespaced-stage-${crypto.randomUUID()}`);
+  await prepareArtifactDirectory({
+    repositoryRoot,
+    destination,
+    version: "0.2.0",
+    platform: "windows-x64",
+    productionNodeModulesDirectory: path.toNamespacedPath(
+      path.join(repositoryRoot, "node_modules"),
+    ),
+  });
+  assert.equal(await readFile(path.join(
+    destination,
+    "node_modules/sqlite3/build/Release/node_sqlite3.node",
+  ), "utf8"), "native-fixture");
+  await assert.rejects(stat(path.join(destination, ".env")), { code: "ENOENT" });
+  await assert.rejects(stat(path.join(destination, "apps/server/test/secret.test.js")), { code: "ENOENT" });
+});
+
+test("artifact staging includes production tree and excludes data, env, logs, and tests", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  const destination = path.join(fixtureRoot, `stage-${crypto.randomUUID()}`);
+  await prepareArtifactDirectory({
+    repositoryRoot,
+    destination,
+    version: "0.2.0",
+    platform: "linux-x64",
+    productionNodeModulesDirectory: path.join(repositoryRoot, "node_modules"),
+  });
+
+  assert.equal(
+    await readFile(
+      path.join(
+        destination,
+        "node_modules/sqlite3/build/Release/node_sqlite3.node",
+      ),
+      "utf8",
+    ),
+    "native-fixture",
+  );
+  for (const excluded of [
+    ".env",
+    "data/filestation.db",
+    "apps/server/test/secret.test.js",
+    "server.log",
+  ]) {
+    await assert.rejects(stat(path.join(destination, excluded)), { code: "ENOENT" });
+  }
+});
+
+test("artifact staging includes the built updater and stable launcher scripts", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  const destination = path.join(fixtureRoot, `stage-${crypto.randomUUID()}`);
+  await prepareArtifactDirectory({
+    repositoryRoot,
+    destination,
+    version: "0.2.0",
+    platform: "linux-x64",
+    productionNodeModulesDirectory: path.join(repositoryRoot, "node_modules"),
+  });
+
+  for (const required of [
+    "apps/updater/package.json",
+    "apps/updater/dist/cli.js",
+    "apps/updater/dist/launcher.js",
+    "packages/update-core/package.json",
+    "packages/update-core/dist/index.js",
+    "scripts/bootstrap-update.ps1",
+    "scripts/bootstrap-update.sh",
+    "scripts/start-filestation.ps1",
+    "scripts/start-filestation.sh",
+  ]) {
+    await stat(path.join(destination, required));
+  }
+});
+
+test("artifact staging includes immutable root and /fs/ Web bundles", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  const destination = path.join(fixtureRoot, `stage-${crypto.randomUUID()}`);
+  await prepareArtifactDirectory({
+    repositoryRoot,
+    destination,
+    version: "0.2.0",
+    platform: "linux-x64",
+    productionNodeModulesDirectory: path.join(repositoryRoot, "node_modules"),
+  });
+
+  for (const required of [
+    "apps/web/dist-root/index.html",
+    "apps/web/dist-root/assets/root-0123456789ab.js",
+    "apps/web/dist-fs/index.html",
+    "apps/web/dist-fs/assets/fs-0123456789ab.js",
+  ]) {
+    assert.equal(
+      await readFile(path.join(destination, required), "utf8"),
+      `fixture:${required}\n`,
+    );
+  }
+  await assert.rejects(stat(path.join(destination, "apps/web/dist")), {
+    code: "ENOENT",
+  });
+});
+
+test("artifact staging rejects any FileStation workspace version mismatch", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  await writeFixtureFile(
+    repositoryRoot,
+    "packages/update-core/package.json",
+    JSON.stringify({ version: "0.2.4", private: true }, null, 2),
+  );
+  await assert.rejects(
+    prepareArtifactDirectory({
+      repositoryRoot,
+      destination: path.join(
+        fixtureRoot,
+        `stage-mismatch-${crypto.randomUUID()}`,
+      ),
+      version: "0.2.0",
+      platform: "linux-x64",
+    }),
+    /packages\/update-core\/package\.json version does not match the artifact version/,
+  );
+});
+
+test("artifact staging refuses to remove a destination inside the source tree", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  await assert.rejects(
+    prepareArtifactDirectory({
+      repositoryRoot,
+      destination: path.join(repositoryRoot, ".release-stage-unexpected"),
+      version: "0.2.0",
+      platform: "linux-x64",
+      productionNodeModulesDirectory: path.join(repositoryRoot, "node_modules"),
+    }),
+    /outside the source tree/i,
+  );
+});
+
+test("ZIP and tar.gz packaging is deterministic for a fixed source epoch", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  for (const platform of ["linux-x64", "windows-x64"]) {
+    const outputs = [];
+    for (let index = 0; index < 2; index += 1) {
+      const destination = path.join(
+        fixtureRoot,
+        `stage-${platform}-${index}-${crypto.randomUUID()}`,
+      );
+      await prepareArtifactDirectory({
+        repositoryRoot,
+        destination,
+        version: "0.2.0",
+        platform,
+        productionNodeModulesDirectory: path.join(repositoryRoot, "node_modules"),
+      });
+      const result = await packageArtifact({
+        sourceRoot: destination,
+        outputDirectory: path.join(destination, "out"),
+        version: "0.2.0",
+        platform,
+        sourceDateEpoch: 1_704_067_200,
+      });
+      outputs.push(await readFile(result.archivePath));
+    }
+    assert.deepEqual(outputs[0], outputs[1], `${platform} archive differed`);
+  }
+});
+
+test("packaging CLI accepts --install-production as a value-free flag", () => {
+  assert.deepEqual(
+    parsePackageArguments([
+      "--version",
+      "0.2.0",
+      "--platform",
+      "linux-x64",
+      "--output",
+      "release-artifacts",
+      "--source-date-epoch",
+      "1704067200",
+      "--release-url",
+      "https://github.com/example/FileStation/releases/tag/v0.2.0",
+      "--install-production",
+    ]),
+    {
+      version: "0.2.0",
+      platform: "linux-x64",
+      output: "release-artifacts",
+      "source-date-epoch": "1704067200",
+      "release-url": "https://github.com/example/FileStation/releases/tag/v0.2.0",
+      "install-production": true,
+    },
+  );
+});
+
+test("artifact path filtering drops dependency tests but keeps runtime data", () => {
+  assert.equal(
+    isForbiddenArtifactPath(
+      "node_modules/example/__tests__/widget.test.js.map",
+    ),
+    true,
+  );
+  assert.equal(
+    isForbiddenArtifactPath("node_modules/example/test/fixture.json"),
+    true,
+  );
+  assert.equal(
+    isForbiddenArtifactPath("node_modules/example/data/schema.json"),
+    false,
+  );
+  assert.equal(isForbiddenArtifactPath("data/filestation.db"), true);
+  assert.equal(isForbiddenArtifactPath(".env.local"), true);
+});
+
+test("Windows packaging invokes npm-cli.js through Node instead of npm.cmd", async () => {
+  const binDirectory = path.join(fixtureRoot, `npm-bin-${crypto.randomUUID()}`);
+  const npmCmd = path.join(binDirectory, "npm.cmd");
+  const npmCli = path.join(
+    binDirectory,
+    "node_modules/npm/bin/npm-cli.js",
+  );
+  await writeFixtureFile(fixtureRoot, path.relative(fixtureRoot, npmCmd), "@echo off\n");
+  await writeFixtureFile(fixtureRoot, path.relative(fixtureRoot, npmCli), "// fixture npm cli\n");
+
+  const invocation = await resolveNpmInvocation({
+    platform: "win32",
+    execPath: "C:\\node\\node.exe",
+    env: { Path: binDirectory },
+  });
+  assert.deepEqual(invocation, {
+    command: "C:\\node\\node.exe",
+    argsPrefix: [npmCli],
+    shell: false,
+  });
+  await assert.doesNotReject(() => resolveNpmInvocation());
+});
+
+test("smoke output redaction removes initialization tokens, secrets, and credentials", () => {
+  const raw = [
+    "initialized",
+    "初始化 Token: 0123456789abcdef",
+    "JWT_SECRET=super-secret",
+    "Authorization: Bearer abc.def.ghi",
+    "password=hunter2",
+    "x".repeat(3000),
+  ].join("\n");
+  const redacted = redactSmokeOutput(raw);
+
+  assert.doesNotMatch(redacted, /0123456789abcdef|super-secret|abc\.def\.ghi|hunter2/);
+  assert.match(redacted, /REDACTED/);
+  assert.ok(redacted.length <= 1024);
+});
+
+test("shared protocol exports and CI release-tool test wiring are present", async () => {
+  const sharedIndex = await readFile(
+    new URL("../../packages/shared/src/index.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(sharedIndex, /update-types/);
+  assert.match(sharedIndex, /update-public-key/);
+
+  for (const symbol of [
+    "UpdateManifestV1",
+    "UpdateArtifact",
+    "LocalizedReleaseSummary",
+    "UpdateStage",
+    "UpdateStatusResponse",
+    "UPDATE_PROTOCOL_VERSION",
+  ]) {
+    const types = await readFile(
+      new URL("../../packages/shared/src/update-types.ts", import.meta.url),
+      "utf8",
+    );
+    assert.match(types, new RegExp(`\\b${symbol}\\b`));
+  }
+
+  const workflow = await readFile(
+    new URL("../../.github/workflows/ci.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    workflow,
+    /^        run: node --test scripts\/release\/release-tools\.test\.mjs scripts\/release\/resolve-candidate\.test\.mjs\r?$/m,
+  );
+});
+
+test("CI and release verification build updater dependencies before server tests", async () => {
+  for (const workflowPath of [
+    "../../.github/workflows/ci.yml",
+    "../../.github/workflows/release.yml",
+  ]) {
+    const workflow = await readFile(new URL(workflowPath, import.meta.url), "utf8");
+    const verifySection =
+      path.basename(workflowPath) === "release.yml"
+        ? workflow.slice(
+            workflow.indexOf("  verify:"),
+            workflow.indexOf("  publish:"),
+          )
+        : workflow;
+    const commands = [
+      "npm run build:shared",
+      "npm run build --workspace=@filestation/update-core",
+      "npm run build --workspace=@filestation/updater",
+      "npm test --workspace=@filestation/server",
+    ];
+    const positions = commands.map((command) => verifySection.indexOf(command));
+    assert.ok(
+      positions.every((position) => position >= 0),
+      `${path.basename(workflowPath)} is missing an updater prerequisite`,
+    );
+    assert.deepEqual(
+      [...positions].sort((left, right) => left - right),
+      positions,
+      `${path.basename(workflowPath)} server tests run before updater dependencies`,
+    );
+  }
+});
+
+for (const [workflowName, jobName] of [["ci.yml", "test"], ["release.yml", "verify"]]) {
+  test(`${workflowName} builds server projection prerequisites before Web tests`, async () => {
+    const workflow = await readFile(new URL(`../../.github/workflows/${workflowName}`, import.meta.url), "utf8");
+    const job = workflow.split(`  ${jobName}:`)[1]?.split(/^  [\w-]+:/m)[0];
+    assert.ok(job, `${workflowName} must retain its ${jobName} job`);
+    const beforeWeb = job.split("      - name: Web unit tests")[0];
+    assert.notEqual(beforeWeb, job, "Web test step must be present");
+    const commands = [
+      "npm run build:shared",
+      "npm run build --workspace=@filestation/update-core",
+      "npm run build --workspace=@filestation/updater",
+      "npm run build --workspace=@filestation/server",
+    ];
+    let previous = -1;
+    for (const command of commands) {
+      const position = beforeWeb.indexOf(command);
+      assert.ok(position > previous, `${workflowName}: ${command} must run in dependency order before Web tests`);
+      previous = position;
+    }
+    assert.match(job.slice(beforeWeb.length), /run: npx --no-install vitest run --no-cache/);
+  });
+}
+
+test("release workflows isolate candidate builds from protected signing and publication", async () => {
+  const platform = await readFile(
+    new URL("../../.github/workflows/release-platform.yml", import.meta.url),
+    "utf8",
+  );
+  const candidate = await readFile(
+    new URL("../../.github/workflows/release-candidate.yml", import.meta.url),
+    "utf8",
+  );
+  const release = await readFile(
+    new URL("../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(platform, /workflow_call:/);
+  assert.match(platform, /windows-latest/);
+  assert.match(platform, /ubuntu-latest/);
+  assert.match(platform, /actions: read/);
+  assert.doesNotMatch(platform, /RELEASE_SIGNING_PRIVATE_KEY_BASE64/);
+
+  assert.match(candidate, /pull_request:/);
+  assert.match(candidate, /workflow_dispatch:/);
+  assert.match(candidate, /release-platform\.yml/);
+  assert.match(candidate, /actions: read/);
+  assert.doesNotMatch(candidate, /RELEASE_SIGNING_PRIVATE_KEY_BASE64/);
+  assert.doesNotMatch(candidate, /gh release|softprops\/action-gh-release/);
+
+  assert.match(release, /tags:\s*\n\s*- ["']v\*["']/);
+  assert.match(release, /environment: release-signing/);
+  assert.match(release, /release-platform\.yml/);
+  assert.match(release, /RELEASE_SIGNING_PRIVATE_KEY_BASE64/);
+  assert.match(release, /gh release create/);
+  assert.match(release, /actions: read/);
+  assert.match(platform, /ref:\s*\$\{\{\s*inputs\.source_commit\s*\}\}/);
+});
+
+test("canonical JSON rejects lone surrogates in values and keys", () => {
+  for (const text of ["\ud800", "\udfff", "x\ud800y", "\udc00\ud800"]) {
+    assert.throws(() => canonicalizeJson(text), /surrogate|Unicode/i);
+    assert.throws(() => canonicalizeJson({ [text]: 1 }), /surrogate|Unicode/i);
+  }
+  assert.equal(canonicalizeJson({ "😀": "𐀀" }), '{"😀":"𐀀"}');
+});
+test("reviewed notes cannot hide breaking categories behind a false flag", () => {
+  const notes = validNotes("0.2.1");
+  for (const language of ["zh-CN", "en"]) notes.release_summaries[language].breaking = [{ id: "breaking-one", text: "Changed contract." }];
+  assert.throws(() => validateReleaseNotes(notes), /breaking/i);
+});
+test("draft breaking facts remain explicit even for an invalid patch target", () => {
+  const notes = draftReleaseNotes({ targetVersion: "0.2.1", previousTag: "v0.2.0", commits: [{ sha: sourceCommit, subject: "feat!: change contract" }] });
+  assert.equal(notes.breaking_changes, true);
+  assert.throws(() => validateReleaseNotes(notes), /patch.*breaking/i);
+});
+test("unresolved bilingual draft markers cannot validate", () => {
+  for (const marker of ["[Review]", "[待审阅]"]) {
+    const notes = validNotes();
+    notes.release_summaries.en.features[0].text = marker + " feature";
+    assert.throws(() => validateReleaseNotes(notes), /review|待审阅/i);
+  }
+});
+test("fixed public-key states accept reviewed provisioning and reject contradictions", async () => {
+  const file = path.join(fixtureRoot, "provisioned-key.ts");
+  const { publicKey } = generateKeyPairSync("ed25519");
+  const key = publicKey.export({ format: "der", type: "spki" }).toString("base64");
+  await writeFile(file, 'export const UPDATE_PUBLIC_KEY_STATUS = "configured";\nexport const UPDATE_PUBLIC_KEY_SPKI_BASE64 = "' + key + '";');
+  assert.equal(requireConfiguredPublicKey(await loadFixedPublicKey(file)), key);
+  await writeFile(file, 'export const UPDATE_PUBLIC_KEY_STATUS = "configured";\nexport const UPDATE_PUBLIC_KEY_SPKI_BASE64 = "UNCONFIGURED";');
+  await assert.rejects(loadFixedPublicKey(file), /malformed|contradict/i);
+  const production = await loadFixedPublicKey();
+  if (production.status === "configured") assert.ok(requireConfiguredPublicKey(production));
+  else assert.equal(production.publicKeyBase64, null);
+});
+test("packaged entrypoint and own smoke include their complete module closure", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  for (const file of ["validate-version.mjs", "start-artifact.mjs"]) {
+    await writeFixtureFile(repositoryRoot, "scripts/release/" + file, await readFile(new URL("./" + file, import.meta.url)));
+  }
+  const destination = path.join(fixtureRoot, "closure-stage");
+  await prepareArtifactDirectory({ repositoryRoot, destination, version: "0.2.0", platform: "windows-x64" });
+  for (const file of ["validate-version.mjs", "start-artifact.mjs"]) {
+    assert.ok((await stat(path.join(destination, "scripts/release", file))).isFile());
+  }
+  const pkg = JSON.parse(await readFile(path.join(destination, "package.json")));
+  assert.equal(pkg.scripts.start, "node scripts/release/start-artifact.mjs");
+  assert.equal(pkg.scripts["start:bynginx"], "node scripts/release/start-artifact.mjs --bynginx");
+});
+test("platform workflows assert and upload/attest the exact archive and use shipped smoke", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/release-platform.yml", import.meta.url), "utf8");
+  assert.match(workflow, /archive:\s*win-x64\.zip/);
+  assert.match(workflow, /archive:\s*linux-x64\.tar\.gz/);
+  assert.match(workflow, /name: Assert archive exists/);
+  assert.match(workflow, /subject-path: release-artifacts\/filestation-v.*matrix\.archive/);
+  assert.match(workflow, /node "\$smoke_root\/scripts\/release\/smoke-artifact.mjs"/);
+  assert.match(workflow, /Join-Path \$smokeRoot.FullName "scripts\/release\/smoke-artifact.mjs"/);
+});
+
+test("Web build and release workflow use the same root and /fs/ bundle paths", async () => {
+  const manifest = JSON.parse(
+    await readFile(
+      new URL("../../apps/web/package.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.match(manifest.scripts["build:root"], /--outDir dist-root/);
+  assert.match(manifest.scripts["build:fs"], /FILESTATION_BASE=\/fs\//);
+  assert.match(manifest.scripts["build:fs"], /--outDir dist-fs/);
+
+  const workflow = await readFile(
+    new URL("../../.github/workflows/release-platform.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(workflow, /apps\/web\/dist-root/);
+  assert.match(workflow, /apps\/web\/dist-fs/);
+});
+
+test("candidate and tag workflows bind exact source and run final platform integration", async () => {
+  const platform = await readFile(
+    new URL("../../.github/workflows/release-platform.yml", import.meta.url),
+    "utf8",
+  );
+  const candidate = await readFile(
+    new URL("../../.github/workflows/release-candidate.yml", import.meta.url),
+    "utf8",
+  );
+  const release = await readFile(
+    new URL("../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    platform,
+    /test\/update-flow\.integration\.spec\.ts[\s\S]*test\/artifact-smoke\.spec\.ts/,
+  );
+  assert.match(platform, /npm test --workspace=@filestation\/updater/);
+  assert.match(platform, /node "\$smoke_root\/scripts\/release\/smoke-artifact\.mjs"/);
+  assert.match(candidate, /default:\s*0\.2\.5/);
+  assert.match(
+    candidate,
+    /ref:\s*\$\{\{\s*github\.event\.pull_request\.head\.sha\s*\|\|\s*github\.sha\s*\}\}/,
+  );
+  assert.match(
+    candidate,
+    /RUN_SOURCE:\s*\$\{\{\s*github\.event\.pull_request\.head\.sha\s*\|\|\s*github\.sha\s*\}\}/,
+  );
+  assert.match(
+    release,
+    /source_commit:\s*\$\{\{\s*needs\.verify\.outputs\.source-commit\s*\}\}/,
+  );
+  assert.match(release, /Verify rebuilt artifacts match candidate evidence/);
+  assert.match(release, /candidate\.platformDigests/);
+});
+test("shipped launcher provides portable standalone and nginx defaults", async () => {
+  const { startupEnvironment } = await import("./start-artifact.mjs");
+  assert.deepEqual(startupEnvironment({}, false), { FILESTATION_SERVE_STATIC: "true", FILESTATION_HOST: "0.0.0.0" });
+  assert.deepEqual(startupEnvironment({}, true), { FILESTATION_SERVE_STATIC: "false", FILESTATION_HOST: "127.0.0.1" });
+});
+test("candidate identity and downloaded bytes reconcile with authenticated run and rebuild", async () => {
+  const { verifyAuthenticatedCandidate } = await import("./verify-candidate.mjs");
+  const repo = "example/FileStation";
+  const artifacts = ["linux-x64", "windows-x64"].map(artifact);
+  const buffers = { "linux-x64": Buffer.from("linux archive"), "windows-x64": Buffer.from("windows archive") };
+  for (const item of artifacts) {
+    item.sha256 = createHash("sha256").update(buffers[item.platform]).digest("hex");
+    item.archive_size = buffers[item.platform].length;
+  }
+  const evidence = { candidate: { sourceCommit, runId: "123", platformDigests: Object.fromEntries(artifacts.map(a => [a.platform, "sha256:" + a.sha256])) } };
+  const record = { schemaVersion: 1, version: "0.2.0", candidate: evidence.candidate, status: "unsigned-candidate-pending-human-acceptance" };
+  const run = { id: 123, repository: { full_name: repo }, head_repository: { full_name: repo }, path: ".github/workflows/release-candidate.yml", status: "completed", conclusion: "success", head_sha: sourceCommit, event: "workflow_dispatch" };
+  const provider = {
+    getRun: async () => structuredClone(run),
+    getArtifact: async (name) => {
+      if (name.endsWith("-candidate-evidence")) return { "release-candidate.json": Buffer.from(JSON.stringify(record)) };
+      const item = artifacts.find(a => name.endsWith("-" + a.platform));
+      return { [item.filename]: buffers[item.platform], ["artifact-metadata-" + item.platform + ".json"]: Buffer.from(JSON.stringify(item)) };
+    },
+  };
+  const verify = (override = {}) => verifyAuthenticatedCandidate({ repository: repo, version: "0.2.0", evidence, rebuiltArtifacts: artifacts, provider, ...override });
+  await verify();
+  for (const mutation of [{ conclusion: "failure" }, { status: "in_progress" }, { id: 124 }, { repository: { full_name: "evil/repo" } }, { head_repository: { full_name: "evil/repo" } }, { path: ".github/workflows/ci.yml" }, { head_sha: tagCommit }, { event: "push" }]) {
+    await assert.rejects(verify({ provider: { ...provider, getRun: async () => ({ ...run, ...mutation }) } }), /candidate|run|source|repository|workflow/i);
+  }
+  await assert.rejects(verify({ provider: { ...provider, getRun: async () => { throw Error("run not found"); } } }), /not found/);
+  await assert.rejects(verify({ provider: { ...provider, getArtifact: async () => ({}) } }), /provenance|missing/i);
+  const badRecord = { ...record, candidate: { ...record.candidate, runId: "999" } };
+  await assert.rejects(verify({ provider: { ...provider, getArtifact: async (name) => name.endsWith("-candidate-evidence") ? { "release-candidate.json": Buffer.from(JSON.stringify(badRecord)) } : provider.getArtifact(name) } }), /provenance/i);
+  await assert.rejects(verify({ rebuiltArtifacts: artifacts.map(a => ({ ...a, sha256: "f".repeat(64) })) }), /digest|metadata/i);
+  const original = buffers["windows-x64"];
+  buffers["windows-x64"] = Buffer.from("tampered");
+  await assert.rejects(verify(), /digest|size/i);
+  buffers["windows-x64"] = original;
+});
