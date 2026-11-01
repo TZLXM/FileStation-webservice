@@ -1,5 +1,11 @@
 # Current State
 
+## 2026-11-01 v0.2.5 首发例外（实施中）
+
+- 已获用户批准设计仅限 v0.2.5 的结构化首发延期：Linux 实机 bootstrap、两平台真实签名更新和提交前回滚可在明确批准并绑定精确候选后延期；其他验收仍需证据。发布签名、公私钥配对、候选来源、双平台摘要及受保护环境审批不延期，失败验收不得填为通过。详见首发例外设计和 Future Work；当前尚未正式发布。
+- 现有隔离 Docker/Nginx root 与 `/fs/` 实测、Windows 托管 bootstrap 有成功记录，但尚未绑定最终候选；375px、真实 TOTP/恢复码、刷新续传仍缺人工验收记录。Linux 原始制品在目标系统的兼容性尚未实机证明。
+- 当前工作树验证：release-gate 100/100、release tools 56/56、server unit 57 suites / 345 passed / 20 todo、server E2E 17 suites / 122 passed、Web 23 files / 260 passed、typecheck/build 通过。初次沙箱运行遇 TEMP 重命名、loopback、junction 权限限制；使用适当临时目录和允许回环的环境重跑。以上不代表最终候选实机验收或发布已完成。
+
 Updated: 2026-10-30
 
 - **2026-11-01 Windows 实际托管启动：** 精确 candidate `4deed96a917e3176971ac8d94d96a76417638996` 对应 CI `41221310884` 和无签名 candidate `41221310886` 全部作业成功。其 Windows archive SHA-256 为 `0cb184e652c47c10b1bd906d3189cd62825dafbbb754a0aeebf0f097edc69613`，在隔离服务器完成 bootstrap 和 SQLite 快照完整性验证，托管 launcher 成功启动，登录、反代及更新状态接口通过；能力报告 `managed`、Windows x64、updater 0.2.5。首次更新检查返回 `UPDATE_CHECK_FAILED`，服务器无凭据访问官方 latest Release 接口返回 404，仓库页面显示无已发布 Release；因此没有验证远程签名或下载/安装。浏览器设置页曾在无成功检查结果时将当前版本误显示为“最新稳定版”；本地修复区分未知、已验证同版本与缓存失败历史结果，定向测试 35/35 通过，尚未部署到测试站点。当前用户可用实例是临时受控测试部署，非正式发布；真实签名更新、回滚、Linux 验收及发布门仍未完成。

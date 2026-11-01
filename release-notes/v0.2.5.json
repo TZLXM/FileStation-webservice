@@ -61,6 +61,10 @@
       ],
       "known_issues": [
         {
+          "id": "known:first-release-validation",
+          "text": "首次发布时，正式渠道的签名自动更新、提交前回滚及 Linux 实机验收尚未完成；升级可能需要人工恢复，请先备份数据库与存储并参阅 UPDATING.md。"
+        },
+        {
           "id": "known:first-updater",
           "text": "0.2.5 首个 managed updater 不自动替换自身，协议或 updater 版本不兼容时会要求手动 bootstrap/upgrade。"
         },
@@ -124,6 +128,10 @@
         }
       ],
       "known_issues": [
+        {
+          "id": "known:first-release-validation",
+          "text": "At first release, signed automatic updates through the official channel, pre-commit rollback, and native Linux acceptance remain unverified; upgrades may require manual recovery. Back up the database and storage and consult UPDATING.md."
+        },
         {
           "id": "known:first-updater",
           "text": "The first managed updater in 0.2.5 does not replace itself; incompatible protocols or updater versions require manual bootstrap or upgrade guidance."

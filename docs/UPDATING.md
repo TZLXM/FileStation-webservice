@@ -12,10 +12,14 @@ manifests must agree on `0.2.5`. The exact candidate commit must be built by
 `release-candidate.yml`, and its Windows/Linux artifact SHA-256 values must be
 recorded with the Actions run ID in `release-evidence/v0.2.5.json`.
 
-The same downloaded artifacts must also pass Windows and Linux bootstrap,
-administrator-confirmed update, pre-COMMITTED rollback, Docker self-update
-refusal, and Nginx root plus `/fs/` acceptance. Phase 2 checks for 375px,
-TOTP/recovery, and resume after refresh remain mandatory. A later commit may
+The same downloaded artifacts must also pass Windows bootstrap, Docker
+self-update refusal, and Nginx root plus `/fs/` acceptance. Phase 2 checks for
+375px, TOTP/recovery, and resume after refresh remain mandatory. For the first
+v0.2.5 release only, the separately approved, candidate-bound exception may
+record Linux installed acceptance and both platforms' real confirmed update
+and pre-COMMITTED rollback as deferred; a failed check is never a pass. The
+exception does not waive candidate provenance, artifact digests, signature
+verification, key matching, or protected-environment approval. A later commit may
 change only the release evidence and the evidence/status portion of
 `docs/CURRENT-STATE.md`. The tag workflow compares that commit with the recorded
 candidate source and rejects changes to any artifact input.
