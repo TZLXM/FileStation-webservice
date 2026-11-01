@@ -7,7 +7,7 @@ echo "=== FileStation 构建 ==="
 
 # 清理
 echo "清理旧构建..."
-rm -rf apps/server/dist apps/web/dist
+rm -rf apps/server/dist apps/web/dist-root apps/web/dist-fs
 
 # 构建共享包
 echo "构建共享包..."
@@ -24,4 +24,4 @@ npm run build --workspace=apps/web
 echo ""
 echo "=== 构建完成 ==="
 echo "后端: apps/server/dist/"
-echo "前端: apps/web/dist/"
+echo "前端: apps/web/dist-root/ (root) + apps/web/dist-fs/ (/fs/)"

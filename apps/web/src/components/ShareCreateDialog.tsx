@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api } from '../lib/api';
+import { absoluteAppUrl } from '../lib/base-url';
 
 interface ShareCreateDialogProps {
   fileId: string;
@@ -35,7 +36,7 @@ export default function ShareCreateDialog({ fileId, filename, onClose }: ShareCr
       }
 
       const response = await api.post<{ share_id: string; share_url: string }>('/shares', body);
-      setShareUrl(`${window.location.origin}${response.data!.share_url}`);
+      setShareUrl(absoluteAppUrl(response.data!.share_url));
     } catch (err: any) {
       setError(err.message || '创建分享失败');
     } finally {

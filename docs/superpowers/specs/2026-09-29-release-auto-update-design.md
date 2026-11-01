@@ -117,14 +117,15 @@ filestation/
 └─ update.lock              # 更新互斥锁
 ```
 
-应用始终以安装根目录为工作目录，因此默认 `./data` 路径在版本切换后保持不变。Nginx 静态目录一次性改为 `<install-root>/current/apps/web/dist`。Updater 位于 `current` 外，旧应用退出后仍可工作。
+应用始终以安装根目录为工作目录，因此默认 `./data` 路径在版本切换后保持不变。每个 release 同时包含 `<release>/apps/web/dist-root` 与 `<release>/apps/web/dist-fs`；Nginx 的根路径和 `/fs/` alias 分别稳定指向 `<install-root>/current/...`，随 current 切换整体更新。Updater 位于 `current` 外，旧应用退出后仍可工作。
 
 发布制品内部目录是可重定位契约，至少保持以下相对关系：
 
 ```text
 <release>/
 ├─ apps/server/dist/
-├─ apps/web/dist/
+├─ apps/web/dist-root/
+├─ apps/web/dist-fs/
 ├─ packages/shared/dist/
 ├─ package.json
 ├─ package-lock.json
@@ -132,7 +133,7 @@ filestation/
 └─ packages/shared/package.json
 ```
 
-后端静态资源解析继续依赖 `apps/server/dist` 与 `apps/web/dist` 的相对位置；运行时数据路径继续依赖安装根 cwd。Release workflow 必须把制品解压到任意临时绝对路径，以安装根为 cwd 启动，验证代码和静态资源均可重定位。
+后端直接静态模式解析 `apps/server/dist` 与 `apps/web/dist-root`；Nginx `/fs/` alias 使用同一 release 的 `apps/web/dist-fs`。运行时数据路径继续依赖安装根 cwd。Release workflow 必须把制品解压到任意临时绝对路径，以安装根为 cwd 启动，并从实际归档同时验证根路径和 `/fs/` 静态资源可重定位。
 
 Managed 安装的启动器设置 `FILESTATION_INSTALL_ROOT`、安装 ID 和目标 release realpath。应用在创建 `./data`、连接数据库或运行迁移之前进行硬校验：cwd 必须是安装根，执行文件必须解析到 `current` 指向的 release。检测到从 `releases/<old-version>`、`current/` 或其他错误 cwd 直接启动时立即退出，禁止静默创建空数据库或分叉 storage。旧式未 bootstrap、没有 `managed-install.json` 的源码部署保持现有行为。
 
@@ -372,7 +373,7 @@ Release 发布前禁止使用未经审阅的全自动说明直接上线。Releas
 - Bootstrap 幂等、默认 `data/` 保留、`.env` 保留、权限和旧目录恢复；自定义相对 DB/storage/temp 在 cwd 变化前后的 canonical path 不一致时必须拒绝静默迁移。
 - `.env` 与已有进程环境变量优先级，以及 `FILESTATION_SERVE_STATIC` 在模块导入前生效。
 - Managed layout 错误 cwd、旧 release 直接启动在任何 DB/storage 写入前失败。
-- Release 内 `apps/server/dist`、`apps/web/dist`、shared 与依赖布局可从任意绝对路径重定位。
+- Release 内 `apps/server/dist`、`apps/web/dist-root`、`apps/web/dist-fs`、shared 与依赖布局可从任意绝对路径重定位。
 - Windows junction、Linux symlink 切换和恢复。
 - Linux 临时 symlink + rename 原子切换，以及 Windows 两阶段 junction 中每个崩溃点的 previous 恢复。
 - Attempt journal 尾部部分写入、intent/completion 之间掉电、flush 失败和每个状态机阶段的唯一恢复决策。

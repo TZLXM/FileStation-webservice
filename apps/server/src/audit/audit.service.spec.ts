@@ -64,13 +64,30 @@ describe('AuditService', () => {
     expect(warn).toHaveBeenCalled();
   });
 
-  it('purges records older than exactly 90 days', async () => {
-    const startedAt = Date.now();
-    await service.purgeExpired();
+  it('uses one injected clock for the exact 90-day cutoff across asynchronous admission', async () => {
+    const fixedNow = Date.UTC(2026, 9, 29, 12, 0, 0, 0);
+    let clockNow = fixedNow;
+    const barrier = {
+      withLease: jest.fn(async (_source: string, operation: () => Promise<number>) => {
+        clockNow += 1;
+        return operation();
+      }),
+    };
+    const deterministic = new (AuditService as unknown as new (
+      repository: typeof repo,
+      writeBarrier: typeof barrier,
+      writeFreeze: undefined,
+      now: () => number,
+    ) => AuditService)(repo, barrier, undefined, () => clockNow);
+
+    await deterministic.purgeExpired();
+
     expect(repo.delete).toHaveBeenCalled();
     const criteria = repo.delete.mock.calls[0][0];
-    expect(criteria.createdAt._value).toBeLessThanOrEqual(startedAt - 90 * 24 * 60 * 60 * 1000);
-    expect(criteria.createdAt._value).toBeGreaterThanOrEqual(startedAt - 90 * 24 * 60 * 60 * 1000 - 10);
+    expect(criteria.createdAt).toMatchObject({
+      _type: 'lessThan',
+      _value: Date.UTC(2026, 6, 31, 12, 0, 0, 0),
+    });
   });
 
   it('returns the shared five-field pagination shape', async () => {

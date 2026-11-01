@@ -3,6 +3,7 @@ import { api } from '../lib/api';
 import { FileMetadata } from '@filestation/shared';
 import ShareCreateDialog from './ShareCreateDialog';
 import MoveFileDialog from './MoveFileDialog';
+import { absoluteAppUrl } from '../lib/base-url';
 
 interface FileListProps {
   files: FileMetadata[];
@@ -100,7 +101,7 @@ export default function FileList({ files, total, page, onPageChange, onChanged }
       <ul className="space-y-1 mt-2">
         {shares.map((share) => (
           <li key={share.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs min-w-0">
-            <span className="font-mono break-all min-w-0 max-w-full">{window.location.origin}{share.share_url}</span>
+            <span className="font-mono break-all min-w-0 max-w-full">{absoluteAppUrl(share.share_url)}</span>
             <span>{share.protection === 'password' ? '密码' : '免密'}</span>
             <span>{share.used_downloads}{share.max_downloads !== null ? `/${share.max_downloads}` : ''} 次</span>
             <span>{share.expires_at ? new Date(share.expires_at).toLocaleString() : '永久'}</span>

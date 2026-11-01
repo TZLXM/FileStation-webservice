@@ -6,6 +6,7 @@ import request from 'supertest';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { AuditLog } from '../src/audit/entities/audit-log.entity';
+import { FilesService } from '../src/files/files.service';
 import { FoldersService } from '../src/folders/folders.service';
 import { ApiToken } from '../src/api-tokens/entities/api-token.entity';
 import { UploadsService } from '../src/files/uploads.service';
@@ -206,6 +207,39 @@ describe('MCP service (e2e)', () => {
       'server_info', 'list_files', 'list_folders', 'create_folder', 'upload_init',
       'upload_part', 'complete_upload', 'delete_file', 'create_share', 'list_shares', 'revoke_share',
     ]);
+  });
+
+  it('preserves the list_files MCP schema and rejects invalid payloads before service access', async () => {
+    const listResponse = await rpc(readOnlyToken, 'tools/list').expect(200);
+    const listFilesTool = decodeMcpResponse(listResponse).result.tools
+      .find((tool: { name: string }) => tool.name === 'list_files');
+
+    expect(listFilesTool.inputSchema).toMatchObject({
+      type: 'object',
+      properties: {
+        page: { type: 'integer', minimum: 1, default: 1 },
+        page_size: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+        folder_id: { type: 'string' },
+      },
+    });
+
+    const filesService = app.get(FilesService);
+    const findAll = jest.spyOn(filesService, 'findAll');
+    try {
+      const validResponse = await callTool(readOnlyToken, 'list_files').expect(200);
+      const validPayload = decodeMcpResponse(validResponse);
+      expect(validPayload.result.isError).not.toBe(true);
+      expect(findAll).toHaveBeenNthCalledWith(1, 1, 20, undefined);
+
+      const invalidResponse = await callTool(readOnlyToken, 'list_files', {
+        page_size: 101,
+      }).expect(200);
+      const invalidPayload = decodeMcpResponse(invalidResponse);
+      expect(invalidPayload.result.isError).toBe(true);
+      expect(findAll).toHaveBeenCalledTimes(1);
+    } finally {
+      findAll.mockRestore();
+    }
   });
 
   it('returns a tool error when the token lacks that tool scope', async () => {

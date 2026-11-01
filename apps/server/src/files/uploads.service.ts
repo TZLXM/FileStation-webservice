@@ -1,4 +1,12 @@
-import { Injectable, BadRequestException, NotFoundException, ConflictException, GoneException, OnModuleDestroy } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+  ConflictException,
+  GoneException,
+  OnModuleDestroy,
+  Optional,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { UploadSession, UploadStatus } from './entities/upload-session.entity';
@@ -13,6 +21,8 @@ import { InitUploadDto } from './dto/init-upload.dto';
 import { UploadInitResponse, UploadStatus as UploadStatusType } from '@filestation/shared';
 import { SqliteImmediateTransactionService } from '../common/database/sqlite-immediate-transaction.service';
 import { UploadVerifyHeartbeat, VerifyLeaseError } from './upload-verify-heartbeat';
+import { WriteBarrierService } from '../maintenance/write-barrier.service';
+import { WriteFreezeService } from '../maintenance/write-freeze.service';
 
 const COMPLETION_MAX_WAIT_MS = 15 * 60 * 1000;
 const COMPLETION_INITIAL_POLL_INTERVAL_MS = 100;
@@ -46,6 +56,10 @@ export class UploadsService implements OnModuleDestroy {
     private settingsService: SettingsService,
     private dataSource: DataSource,
     private sqliteTransactions: SqliteImmediateTransactionService,
+    @Optional()
+    private readonly writeBarrier?: WriteBarrierService,
+    @Optional()
+    private readonly writeFreeze?: WriteFreezeService,
   ) {}
 
   async onModuleDestroy(): Promise<void> {
@@ -273,6 +287,26 @@ export class UploadsService implements OnModuleDestroy {
     finalHash?: string,
     requestSignal?: AbortSignal,
   ): Promise<{ file_id: string; filename: string; size: number }> {
+    if (!this.writeBarrier) {
+      this.writeFreeze?.assertWritable();
+      return this.completeUploadCore(
+        uploadId,
+        uploadToken,
+        finalHash,
+        requestSignal,
+      );
+    }
+    return this.writeBarrier.withForkedLease('upload-finalizer', () =>
+      this.completeUploadCore(uploadId, uploadToken, finalHash, requestSignal),
+    );
+  }
+
+  private async completeUploadCore(
+    uploadId: string,
+    uploadToken: string,
+    finalHash?: string,
+    requestSignal?: AbortSignal,
+  ): Promise<{ file_id: string; filename: string; size: number }> {
     const session = await this.validateUploadToken(uploadId, uploadToken);
 
     if (session.status === UploadStatus.COMPLETED) {
@@ -407,7 +441,7 @@ export class UploadsService implements OnModuleDestroy {
         });
       });
       await this.stopVerifyHeartbeat(heartbeat);
-      this.storageService.deleteUploadTempDir(uploadId).catch(() => {});
+      await this.storageService.deleteUploadTempDir(uploadId).catch(() => {});
       return { file_id: finalized.fileId, filename: claimedSession.filename, size: claimedSession.expectedSize };
     } catch (error: unknown) {
       try {
@@ -580,11 +614,13 @@ export class UploadsService implements OnModuleDestroy {
 
       // fsync 已由 combineParts 完成；发布前再次确认当前 owner。
       const fs = await import('fs/promises');
+      this.writeFreeze?.assertWritable();
       await fs.rename(tmpPath, finalPath);
       heartbeat.assertOwned();
     } catch (error) {
       // staging 路径包含本 owner token；失权后只清理自己的未发布文件。
       const fs = await import('fs/promises');
+      this.writeFreeze?.assertWritable();
       await fs.unlink(tmpPath).catch(() => {});
       throw error;
     }

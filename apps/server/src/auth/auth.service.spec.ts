@@ -755,4 +755,118 @@ describe('AuthService', () => {
       expect(JSON.stringify(mockAuditService.record.mock.calls[0][0])).not.toContain(plaintextToken);
     });
   });
+
+  describe('update confirmation facade', () => {
+    beforeEach(() => {
+      mockAccountsService.findById.mockReset().mockResolvedValue({
+        id: 'account-1',
+        username: 'admin',
+        passwordHash: 'stored-hash',
+      });
+      mockAccountsService.validatePassword.mockReset().mockResolvedValue(true);
+      mockTotpService.hasActiveTotp.mockReset().mockResolvedValue(false);
+      mockTotpService.matchLoginCodeInTransaction.mockReset();
+      mockTotpService.consumeLoginStep.mockReset();
+      mockSystemMetaRepository.findOne.mockReset().mockResolvedValue(null);
+      mockSystemMetaRepository.delete.mockReset().mockResolvedValue(undefined);
+      mockJwtService.sign.mockReset();
+      mockSessionsRepository.save.mockReset();
+      mockChallengesRepository.save.mockReset();
+      mockRecoveryService.verify.mockReset();
+      mockRecoveryService.generate.mockReset();
+    });
+
+    it('accepts a fresh password without creating a token, session, challenge, or recovery fallback', async () => {
+      await expect(
+        service.verifyUpdateConfirmation(
+          'account-1',
+          'correct-password',
+          undefined,
+          '198.51.100.70',
+        ),
+      ).resolves.toBeUndefined();
+
+      expect(mockAccountsService.validatePassword).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'account-1' }),
+        'correct-password',
+      );
+      expect(mockJwtService.sign).not.toHaveBeenCalled();
+      expect(mockSessionsRepository.save).not.toHaveBeenCalled();
+      expect(mockChallengesRepository.save).not.toHaveBeenCalled();
+      expect(mockRecoveryService.verify).not.toHaveBeenCalled();
+      expect(mockRecoveryService.generate).not.toHaveBeenCalled();
+      expect(JSON.stringify(mockAuditService.record.mock.calls)).not.toContain(
+        'correct-password',
+      );
+    });
+
+    it('rejects a wrong password and records account and trusted-IP failures', async () => {
+      mockAccountsService.validatePassword.mockResolvedValue(false);
+      const ip = '198.51.100.71';
+
+      await expect(
+        service.verifyUpdateConfirmation(
+          'account-1',
+          'wrong-password',
+          '123456',
+          ip,
+        ),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(mockTotpService.matchLoginCodeInTransaction).not.toHaveBeenCalled();
+      expect(mockJwtService.sign).not.toHaveBeenCalled();
+      expect(mockSessionsRepository.save).not.toHaveBeenCalled();
+      const writtenKeys = mockQueryRunner.query.mock.calls
+        .filter(([sql]) => typeof sql === 'string' && sql.startsWith('INSERT INTO system_meta'))
+        .map(([, parameters]) => parameters[0]);
+      expect(writtenKeys).toEqual(
+        expect.arrayContaining([
+          'login_lockout_admin',
+          `login_ip_${ip}`,
+        ]),
+      );
+      expect(JSON.stringify(mockAuditService.record.mock.calls)).not.toContain(
+        'wrong-password',
+      );
+      expect(JSON.stringify(mockAuditService.record.mock.calls)).not.toContain(
+        '123456',
+      );
+    });
+
+    it('consumes a matching TOTP step once without issuing login material', async () => {
+      mockTotpService.hasActiveTotp.mockResolvedValue(true);
+      mockTotpService.matchLoginCodeInTransaction.mockResolvedValue({
+        authenticatorId: 'totp-1',
+        timestamp: 1_800_000_000_000,
+      });
+      let consumed = false;
+      mockTotpService.consumeLoginStep.mockImplementation(async () => {
+        if (consumed) return false;
+        consumed = true;
+        return true;
+      });
+
+      const results = await Promise.allSettled([
+        service.verifyUpdateConfirmation(
+          'account-1',
+          'correct-password',
+          '654321',
+          '198.51.100.72',
+        ),
+        service.verifyUpdateConfirmation(
+          'account-1',
+          'correct-password',
+          '654321',
+          '198.51.100.72',
+        ),
+      ]);
+
+      expect(results.filter(({ status }) => status === 'fulfilled')).toHaveLength(1);
+      expect(results.filter(({ status }) => status === 'rejected')).toHaveLength(1);
+      expect(mockJwtService.sign).not.toHaveBeenCalled();
+      expect(mockSessionsRepository.save).not.toHaveBeenCalled();
+      expect(mockChallengesRepository.save).not.toHaveBeenCalled();
+      expect(mockRecoveryService.verify).not.toHaveBeenCalled();
+    });
+  });
 });

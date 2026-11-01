@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "version": "0.2.0",
+  "candidate": {
+    "sourceCommit": null,
+    "runId": null,
+    "platformDigests": {
+      "linux-x64": null,
+      "windows-x64": null
+    }
+  },
+  "manual": {
+    "viewport375px": {
+      "status": "pending",
+      "reference": null
+    },
+    "totpRecovery": {
+      "status": "pending",
+      "reference": null
+    },
+    "resumeAfterRefresh": {
+      "status": "pending",
+      "reference": null
+    }
+  },
+  "knownRisks": [
+    "Moderate and low npm audit advisories remain; the repository does not claim a clean audit."
+  ],
+  "notes": "Candidate provenance and the three Phase 2 manual acceptance checks are pending. Do not create the stable v0.2.0 tag until this structured gate passes."
+}

@@ -29,4 +29,10 @@ export class AuditLog {
 
   @Column({ name: 'created_at', type: 'integer' })
   createdAt!: number;
+
+  @Column({ name: 'update_attempt_id', type: 'text', nullable: true })
+  updateAttemptId!: string | null;
+
+  @Column({ name: 'update_event', type: 'text', nullable: true })
+  updateEvent!: string | null;
 }

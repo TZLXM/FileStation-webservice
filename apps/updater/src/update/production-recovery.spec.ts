@@ -1,0 +1,719 @@
+import {spawn, ChildProcess} from 'node:child_process';
+import {once} from 'node:events';
+import {createHash} from 'node:crypto';
+import {mkdtemp,mkdir,writeFile,readFile,rm,realpath} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import path from 'node:path';
+import net from 'node:net';
+import {AttemptJournal, AttemptPhase} from '../state/attempt-journal';
+import {UpdateLock} from '../state/update-lock';
+import {ManagedUpdateHooks} from './orchestrator';
+import {PlatformBootIdentityProvider} from '../state/boot-identity';
+import {NodeDurableFileSystem} from '../platform/durable-fs';
+import {CurrentLinkSwitcher} from '../platform/current-link';
+import {UpdateCapabilityAuthority,encodeInheritedCapability} from './capability';
+import {DetachedIdentity,stopDetachedChild} from '../../test/fixtures/cleanup-process';
+
+jest.setTimeout(120_000); // Public CLI, IPC and refusal cases keep their own limits.
+// Real terminal identity/proof uses the existing production 120s phase budget.
+// Total worker/case limits remain finite, rather than allowing unlimited retries.
+const terminalPhaseBudgetMs = 120_000;
+const recoveryWorkerBudgetMs = 300_000;
+const fixtureOverheadBudgetMs = 120_000;
+const singleWorkerCaseBudgetMs = recoveryWorkerBudgetMs + fixtureOverheadBudgetMs;
+const doubleWorkerCaseBudgetMs = 2 * recoveryWorkerBudgetMs + fixtureOverheadBudgetMs;
+// Pad the measured first real query to 22.5s total, never add another 22.5s
+// on top of an already slow native query.
+function controlledBootPaddingMs(nativeElapsedMs:number):number {
+  return Math.max(0, 22_500 - nativeElapsedMs);
+}
+const compiled=path.resolve(__dirname,'../../dist');
+const durable=new NodeDurableFileSystem();
+const identity=new PlatformBootIdentityProvider();
+
+async function port() {
+  const listener=net.createServer();await new Promise<void>(r=>listener.listen(0,'127.0.0.1',r));
+  const result=(listener.address() as net.AddressInfo).port;
+  await new Promise<void>(r=>listener.close(()=>r())); return result;
+}
+async function exited(child:ChildProcess) {if(child.exitCode===null && child.signalCode===null) await once(child,'exit');}
+async function exitedWithin(child:ChildProcess,timeoutMs=10000) {
+  let timer:ReturnType<typeof setTimeout>;
+  try {await Promise.race([exited(child),new Promise<never>((_r,reject)=>{timer=setTimeout(()=>reject(new Error(`fixture child ${child.pid} exit exceeded ${timeoutMs}ms`)),timeoutMs);})]);}
+  finally{clearTimeout(timer!);}
+}
+
+async function fixture(phase:AttemptPhase,pending?:string, reboot=false, liveOld=false, historicalTarget=false) {
+  const root=await realpath(await mkdtemp(path.join(tmpdir(),'fs-production-recovery-')));
+  const servicePort=await port();
+  const paths={database:path.join(root,'runtime/db.sqlite'),storage:path.join(root,'runtime/storage'),temp:path.join(root,'runtime/temp')};
+  for(const directory of [path.dirname(paths.database),paths.storage,paths.temp,path.join(root,'updater/dist'),path.join(root,'backups/backup')]) await mkdir(directory,{recursive:true});
+  await writeFile(paths.database,'changed-db'); await writeFile(paths.database+'-wal','failed-wal');
+  const backup=path.join(root,'backups/backup/update-snapshot.sqlite');await writeFile(backup,'verified-db');
+  const previous=path.join(root,'releases/v0.2.0-old'),next=path.join(root,'releases/v0.2.5-'+ 'b'.repeat(12));
+  for(const [release,version] of [[previous,'0.2.0'],[next,'0.2.5']]) {
+    await mkdir(path.join(release,'apps/server/dist'),{recursive:true});
+    await writeFile(path.join(release,'package.json'),JSON.stringify({version}));
+    // Only the business listener is synthetic. Journal, locks, CLI, launch
+    // preflight, child identity, IPC proof, link and DB restore are production.
+    await writeFile(path.join(release,'apps/server/dist/main.js'),`
+      exports.bootstrap=async()=>{
+        while(require('fs').existsSync(${JSON.stringify(path.join(root,'fixture-startup-pause'))}))await new Promise(r=>setTimeout(r,20));
+        if(process.env.NODE_ENV!=='production'||process.env.JWT_SECRET!=='synthetic-service-secret'||process.env.FILESTATION_PORT!=='${servicePort}')throw Error('service config lost');
+        const http=require('http');const app=http.createServer((q,s)=>{s.setHeader('content-type','application/json');s.end(JSON.stringify({version:'${version}'}));});
+        await new Promise((r,j)=>{app.once('error',j);app.listen(Number(process.env.FILESTATION_PORT),'127.0.0.1',r)});
+        return {app:{getHttpServer:()=>app},restartHealth:{health:'ok',version:'${version}',release:${JSON.stringify(release)}}};
+      };
+      if(require.main===module){
+        const chunks=[];process.stdin.on('data',c=>chunks.push(c));process.stdin.on('end',()=>{
+          const gatedFailure=require('fs').existsSync(${JSON.stringify(path.join(root,'fixture-gated-failure'))});
+          if(!gatedFailure && !require('fs').existsSync(${JSON.stringify(path.join(root,'fixture-health-failure'))}))process.exit(14);
+          const envelope=JSON.parse(Buffer.concat(chunks).toString());
+          const validating=process.argv.includes('--startup-mode=validate');
+          const server=require('http').createServer((q,s)=>{s.statusCode=gatedFailure && validating?200:503;s.end(JSON.stringify({status:validating?'validating':'gated'}));});
+          server.listen(Number(envelope.runtime.FILESTATION_PORT),'127.0.0.1');
+        });
+      }
+    `);
+  }
+  await durable.createJunction(previous,path.join(root,'current')).catch(()=>durable.symlink(previous,path.join(root,'current')));
+  await durable.writeAtomic(path.join(root,'managed-install.json'),Buffer.from(JSON.stringify({schemaVersion:1,installId:'fixture',installRoot:root,currentPath:path.join(root,'current'),environmentPath:path.join(root,'.env'),paths,bootstrapBackupId:'bootstrap',bootstrapFingerprint:'a'.repeat(64),createdAt:new Date().toISOString(),productionEnvironment:{nodeEnv:'production',required:['NODE_ENV','JWT_SECRET'],source:'service'}})),{mode:0o600});
+  await writeFile(path.join(root,'updater/dist/cli.js'),`
+    const fs=require('node:fs');const clock=require('node:perf_hooks').performance;
+    const started=clock.now();const timingFile=${JSON.stringify(path.join(root,'fixture-terminal-timing.jsonl'))};
+    const slowMarker=${JSON.stringify(path.join(root,'fixture-slow-boot-query'))};
+    const timing=(event,extra={})=>{try{fs.appendFileSync(timingFile,JSON.stringify({event,elapsedMs:Math.round(clock.now()-started),...extra})+'\\n');}catch{}};
+    const capability=require(${JSON.stringify(path.join(compiled,'update/capability.js'))});
+    const readEnvelope=capability.readInheritedEnvelope;
+    capability.readInheritedEnvelope=async function(...args){const result=await readEnvelope.apply(this,args);timing('inherited-envelope',{remainingBudgetMs:result.launch?.expiresAt-Date.now()});return result;};
+    const {PlatformBootIdentityProvider}=require(${JSON.stringify(path.join(compiled,'state/boot-identity.js'))});
+    let delayed=false;
+    for(const operation of ['current','processCreatedAt','listeningPid']){
+      const original=PlatformBootIdentityProvider.prototype[operation];
+      PlatformBootIdentityProvider.prototype[operation]=async function(...args){const before=clock.now();try{
+        if(operation==='current'&&!delayed&&fs.existsSync(slowMarker)){
+          delayed=true;
+          const result=await original.apply(this,args);
+          const nativeMs=clock.now()-before;
+          const paddingMs=(${controlledBootPaddingMs.toString()})(nativeMs);
+          timing('controlled-boot-delay',{nativeDurationMs:Math.round(nativeMs),delayMs:Math.ceil(paddingMs)});
+          if(paddingMs>0)await new Promise(resolve=>setTimeout(resolve,Math.ceil(paddingMs)));
+          return result;
+        }
+        return await original.apply(this,args);
+      }finally{timing('identity:'+operation,{durationMs:Math.round(clock.now()-before)});}};
+    }
+    const send=process.send;if(send)process.send=function(message,...args){if(message?.proof)timing('proof-send');return send.call(this,message,...args);};
+    process.on('exit',code=>require('fs').writeFileSync(${JSON.stringify(path.join(root,'fixture-launch-exit.txt'))},String(code)));process.on('uncaughtException',e=>{require('fs').writeFileSync(${JSON.stringify(path.join(root,'fixture-launch-error.txt'))},e.stack);process.exit(1);});require(${JSON.stringify(path.join(compiled,'cli.js'))}).main().catch(e=>{require('fs').writeFileSync(${JSON.stringify(path.join(root,'fixture-launch-error.txt'))},e.stack);process.exit(1);});`);
+  const pipeCapability=encodeInheritedCapability(new UpdateCapabilityAuthority());
+  const old=spawn(process.execPath,['-e',`
+    let guard,tailSize;
+    process.on('message',async message=>{
+      try {
+        const file=${JSON.stringify(path.join(root,'update-attempt.journal'))};
+        if(message==='hold') guard=await require(${JSON.stringify(path.join(compiled,'platform/recovery-guard.js'))}).acquireRecoveryGuard(${JSON.stringify(path.join(root,'update.recovery.guard'))});
+        if(message==='partial') {tailSize=require('fs').statSync(file).size;require('fs').appendFileSync(file,'{"in-flight":');}
+        if(message==='restore-tail' && tailSize!==undefined) require('fs').truncateSync(file,tailSize);
+        if(message==='handoff') {
+          await guard.assertActive();
+          const journal=await require(${JSON.stringify(path.join(compiled,'state/attempt-journal.js'))}).AttemptJournal.open(${JSON.stringify(root)});
+          const state=await journal.readSnapshot();
+          const intent=state.pending ?? await journal.appendIntent({attemptId:state.attemptId,fence:state.fence,action:'close-application',phase:'SNAPSHOT_READY'});
+          await journal.appendCompletion({attemptId:state.attemptId,fence:state.fence,intentId:intent.intentId ?? intent.id,phase:'HANDOFF_READY'});
+          process.exit(0); // Kernel retains the guard through this process's exit.
+        }
+        process.send({event:message});
+      }catch(error){process.send({error:error.message});}
+    });
+    setInterval(()=>{},1000);
+  `],{stdio:['ignore','ignore','ignore','ipc'],windowsHide:true});
+  await once(old,'spawn');
+  const createdAt=await identity.processCreatedAt(old.pid!);const boot=(await identity.current()).value;
+  const journal=await AttemptJournal.open(root);
+  const provider=reboot?{current:async()=>({provider:'linux-proc' as const,value:'fixture-previous-boot'}),processCreatedAt:(pid:number)=>identity.processCreatedAt(pid),isProcessAlive:(pid:number,created:string)=>identity.isProcessAlive(pid,created)}:identity;
+  const owner=await UpdateLock.acquire(root,{attemptId:'attempt-real',bootIdentity:reboot?'fixture-previous-boot':boot,pid:old.pid!,processCreatedAt:createdAt,heartbeatAt:new Date().toISOString(),handoffIdentityHash:createHash('sha256').update(liveOld?pipeCapability:'fixture-handoff').digest('hex'),currentVersion:'0.2.0',targetVersion:'0.2.5',previousVersion:'0.2.0',backupId:'backup'},{journal,identityProvider:provider});
+  const action=async(action:string,p:AttemptPhase,payload:object={})=>{
+    const i=await journal.appendIntent({attemptId:'attempt-real',fence:owner.fence,action,phase:p,payload:payload as never});
+    await journal.appendCompletion({attemptId:'attempt-real',fence:owner.fence,intentId:i.id,phase:p});
+  };
+  await action('prepare-update','PREPARED',{stagingPath:path.join(root,'releases/staging'),targetVersion:'0.2.5',artifactSha256:'b'.repeat(64),manifestSha256:'c'.repeat(64),databasePath:paths.database});
+  if(!['PREPARED','MAINTENANCE'].includes(phase)) await action('snapshot-database','SNAPSHOT_READY',{path:backup,sha256:createHash('sha256').update('verified-db').digest('hex')});
+  if(['SWITCH_INTENT','CURRENT_SWITCHED','MIGRATING','MIGRATED_VERIFIED','READY_TO_COMMIT','COMMITTED','ROLLBACK_INTENT'].includes(phase)) {
+    class HistoricalTargetFs extends NodeDurableFileSystem {
+      override async readlink(filename:string) {return path.resolve(await super.readlink(filename))+path.sep;}
+    }
+    try {await new CurrentLinkSwitcher(root,journal,historicalTarget?{fs:new HistoricalTargetFs()}:undefined).switchTo(next,{attemptId:'attempt-real',fence:owner.fence},pending==='interrupted-switch'?{crashAt:{action:process.platform==='win32'?'attach-current':'replace-current',when:'after-action'}}:{});}catch(error){if(pending!=='interrupted-switch')throw error;}
+  }
+  if(!(await journal.readSnapshot()).pending) await action('fixture-stage',phase);
+  if(pending && pending!=='interrupted-switch') await journal.appendIntent({attemptId:'attempt-real',fence:owner.fence,action:pending,phase,payload:{version:'0.2.5',release:next}});
+  const oldRequest=async(message:string)=>{
+    let timer:ReturnType<typeof setTimeout>;
+    try {await new Promise<void>((resolve,reject)=>{
+      const receive=(reply:{event?:string;error?:string})=>{old.removeListener('message',receive);reply.error?reject(new Error(reply.error)):resolve();};
+      old.once('message',receive);timer=setTimeout(()=>{old.removeListener('message',receive);reject(new Error('old fixture IPC timeout: '+message));},10000);old.send(message);
+    });}finally{clearTimeout(timer!);}
+  };
+  if(liveOld) await oldRequest('hold'); else {old.kill('SIGKILL');await exited(old);}
+  const worker=path.join(root,'worker.js');
+  await writeFile(worker,`
+    (async()=>{
+      const {OperatorRecoveryAuthority}=require(${JSON.stringify(path.join(compiled,'update/operator-authority.js'))});
+      const {createManagedUpdateOrchestrator}=require(${JSON.stringify(path.join(compiled,'update/orchestrator.js'))});
+      const {AttemptJournal}=require(${JSON.stringify(path.join(compiled,'state/attempt-journal.js'))});
+      const {NodeDurableFileSystem}=require(${JSON.stringify(path.join(compiled,'platform/durable-fs.js'))});
+      class CrashFS extends NodeDurableFileSystem {
+        trace(operation){if(process.env.FIXTURE_GUARD_CONTENDER)console.log('UNOWNED_MUTATION:'+operation);}
+        async ensurePrivateDirectory(...args){this.trace('ensure');return super.ensurePrivateDirectory(...args);}
+        async protect(...args){this.trace('protect');return super.protect(...args);}
+        async writeAtomic(...args){this.trace('write');return super.writeAtomic(...args);}
+        async truncate(...args){this.trace('truncate');return super.truncate(...args);}
+        async append(file,bytes,options){
+          this.trace('append');
+          await super.append(file,bytes,options);
+          const record=JSON.parse(bytes.toString());
+          if(process.env.FIXTURE_CRASH===record.action+':intent' && record.kind==='intent')process.exit(73);
+          if(process.env.FIXTURE_CRASH==='terminal:completion' && record.kind==='completion' && record.result && record.result.nonce)process.exit(73);
+        }
+        async rename(source,target,options){
+          this.trace('rename');
+          await super.rename(source,target,options);
+          if(process.env.FIXTURE_CRASH==='restore:publication' && target===${JSON.stringify(paths.database)})process.exit(73);
+          if(process.env.FIXTURE_CRASH==='previous:detach' && require('path').basename(target).startsWith('.rollback-new-'))process.exit(73);
+          if(process.env.FIXTURE_CRASH==='previous:attach' && require('path').basename(source).startsWith('.rollback-current-'))process.exit(73);
+        }
+        async unlink(file){
+          this.trace('unlink');await super.unlink(file);
+          const name=require('path').basename(file);
+          if(process.env.FIXTURE_CRASH==='terminal:ledger-retired' && name==='update.processes.json')process.exit(73);
+          if(process.env.FIXTURE_CRASH==='terminal:owner-released' && name==='update.lock')process.exit(73);
+          if(process.env.FIXTURE_CRASH==='terminal:recovery-released' && name==='update.recovery.lock')process.exit(73);
+        }
+      }
+      const root=${JSON.stringify(root)};
+      const snapshot=await AttemptJournal.inspect(root);
+      const operatorAuthority=await OperatorRecoveryAuthority.authorize(root,'attempt-real',snapshot.fence);
+      const {PlatformBootIdentityProvider}=require(${JSON.stringify(path.join(compiled,'state/boot-identity.js'))});
+      class InterleavedIdentity extends PlatformBootIdentityProvider {
+        async processCreatedAt(pid){
+          const result=await super.processCreatedAt(pid);
+          if(process.env.FIXTURE_GUARD_CONTENDER && pid===process.pid && !this.interleaved){
+            this.interleaved=true;process.send({event:'after-inspect'});
+            await new Promise(resolve=>process.once('message',resolve));
+          }
+          return result;
+        }
+      }
+      const orchestrator=createManagedUpdateOrchestrator({handoffIdentity:process.env.FIXTURE_FORWARD?'fixture-handoff':'',operatorAuthority,identity:new InterleavedIdentity(),fs:new CrashFS(),runtime:{NODE_ENV:'production',JWT_SECRET:'synthetic-service-secret',FILESTATION_PORT:'${servicePort}'}});
+      const result=await orchestrator.run({attemptId:'attempt-real',installRoot:root,handoffIdentity:'',servicePort:${servicePort},timeoutMs:${terminalPhaseBudgetMs},recovery:!process.env.FIXTURE_FORWARD});
+      console.log(JSON.stringify(result));
+    })().catch(e=>{console.error(e.message);process.exitCode=1;});
+  `);
+  const run=async(crash?:string,forward=false,onMessage?:(child:ChildProcess,message:unknown)=>void,terminalLaunch=true)=>{
+    const child=spawn(process.execPath,[worker],{cwd:root,windowsHide:true,env:{...process.env,FIXTURE_CRASH:crash,FIXTURE_FORWARD:forward?'1':undefined,FIXTURE_GUARD_CONTENDER:onMessage?'1':undefined},stdio:['ignore','pipe','pipe','ipc']});
+    if(onMessage)child.on('message',message=>onMessage(child,message));
+    let output='';child.stdout!.on('data',x=>output+=x);child.stderr!.on('data',x=>output+=x);
+    let timer:ReturnType<typeof setTimeout>;
+    // An interleaved guard contender is a refusal, not a terminal-launch path.
+    const exitBudgetMs=onMessage||!terminalLaunch?60_000:recoveryWorkerBudgetMs;
+    let timedOut=false;
+    const completion=exited(child);
+    const timeout=new Promise<void>(resolve=>{timer=setTimeout(()=>{timedOut=true;child.kill('SIGKILL');resolve();},exitBudgetMs);});
+    await Promise.race([completion,timeout]);clearTimeout(timer!);
+    if(timedOut) {
+      let forcedTimer:ReturnType<typeof setTimeout>;
+      try {await Promise.race([completion,new Promise<never>((_r,reject)=>{forcedTimer=setTimeout(()=>reject(new Error('fixture worker exit not proven after timeout SIGKILL')),10000);})]);}
+      finally {clearTimeout(forcedTimer!);}
+      const state=await AttemptJournal.inspect(root);
+      throw new Error(`fixture worker exceeded ${exitBudgetMs}ms at ${state.phase}/${state.pending?.action ?? 'no-pending'}; exit=${child.exitCode}/${child.signalCode}; ${output}`);
+    }
+    try{output+=await readFile(path.join(root,'fixture-launch-error.txt'),'utf8');}catch{}
+    return {code:child.exitCode,output};
+  };
+  const cleanup=async()=>{
+    if(old.exitCode===null && old.signalCode===null){old.kill('SIGKILL');await exitedWithin(old);}
+    const s=await AttemptJournal.inspect(root);
+    const children=new Map<string,DetachedIdentity>();
+    for(const r of s.records) {
+      if(r.kind==='completion' && r.result && typeof r.result==='object' && !Array.isArray(r.result) &&
+        typeof r.result.pid==='number' && typeof r.result.createdAt==='string' && typeof r.result.boot==='string') {
+        const child=r.result as unknown as DetachedIdentity;
+        children.set(`${child.pid}:${child.createdAt}:${child.boot}`,child);
+      }
+    }
+    try {
+      const ledger=JSON.parse(await readFile(path.join(root,'update.processes.json'),'utf8'));
+      for(const child of ledger.children ?? []) {
+        if(child && typeof child==='object') children.set(`${child.pid}:${child.createdAt}:${child.boot}`,child);
+      }
+    }catch{}
+    for(const child of children.values()) await stopDetachedChild(child,identity);
+    await rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});
+  };
+  return {root,servicePort,paths,previous,next,journal,run,cleanup,old,oldRequest,pipeCapability,fence:owner.fence};
+}
+
+// Observe early writer rejection/completion and bound the native flush rendezvous.
+async function waitForHeldAppend(held:Promise<void>,writing:Promise<unknown>,timeoutMs:number):Promise<void> {
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  try {
+    await Promise.race([
+      held,
+      writing.then(()=>{throw new Error('append completed before flush was held');}),
+      new Promise<never>((_resolve,reject)=>{timer=setTimeout(()=>reject(new Error('append flush rendezvous timed out')),timeoutMs);}),
+    ]);
+  } finally {if(timer)clearTimeout(timer);}
+}
+// Strict read-only polling; the deadline bounds waiting for the actual intent.
+async function waitForVerificationIntent(root:string,timeoutMs:number,inspect=AttemptJournal.inspect) {
+  const deadline=Date.now()+timeoutMs;
+  const journalPath=path.resolve(root,'update-attempt.journal');
+  for (;;) {
+    if(Date.now()>=deadline)throw new Error('verification intent absent');
+    try {
+      const state=await inspect(root);
+      if(Date.now()>=deadline)throw new Error('verification intent absent');
+      if(state.pending?.action==='verify-committed-restart')return;
+    } catch(error) {
+      const e=error as NodeJS.ErrnoException;
+      if(process.platform!=='win32' || e.code!=='EBUSY' || e.syscall!=='open' || typeof e.path!=='string' || path.resolve(e.path)!==journalPath)throw error;
+    }
+    const remaining=deadline-Date.now();
+    if(remaining<=0)throw new Error('verification intent absent');
+    await new Promise(r=>setTimeout(r,Math.min(50,remaining)));
+  }
+}
+async function publicRecover(v:Awaited<ReturnType<typeof fixture>>, fence?:number, startupDelayMs=0, terminalPositive=false) {
+  const cli=path.join(compiled,'cli.js');
+  const args=['recover','--root',v.root,'--attempt','attempt-real','--expected-fence',String(fence??v.fence)];
+  // Controlled local slow-start experiment still invokes the real public CLI.
+  const command=startupDelayMs ? ['-e',`setTimeout(()=>require(${JSON.stringify(cli)}).main(${JSON.stringify(args)}).then(code=>{process.exitCode=code;}).catch(e=>{console.error(e.message);process.exitCode=1;}),${startupDelayMs});`] : [cli,...args];
+  const child=spawn(process.execPath,command,{
+    cwd:v.root,windowsHide:true,env:{...process.env,NODE_ENV:'production',JWT_SECRET:'synthetic-service-secret',FILESTATION_PORT:String(v.servicePort)},stdio:['ignore','pipe','pipe'],
+  });
+  let output='';child.stdout!.on('data',bytes=>output+=bytes);child.stderr!.on('data',bytes=>output+=bytes);
+  try {await exitedWithin(child,terminalPositive?recoveryWorkerBudgetMs:60_000);} catch(error) {
+    child.kill('SIGKILL');await exitedWithin(child);throw new Error(`${error}: ${output}`);
+  }
+  try {output+=await readFile(path.join(v.root,'fixture-launch-error.txt'),'utf8');}catch{}
+  return {code:child.exitCode,output};
+}
+
+describe('production recovery entry and stable launcher',()=>{
+  it.each([[700,21_800],[30_000,0]])('pads a %i ms native boot query by %i ms',(elapsed,expected)=>{
+    expect(controlledBootPaddingMs(elapsed)).toBe(expected);
+  });
+  it('controlled slow native boot query preserves historical COMMITTED proof',async()=>{
+    const v=await fixture('COMMITTED','verify-committed-restart');
+    try {
+      await writeFile(path.join(v.root,'fixture-slow-boot-query'),'delay before real native query');
+      const prefix=await readFile(path.join(v.root,'update-attempt.journal'));
+      const result=await v.run();if(result.code!==0)throw new Error(result.output);
+      const timings=(await readFile(path.join(v.root,'fixture-terminal-timing.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+      expect(timings.find(e=>e.event==='controlled-boot-delay')).toMatchObject({nativeDurationMs:expect.any(Number),delayMs:expect.any(Number)});
+      const boot=timings.find(e=>e.event==='identity:current');const proofSent=timings.find(e=>e.event==='proof-send');
+      expect(boot.durationMs).toBeGreaterThanOrEqual(22500);expect(proofSent.elapsedMs).toBeGreaterThan(boot.elapsedMs);
+      const state=await AttemptJournal.inspect(v.root);expect(state.phase).toBe('COMMITTED');expect(state.pending).toBeNull();
+      const proof=state.records.at(-1)!.result as unknown as DetachedIdentity;
+      expect(state.records.at(-1)!.result).toMatchObject({health:'ok',version:'0.2.5',release:v.next,pid:expect.any(Number),createdAt:expect.any(String),boot:expect.any(String),nonce:expect.any(String)});
+      expect(await identity.isProcessAlive(proof.pid,proof.createdAt)).toBe(true);expect(await identity.listeningPid!(v.servicePort)).toBe(proof.pid);
+      expect(await realpath(path.join(v.root,'current'))).toBe(v.next);expect(await readFile(v.paths.database,'utf8')).toBe('changed-db');
+      expect((await readFile(path.join(v.root,'update-attempt.journal'))).subarray(0,prefix.length)).toEqual(prefix);
+    }finally{
+      console.info('controlled native terminal timing:\n'+await readFile(path.join(v.root,'fixture-terminal-timing.jsonl'),'utf8').catch(()=>''));
+      await v.cleanup();
+    }
+  }, singleWorkerCaseBudgetMs);
+  it('recovers a historical switch originalTarget with a trailing separator without rewriting its journal',async()=>{
+    const v=await fixture('CURRENT_SWITCHED',undefined,false,false,true);
+    try {
+      const before=await AttemptJournal.inspect(v.root);
+      const switched=before.records.find(record=>record.kind==='intent' && ['stage-current-link','replace-current'].includes(record.action??''));
+      expect(switched?.payload).toMatchObject({originalTarget:v.previous+path.sep});
+      const filename=path.join(v.root,'update-attempt.journal');
+      const prefix=await readFile(filename);
+      const result=await v.run();
+      if(result.code!==0)throw new Error(result.output);
+      expect((await readFile(filename)).subarray(0,prefix.length)).toEqual(prefix);
+      expect(await realpath(path.join(v.root,'current'))).toBe(v.previous);
+      expect(await readFile(v.paths.database,'utf8')).toBe('verified-db');
+      const state=await AttemptJournal.inspect(v.root);
+      expect(state.pending).toBeNull();
+      expect(state.records.at(-1)?.result).toMatchObject({version:'0.2.0',health:'ok',release:v.previous});
+    } finally {await v.cleanup();}
+  }, singleWorkerCaseBudgetMs);
+  it('rejects a relative historical switch originalTarget without rewriting its journal',async()=>{
+    const v=await fixture('ROLLED_BACK');
+    try {
+      for(const [action,payload] of [['replace-current',{originalTarget:path.relative(v.root,v.previous)}],['complete-rollback',{}]] as const) {
+        const intent=await v.journal.appendIntent({attemptId:'attempt-real',fence:v.fence,action,phase:'ROLLED_BACK',payload});
+        await v.journal.appendCompletion({attemptId:'attempt-real',fence:v.fence,intentId:intent.id,phase:'ROLLED_BACK',result:{reason:'terminal launch interrupted'}});
+      }
+      const filename=path.join(v.root,'update-attempt.journal');
+      const prefix=await readFile(filename);
+      const result=await v.run(undefined,false,undefined,false);
+      expect(result.code).toBe(1);
+      expect(result.output).toMatch(/previous release target must be absolute/);
+      expect((await readFile(filename)).subarray(0,prefix.length)).toEqual(prefix);
+      expect(await realpath(path.join(v.root,'current'))).toBe(v.previous);
+      expect(await readFile(v.paths.database,'utf8')).toBe('changed-db');
+    } finally {await v.cleanup();}
+  });
+  it.each(['trailing-separator','different-release','relative-release'] as const)('handles historical pending terminal release %s without rewriting its journal',async mode=>{
+    const v=await fixture('ROLLED_BACK');
+    try {
+      const completion=await v.journal.appendIntent({attemptId:'attempt-real',fence:v.fence,action:'complete-rollback',phase:'ROLLED_BACK'});
+      await v.journal.appendCompletion({attemptId:'attempt-real',fence:v.fence,intentId:completion.id,phase:'ROLLED_BACK',result:{reason:'terminal launch interrupted'}});
+      const release=mode==='trailing-separator'?v.previous+path.sep:mode==='different-release'?v.next:path.relative(v.root,v.previous);
+      await v.journal.appendIntent({attemptId:'attempt-real',fence:v.fence,action:'launch-terminal',phase:'ROLLED_BACK',payload:{version:'0.2.0',release}});
+      const filename=path.join(v.root,'update-attempt.journal');
+      const prefix=await readFile(filename);
+      const result=await v.run(undefined,false,undefined,mode==='trailing-separator');
+      const state=await AttemptJournal.inspect(v.root);
+      expect((await readFile(filename)).subarray(0,prefix.length)).toEqual(prefix);
+      expect(await realpath(path.join(v.root,'current'))).toBe(v.previous);
+      expect(await readFile(v.paths.database,'utf8')).toBe('changed-db');
+      if(mode==='trailing-separator') {
+        if(result.code!==0)throw new Error(result.output);
+        expect(state.pending).toBeNull();
+        expect(state.records.at(-1)?.result).toMatchObject({version:'0.2.0',health:'ok',release:v.previous});
+      } else {
+        expect(result.code).toBe(1);
+        expect(result.output).toMatch(/terminal launch intent identity differs/);
+        expect(state.pending?.action).toBe('launch-terminal');
+      }
+    } finally {await v.cleanup();}
+  }, singleWorkerCaseBudgetMs);
+  it('W20-I01 recovers a historical pending terminal release after ledger retirement without rewriting its journal',async()=>{
+    const v=await fixture('ROLLED_BACK');
+    try {
+      // Model the already-restored database at the interrupted terminal launch.
+      await writeFile(v.paths.database,'verified-db');
+      const rollback=await v.journal.appendIntent({attemptId:'attempt-real',fence:v.fence,action:'complete-rollback',phase:'ROLLED_BACK'});
+      await v.journal.appendCompletion({attemptId:'attempt-real',fence:v.fence,intentId:rollback.id,phase:'ROLLED_BACK',result:{reason:'terminal launch interrupted'}});
+      const intent=await v.journal.appendIntent({attemptId:'attempt-real',fence:v.fence,action:'launch-terminal',phase:'ROLLED_BACK',payload:{version:'0.2.0',release:v.previous+path.sep}});
+      const filename=path.join(v.root,'update-attempt.journal');
+      const historicalPrefix=await readFile(filename);
+      const first=await v.run('terminal:ledger-retired');
+      if(first.code!==73)throw new Error(first.output);
+      const retiredPrefix=await readFile(filename);
+      expect(retiredPrefix.subarray(0,historicalPrefix.length)).toEqual(historicalPrefix);
+      const retired=await AttemptJournal.inspect(v.root);
+      expect(retired.pending).toBeNull();
+      const completed=retired.records.find(record=>record.kind==='completion' && record.intentId===intent.id)!;
+      const prior=completed.result as unknown as DetachedIdentity;
+      expect(completed.result).toMatchObject({version:'0.2.0',health:'ok',release:v.previous});
+      expect(await durable.exists(path.join(v.root,'update.processes.json'))).toBe(false);
+      expect(await identity.isProcessAlive(prior.pid,prior.createdAt)).toBe(true);
+      expect(await identity.listeningPid!(v.servicePort)).toBe(prior.pid);
+      const second=await v.run();
+      if(second.code!==0)throw new Error(second.output);
+      expect(await identity.isProcessAlive(prior.pid,prior.createdAt)).toBe(false);
+      const after=await AttemptJournal.inspect(v.root);
+      const fresh=after.records.at(-1)!.result as unknown as DetachedIdentity;
+      expect(after.phase).toBe('ROLLED_BACK');
+      expect(after.pending).toBeNull();
+      expect(after.fence).toBeGreaterThan(retired.fence);
+      expect(fresh.pid).not.toBe(prior.pid);
+      expect(after.records.at(-1)!.result).toMatchObject({version:'0.2.0',health:'ok',release:v.previous});
+      expect(await identity.isProcessAlive(fresh.pid,fresh.createdAt)).toBe(true);
+      expect(await identity.listeningPid!(v.servicePort)).toBe(fresh.pid);
+      expect(await realpath(path.join(v.root,'current'))).toBe(v.previous);
+      expect(await readFile(v.paths.database,'utf8')).toBe('verified-db');
+      expect((await readFile(filename)).subarray(0,retiredPrefix.length)).toEqual(retiredPrefix);
+    } finally {await v.cleanup();}
+  }, doubleWorkerCaseBudgetMs);
+  it.each([
+    ['MAINTENANCE', '{"kind":"intent"'],
+    ['MIGRATING', '{"kind":"completion"'],
+    ['COMMITTED', '{"kind":"intent"'],
+  ] as const)('public recover repairs dead-writer %s torn tail under retained exclusion',async (phase, tail)=>{
+    const v=await fixture(phase);
+    const filename=path.join(v.root,'update-attempt.journal');
+    const prefix=await readFile(filename);
+    try {
+      await writeFile(filename,Buffer.concat([prefix,Buffer.from(tail)]));
+      const result=await publicRecover(v,undefined,0,true);
+      if(result.code!==0) throw new Error(result.output);
+      expect(await realpath(path.join(v.root,'current'))).toBe(phase==='COMMITTED'?v.next:v.previous);
+      expect(await readFile(v.paths.database,'utf8')).toBe(phase==='MIGRATING'?'verified-db':'changed-db');
+      const state=await AttemptJournal.inspect(v.root);
+      expect(state.pending).toBeNull();
+      if(phase==='COMMITTED') expect(state.records.some(r=>r.action==='rollback-database')).toBe(false);
+    } finally {
+      const bytes=await readFile(filename);
+      if(bytes.at(-1)!==10) await writeFile(filename,prefix);
+      await v.cleanup();
+    }
+  }, singleWorkerCaseBudgetMs);
+  it('allows a delayed real public recover to complete its verified restart',async()=>{
+    const v=await fixture('COMMITTED');
+    const filename=path.join(v.root,'update-attempt.journal');const prefix=await readFile(filename);
+    try {
+      await writeFile(filename,Buffer.concat([prefix,Buffer.from('{"kind":"intent"')]));
+      const result=await publicRecover(v,undefined,65_000,true);
+      if(result.code!==0)throw new Error(result.output);
+      const state=await AttemptJournal.inspect(v.root);expect(state.phase).toBe('COMMITTED');expect(state.pending).toBeNull();
+      expect(state.records.at(-1)?.result).toMatchObject({version:'0.2.5',health:'ok',pid:expect.any(Number),createdAt:expect.any(String),boot:expect.any(String),nonce:expect.any(String)});
+      expect(await realpath(path.join(v.root,'current'))).toBe(v.next);expect(await readFile(v.paths.database,'utf8')).toBe('changed-db');
+    } finally {
+      const bytes=await readFile(filename);if(bytes.at(-1)!==10)await writeFile(filename,prefix);await v.cleanup();
+    }
+  }, singleWorkerCaseBudgetMs);
+  it.each(['live','corrupt','wrong-fence'] as const)('public recover refuses %s without changing journal bytes',async mode=>{
+    const v=await fixture('MAINTENANCE',undefined,false,mode==='live');
+    const filename=path.join(v.root,'update-attempt.journal');
+    const prefix=await readFile(filename);
+    const bytes=Buffer.concat([prefix,Buffer.from(mode==='corrupt'?'{}\n':'{"torn":')]);
+    try {
+      await writeFile(filename,bytes);
+      const result=await publicRecover(v,mode==='wrong-fence'?999:undefined);
+      expect(result.code).toBe(1);
+      expect(await readFile(filename)).toEqual(bytes);
+    } finally {await writeFile(filename,prefix);await v.cleanup();}
+  });
+  it.each([['normal',false],['controlled slow',true]])('F1-01 normal inherited pipe %s waits while the old guard is held and handoff is delayed',async(_label,slow)=>{
+    const v=await fixture('SNAPSHOT_READY','close-application',false,true);
+    let child:ChildProcess|undefined;
+    let tailPending=false;
+    let waitStarted=0;
+    try {
+      // Fail safely after OLD_STOPPED so the fixture need not wait for health.
+      await rm(v.next,{recursive:true,force:true});
+      const marker=path.join(v.root,'fixture-pipe-consumed');
+      const slowGate=path.join(v.root,'fixture-f1-delay-gate');
+      const slowTiming=path.join(v.root,'fixture-f1-delay-timing.jsonl');
+      const latencyProbe=slow ? `
+        const fs=require('fs');const provider=require(${JSON.stringify(path.join(compiled,'state/boot-identity.js'))}).PlatformBootIdentityProvider;
+        const original=provider.prototype.current;let injected=false;
+        provider.prototype.current=async function(...args){
+          const result=await original.apply(this,args);
+          if(!injected){injected=true;const deadline=Date.now()+30000;while(!fs.existsSync(${JSON.stringify(slowGate)})){if(Date.now()>deadline)throw Error('F1 delay gate timed out');await new Promise(r=>setTimeout(r,20));}
+            fs.appendFileSync(${JSON.stringify(slowTiming)},JSON.stringify({event:'delay-start',at:Date.now()})+'\\n');
+            await new Promise(r=>setTimeout(r,65000));
+            fs.appendFileSync(${JSON.stringify(slowTiming)},JSON.stringify({event:'delay-complete',at:Date.now()})+'\\n');
+          }return result;
+        };
+      ` : '';
+      child=spawn(process.execPath,['-e',`${latencyProbe}process.stdin.once('end',()=>require('fs').writeFileSync(${JSON.stringify(marker)},'received'));require(${JSON.stringify(path.join(compiled,'cli.js'))}).main(['continue','--attempt','attempt-real','--root',${JSON.stringify(v.root)}]).catch(e=>{console.error(e.message);process.exitCode=1;});`],{cwd:v.root,windowsHide:true,stdio:['pipe','pipe','pipe']});
+      let output='';child.stdout!.on('data',c=>output+=c);child.stderr!.on('data',c=>output+=c);
+      child.stdin!.end(JSON.stringify({...JSON.parse(v.pipeCapability.toString()),runtime:{NODE_ENV:'production',JWT_SECRET:'synthetic-service-secret',FILESTATION_PORT:String(v.servicePort)}}));
+      const deadline=Date.now()+10000;
+      while(!(await durable.exists(marker))){if(Date.now()>deadline)throw new Error('normal pipe was not consumed');await new Promise(r=>setTimeout(r,20));}
+      await new Promise(r=>setTimeout(r,4000));
+      expect(child.exitCode).toBeNull();expect(child.signalCode).toBeNull();
+      const waiting=await AttemptJournal.inspect(v.root);expect(waiting.phase).toBe('SNAPSHOT_READY');expect(waiting.pending?.action).toBe('close-application');expect(waiting.fence).toBe(1);
+      await v.oldRequest('partial');tailPending=true;
+      await new Promise(resolve=>setTimeout(resolve,250));
+      expect(child.exitCode).toBeNull();
+      await v.oldRequest('restore-tail');tailPending=false;
+      v.old.send('handoff');await exitedWithin(v.old);
+      waitStarted=Date.now();if(slow)await writeFile(slowGate,'old process exited; continuation wait begins');
+      let timer:ReturnType<typeof setTimeout>;
+      try {await Promise.race([exited(child),new Promise<never>((_r,reject)=>{timer=setTimeout(()=>reject(new Error('normal continuation exceeded '+recoveryWorkerBudgetMs+'ms: '+output)),recoveryWorkerBudgetMs);})]);}finally{clearTimeout(timer!);}
+      if(slow){
+        const events=(await readFile(slowTiming,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+        expect(events[0]).toMatchObject({event:'delay-start'});expect(events[0].at).toBeGreaterThanOrEqual(waitStarted);
+        expect(events[1]).toMatchObject({event:'delay-complete'});expect(events[1].at-events[0].at).toBeGreaterThanOrEqual(65_000);
+      }
+      if(child.exitCode!==0){
+        const state=await AttemptJournal.inspect(v.root);
+        // Only fixed categories and journal action/phase are logged; never pipe payloads.
+        const category=/timed out|timeout/i.test(output)?'timeout':/guard/i.test(output)?'guard':/identity|boot|creation/i.test(output)?'identity':/proof|launcher/i.test(output)?'launcher-proof':/journal/i.test(output)?'journal':/port|listen/i.test(output)?'port':'other';
+        throw new Error(`normal continuation exit=${child.exitCode} signal=${child.signalCode} category=${category} phase=${state.phase} pending=${state.pending?.action ?? 'none'} outputBytes=${Buffer.byteLength(output)}`);
+      }
+      expect({code:child.exitCode,output}).toMatchObject({code:0});
+      const done=await AttemptJournal.inspect(v.root);expect(done.phase).toBe('ROLLED_BACK');
+      const handoff=done.records.findIndex(r=>r.kind==='completion' && r.phase==='HANDOFF_READY');
+      const stopped=done.records.findIndex(r=>r.kind==='intent' && r.action==='record-old-stopped');
+      expect(handoff).toBeGreaterThan(-1);expect(stopped).toBeGreaterThan(handoff);
+      expect(await realpath(path.join(v.root,'current'))).toBe(v.previous);
+      expect(await readFile(v.paths.database,'utf8')).toBe('verified-db');
+      const completed=done.records.filter(record=>record.kind==='completion' && record.result && typeof record.result==='object' && !Array.isArray(record.result) && typeof (record.result as any).nonce==='string').at(-1);
+      expect(completed?.result).toMatchObject({version:'0.2.0',health:'ok',pid:expect.any(Number),createdAt:expect.any(String),boot:expect.any(String),nonce:expect.any(String)});
+      const proof=completed!.result as unknown as DetachedIdentity;
+      expect(await identity.isProcessAlive(proof.pid,proof.createdAt)).toBe(true);
+      expect(await identity.listeningPid!(v.servicePort)).toBe(proof.pid);
+    }finally{
+      try {
+        if(child && child.exitCode===null && child.signalCode===null){child.kill('SIGKILL');await exitedWithin(child);}
+        if(tailPending)await v.oldRequest('restore-tail');
+        if(slow){
+          try {
+            const timing=await readFile(path.join(v.root,'fixture-f1-delay-timing.jsonl'),'utf8');
+            console.info('F1 controlled delay evidence: '+JSON.stringify({waitStarted,finishedAt:Date.now(),oldExitCode:v.old.exitCode,childExitCode:child?.exitCode,childSignal:child?.signalCode,timing:timing.trim().split('\n').filter(Boolean).map(line=>JSON.parse(line))}));
+          } catch { /* Timing is diagnostic only; it must never prevent cleanup. */ }
+        }
+      } finally {await v.cleanup();}
+    }
+  }, singleWorkerCaseBudgetMs);
+  it('F1-02 rejected repair contender cannot protect/write or change an in-flight journal tail under the old guard',async()=>{
+    const v=await fixture('SNAPSHOT_READY',undefined,false,true);
+    const file=path.join(v.root,'update-attempt.journal');const before=await readFile(file);
+    let partial=false;
+    try {
+      const result=await v.run(undefined,false,(child,message)=>{void (async()=>{
+        if((message as {event:string}).event==='after-inspect'){await v.oldRequest('partial');partial=true;child.send('tail-published');}
+      })().catch(error=>{child.send({error:String(error)});});});
+      expect(partial).toBe(true);expect(result.code).toBe(1);expect(result.output).toMatch(/guard/);
+      expect(result.output).not.toContain('UNOWNED_MUTATION');
+      expect(await readFile(file)).toEqual(Buffer.concat([before,Buffer.from('{"in-flight":')]));
+    }finally{if(partial)await v.oldRequest('restore-tail');await v.cleanup();}
+  });
+  it.each((['COMMITTED','MIGRATING'] as const).flatMap(phase=>['terminal:ledger-retired','terminal:owner-released','terminal:recovery-released'].map(point=>[phase,point] as const)))('F1-03 recovers %s child identity after %s and proves exit before a fresh version launch',async(phase,point)=>{
+    const v=await fixture(phase,phase==='MIGRATING'?'validate-release':undefined);
+    try {
+      expect(await v.run(point)).toMatchObject({code:73});
+      const state=await AttemptJournal.inspect(v.root);
+      const prior=state.records.filter(r=>r.kind==='completion' && typeof (r.result as any)?.nonce==='string').at(-1)!.result as any;
+      expect(await durable.exists(path.join(v.root,'update.processes.json'))).toBe(false);
+      expect(await identity.isProcessAlive(prior.pid,prior.createdAt)).toBe(true);
+      const result=await v.run();if(result.code!==0)throw new Error(result.output);
+      expect(await identity.isProcessAlive(prior.pid,prior.createdAt)).toBe(false);
+      const after=await AttemptJournal.inspect(v.root);const proof=after.records.at(-1)!.result as any;
+      expect(proof.pid).not.toBe(prior.pid);expect(proof.version).toBe(phase==='COMMITTED'?'0.2.5':'0.2.0');expect(proof.health).toBe('ok');
+      expect(await identity.isProcessAlive(proof.pid,proof.createdAt)).toBe(true);expect(await identity.listeningPid!(v.servicePort)).toBe(proof.pid);
+      expect(await readFile(v.paths.database,'utf8')).toBe(phase==='COMMITTED'?'changed-db':'verified-db');
+    }finally{await v.cleanup();}
+  }, doubleWorkerCaseBudgetMs);
+  it.each(['startup','health','gated-health'])('rolls back an actual failing validation %s with its forward intent pending',async failure=>{
+    const v=await fixture('HANDOFF_READY');
+    try {if(failure==='health')await writeFile(path.join(v.root,'fixture-health-failure'),'fail');if(failure==='gated-health')await writeFile(path.join(v.root,'fixture-gated-failure'),'fail');const result=await v.run(undefined,true);if(result.code!==0)throw new Error(result.output);expect(await realpath(path.join(v.root,'current'))).toBe(v.previous);expect(await readFile(v.paths.database,'utf8')).toBe('verified-db');const state=await AttemptJournal.inspect(v.root);expect(state.records.some(r=>r.kind==='intent' && r.action==='validate-release')).toBe(true);expect(state.pending).toBeNull();}
+    finally{await v.cleanup();}
+  }, singleWorkerCaseBudgetMs);
+  it.each(['verify-committed-restart:intent','terminal:completion'])('recovers an actual committed verification exit at %s with a fresh new-only launcher',async point=>{
+    const v=await fixture('COMMITTED');
+    try {expect(await v.run(point)).toMatchObject({code:73});const before=await AttemptJournal.inspect(v.root);const result=await v.run();if(result.code!==0)throw new Error(result.output);const after=await AttemptJournal.inspect(v.root);expect(after.phase).toBe('COMMITTED');expect(after.pending).toBeNull();expect(await realpath(path.join(v.root,'current'))).toBe(v.next);expect(await readFile(v.paths.database,'utf8')).toBe('changed-db');if(point==='terminal:completion')expect((after.records.at(-1)?.result as any).pid).not.toBe((before.records.at(-1)?.result as any).pid);}
+    finally{await v.cleanup();}
+  }, doubleWorkerCaseBudgetMs);
+  it('recovers an interrupted switch and the previous boot with protected operator authority',async()=>{
+    const v=await fixture('CURRENT_SWITCHED','interrupted-switch',true);
+    try {const result=await v.run();if(result.code!==0)throw new Error(result.output);expect(await realpath(path.join(v.root,'current'))).toBe(v.previous);expect(await readFile(v.paths.database,'utf8')).toBe('verified-db');}
+    finally{await v.cleanup();}
+  }, singleWorkerCaseBudgetMs);
+  it('does not retry unrelated journal inspection errors',async()=>{
+    const root=path.resolve(tmpdir(),'unrelated-journal-poll');
+    for(const error of [
+      Object.assign(new Error('denied'),{code:'EACCES',syscall:'open',path:path.join(root,'update-attempt.journal')}),
+      Object.assign(new Error('other file busy'),{code:'EBUSY',syscall:'open',path:path.join(root,'other-file')}),
+      Object.assign(new Error('busy read'),{code:'EBUSY',syscall:'read',path:path.join(root,'update-attempt.journal')}),
+      new Error('partial journal tail requires exclusive recovery'),
+    ]){
+      const inspect=jest.fn().mockRejectedValue(error);
+      await expect(waitForVerificationIntent(root,1_000,inspect)).rejects.toBe(error);
+      expect(inspect).toHaveBeenCalledTimes(1);
+    }
+  });
+  it('strictly observes the verification intent after a real exclusive append releases',async()=>{
+    const v=await fixture('COMMITTED');
+    let unblock:()=>void=()=>{};
+    let entered!:()=>void;
+    const held=new Promise<void>(resolve=>{entered=resolve;});
+    class HoldFlush extends NodeDurableFileSystem {
+      armed=false;
+      protected override async flushFile(filename:string,flush:()=>Promise<void>):Promise<void>{
+        if(this.armed){entered();await new Promise<void>(resolve=>{unblock=resolve;});}
+        await super.flushFile(filename,flush);
+      }
+    }
+    const fs=new HoldFlush();let writing:Promise<unknown>|undefined;let timer:ReturnType<typeof setTimeout>|undefined;
+    try {
+      const journal=await AttemptJournal.open(v.root,{fs});fs.armed=true;
+      writing=journal.appendIntent({attemptId:'attempt-real',fence:v.fence,action:'verify-committed-restart',phase:'COMMITTED',payload:{version:'0.2.5',release:v.next}});
+      await waitForHeldAppend(held,writing,30_000);
+      if(process.platform==='win32')await expect(AttemptJournal.inspect(v.root)).rejects.toMatchObject({code:'EBUSY'});
+      if(process.platform==='win32')await expect(waitForVerificationIntent(v.root,150)).rejects.toThrow('verification intent absent');
+      timer=setTimeout(()=>unblock(),350);
+      await waitForVerificationIntent(v.root,5_000);
+      await writing;
+      expect((await AttemptJournal.inspect(v.root)).pending?.action).toBe('verify-committed-restart');
+    } finally {try {if(timer)clearTimeout(timer);unblock();if(writing)await writing;} finally {await v.cleanup();}}
+  }, singleWorkerCaseBudgetMs);
+  it('bounds and propagates an append failure before the flush rendezvous',async()=>{
+    const failure=new Error('append failed before flush');
+    await expect(waitForHeldAppend(new Promise<void>(()=>{}),Promise.reject(failure),1_000)).rejects.toBe(failure);
+    await expect(waitForHeldAppend(new Promise<void>(()=>{}),Promise.resolve(),1_000)).rejects.toThrow('append completed before flush was held');
+    await expect(waitForHeldAppend(new Promise<void>(()=>{}),new Promise<void>(()=>{}),50)).rejects.toThrow('append flush rendezvous timed out');
+  });
+  it('production handoff strictly re-reads after a real exclusive append releases',async()=>{
+    const v=await fixture('SNAPSHOT_READY');
+    let unblock:()=>void=()=>{};let entered!:()=>void;
+    const held=new Promise<void>(resolve=>{entered=resolve;});
+    class HoldFlush extends NodeDurableFileSystem {
+      armed=false;
+      protected override async flushFile(filename:string,flush:()=>Promise<void>):Promise<void>{
+        if(this.armed){entered();await new Promise<void>(resolve=>{unblock=resolve;});}
+        await super.flushFile(filename,flush);
+      }
+    }
+    const fs=new HoldFlush();let writing:Promise<unknown>|undefined;let timer:ReturnType<typeof setTimeout>|undefined;
+    try {
+      const journal=await AttemptJournal.open(v.root,{fs});
+      const intent=await journal.appendIntent({attemptId:'attempt-real',fence:v.fence,action:'close-application',phase:'SNAPSHOT_READY'});
+      fs.armed=true;
+      writing=journal.appendCompletion({attemptId:'attempt-real',fence:v.fence,intentId:intent.id,phase:'HANDOFF_READY'});
+      await waitForHeldAppend(held,writing,30_000);
+      if(process.platform==='win32')await expect(AttemptJournal.inspect(v.root)).rejects.toMatchObject({code:'EBUSY',syscall:'open'});
+      const hooks=new ManagedUpdateHooks('fixture-handoff');
+      if(process.platform==='win32')await expect(hooks.waitForHandoff({attemptId:'attempt-real',installRoot:v.root,handoffIdentity:'fixture-handoff',timeoutMs:150})).rejects.toThrow('timed out waiting for verified HANDOFF_READY');
+      timer=setTimeout(()=>unblock(),500);
+      const state=await hooks.waitForHandoff({attemptId:'attempt-real',installRoot:v.root,handoffIdentity:'fixture-handoff',timeoutMs:120_000});
+      await writing;
+      expect(state).toMatchObject({attemptId:'attempt-real',phase:'HANDOFF_READY',pending:null});
+      expect(await identity.isProcessAlive(state.owner!.pid,state.owner!.processCreatedAt)).toBe(false);
+      expect(state.owner!.bootIdentity).toBe((await identity.current()).value);
+    } finally {try {if(timer)clearTimeout(timer);unblock();if(writing)await writing;} finally {await v.cleanup();}}
+  }, singleWorkerCaseBudgetMs);
+  it('holds the OS exclusion through committed startup verification',async()=>{
+    const v=await fixture('COMMITTED');const pause=path.join(v.root,'fixture-startup-pause');
+    await writeFile(pause,'pause');
+    const running=v.run();
+    try {
+      // Intent follows real boot/creation/liveness checks; bound this wait by
+      // the existing whole-worker limit, not one short native-query duration.
+      await waitForVerificationIntent(v.root,recoveryWorkerBudgetMs);
+      const {acquireRecoveryGuard}=await import('../platform/recovery-guard');
+      await expect(acquireRecoveryGuard(path.join(v.root,'update.recovery.guard'))).rejects.toThrow();
+      await rm(pause);const result=await running;if(result.code!==0)throw new Error(result.output);
+    }finally{try {await rm(pause,{force:true});await running;} finally {await v.cleanup();}}
+  }, singleWorkerCaseBudgetMs);
+  it.each(['rollback-plan:intent','rollback-database:intent','restore:publication','select-previous:intent',...(process.platform==='win32'?['previous:detach']:[]),'previous:attach','complete-rollback:intent','launch-terminal:intent'])('recovers an actual updater exit at %s',async point=>{
+    const v=await fixture('MIGRATING','validate-release');
+    try {
+      expect(await v.run(point)).toMatchObject({code:73});
+      const result=await v.run();if(result.code!==0)throw new Error(result.output);
+      expect(await realpath(path.join(v.root,'current'))).toBe(v.previous);
+      expect(await readFile(v.paths.database,'utf8')).toBe('verified-db');
+      expect((await AttemptJournal.inspect(v.root)).pending).toBeNull();
+    }finally{await v.cleanup();}
+  }, doubleWorkerCaseBudgetMs);
+  it.each(['PREPARED','MAINTENANCE','SNAPSHOT_READY','OLD_STOPPED','CURRENT_SWITCHED','MIGRATING','MIGRATED_VERIFIED','READY_TO_COMMIT','ROLLBACK_INTENT'] as const)('recovers initial %s with real links, journal and child launch',async phase=>{
+    const v=await fixture(phase,phase==='MIGRATING'?'validate-release':undefined);
+    try {
+      const result=await v.run();if(result.code!==0)throw new Error(result.output);
+      expect(result.output).toContain('rolled_back');
+      expect(await realpath(path.join(v.root,'current'))).toBe(v.previous);
+      expect(await readFile(v.paths.database,'utf8')).toBe(['PREPARED','MAINTENANCE','SNAPSHOT_READY'].includes(phase)?'changed-db':'verified-db');
+      expect((await AttemptJournal.inspect(v.root)).pending).toBeNull();
+      try {const response=await fetch(`http://127.0.0.1:${v.servicePort}`);expect(await response.json()).toEqual({version:'0.2.0'});}
+      catch(error){let detail='';for(const file of ['fixture-launch-error.txt','fixture-launch-exit.txt'])try{detail+=file+':'+await readFile(path.join(v.root,file),'utf8');}catch{}const last=(await AttemptJournal.inspect(v.root)).records.at(-1)?.result as any;detail+=' processAlive='+await identity.isProcessAlive(last.pid,last.createdAt);detail+=' portOwner='+await identity.listeningPid!(v.servicePort);throw new Error(String(error)+' cause='+String((error as any).cause)+' '+detail);}
+    } finally {await v.cleanup();}
+  }, singleWorkerCaseBudgetMs);
+  it.each(['verify-committed-restart','commit-update'])('resumes pending COMMITTED %s through a fresh stable launcher, preserving new DB',async action=>{
+    const v=await fixture('COMMITTED',action);
+    try {
+      const result=await v.run();if(result.code!==0)throw new Error(result.output);
+      expect(await realpath(path.join(v.root,'current'))).toBe(v.next);
+      expect(await readFile(v.paths.database,'utf8')).toBe('changed-db');
+      const state=await AttemptJournal.inspect(v.root);
+      expect(state.phase).toBe('COMMITTED');expect(state.pending).toBeNull();
+      expect(state.records.at(-1)?.result).toMatchObject({health:'ok',version:'0.2.5',pid:expect.any(Number),createdAt:expect.any(String),nonce:expect.any(String)});
+    }finally{await v.cleanup();}
+  }, singleWorkerCaseBudgetMs);
+  it('refuses an unrelated HTTP 200 listener as committed restart proof',async()=>{
+    const v=await fixture('COMMITTED');const http=await import('node:http');
+    const listener=http.createServer((_q,s)=>s.end('{}'));
+    await new Promise<void>(r=>listener.listen(v.servicePort,'127.0.0.1',r));
+    try {const result=await v.run(undefined,false,undefined,false);expect(result.code).toBe(1);expect(result.output).toMatch(/occupied|port/);const state=await AttemptJournal.inspect(v.root);expect(state.records.some(r=>r.kind==='completion' && typeof (r.result as any)?.nonce==='string')).toBe(false);}
+    finally {await new Promise<void>(r=>listener.close(()=>r()));await v.cleanup();}
+  });
+});

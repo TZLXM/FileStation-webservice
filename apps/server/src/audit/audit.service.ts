@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Cron } from '@nestjs/schedule';
 import { LessThan, Repository } from 'typeorm';
@@ -6,6 +6,14 @@ import { isIPv4, isIPv6 } from 'net';
 import { v4 as uuidv4 } from 'uuid';
 import { AuditLogEntry, PaginatedResponse } from '@filestation/shared';
 import { AuditLog } from './entities/audit-log.entity';
+import {
+  MaintenanceUnavailableError,
+  WriteBarrierService,
+} from '../maintenance/write-barrier.service';
+import {
+  WriteFreezeService,
+  WriteFrozenError,
+} from '../maintenance/write-freeze.service';
 
 export interface AuditEntry {
   accountId: string | null;
@@ -35,6 +43,14 @@ export const AuditAction = {
   AUTH_TOTP_FAILED: 'auth.totp_failed',
   RECOVERY_GENERATED: 'recovery.generated',
   RECOVERY_USED: 'recovery.used',
+  UPDATE_CHECKED: 'update.checked',
+  UPDATE_PREPARED: 'update.prepared',
+  UPDATE_CONFIRMED: 'update.confirmed',
+  UPDATE_CONFIRM_FAILED: 'update.confirm_failed',
+  UPDATE_MAINTENANCE: 'update.maintenance',
+  UPDATE_FAILED: 'update.failed',
+  UPDATE_ROLLBACK: 'update.rollback',
+  UPDATE_SUCCEEDED: 'update.succeeded',
 } as const;
 
 const RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
@@ -46,22 +62,36 @@ export class AuditService {
   constructor(
     @InjectRepository(AuditLog)
     private readonly auditRepository: Repository<AuditLog>,
+    @Optional()
+    private readonly writeBarrier?: WriteBarrierService,
+    @Optional()
+    private readonly writeFreeze?: WriteFreezeService,
+    @Optional()
+    private readonly now: () => number = Date.now,
   ) {}
 
   /** Audit persistence must never change the outcome of a business operation. */
   async record(entry: AuditEntry): Promise<void> {
     try {
-      await this.auditRepository.save({
-        id: uuidv4(),
-        accountId: entry.accountId,
-        action: entry.action,
-        resourceType: entry.resourceType ?? null,
-        resourceId: entry.resourceId ?? null,
-        details: entry.details ? JSON.stringify(entry.details) : null,
-        ipAddress: entry.ip ? this.anonymizeIp(entry.ip) : null,
-        userAgent: entry.userAgent ? entry.userAgent.slice(0, 256) : null,
-        createdAt: Date.now(),
-      });
+      const persist = async () => {
+        this.writeFreeze?.assertWritable();
+        await this.auditRepository.save({
+          id: uuidv4(),
+          accountId: entry.accountId,
+          action: entry.action,
+          resourceType: entry.resourceType ?? null,
+          resourceId: entry.resourceId ?? null,
+          details: entry.details ? JSON.stringify(entry.details) : null,
+          ipAddress: entry.ip ? this.anonymizeIp(entry.ip) : null,
+          userAgent: entry.userAgent ? entry.userAgent.slice(0, 256) : null,
+          createdAt: this.now(),
+        });
+      };
+      if (this.writeBarrier) {
+        await this.writeBarrier.withLease('audit', persist);
+      } else {
+        await persist();
+      }
     } catch {
       // Keep the warning generic so an unexpected payload cannot leak into application logs.
       try {
@@ -91,8 +121,27 @@ export class AuditService {
 
   @Cron('0 4 * * *')
   async purgeExpired(): Promise<number> {
-    const result = await this.auditRepository.delete({ createdAt: LessThan(Date.now() - RETENTION_MS) });
-    return result.affected ?? 0;
+    const cutoff = this.now() - RETENTION_MS;
+    const purge = async () => {
+      this.writeFreeze?.assertWritable();
+      const result = await this.auditRepository.delete({
+        createdAt: LessThan(cutoff),
+      });
+      return result.affected ?? 0;
+    };
+    try {
+      return this.writeBarrier
+        ? await this.writeBarrier.withLease('cron:audit-purge', purge)
+        : await purge();
+    } catch (error) {
+      if (
+        error instanceof MaintenanceUnavailableError ||
+        error instanceof WriteFrozenError
+      ) {
+        return 0;
+      }
+      throw error;
+    }
   }
 
   private anonymizeIp(ip: string): string {

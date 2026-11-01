@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "version": "0.2.5",
+  "candidate": {
+    "sourceCommit": null,
+    "runId": null,
+    "platformDigests": {
+      "linux-x64": null,
+      "windows-x64": null
+    }
+  },
+  "manual": {
+    "viewport375px": {
+      "status": "pending",
+      "reference": null
+    },
+    "totpRecovery": {
+      "status": "pending",
+      "reference": null
+    },
+    "resumeAfterRefresh": {
+      "status": "pending",
+      "reference": null
+    }
+  },
+  "updateSystem": {
+    "bootstrap": {
+      "linuxX64": {
+        "status": "pending",
+        "reference": null
+      },
+      "windowsX64": {
+        "status": "pending",
+        "reference": null
+      }
+    },
+    "confirmedUpdate": {
+      "linuxX64": {
+        "status": "pending",
+        "reference": null
+      },
+      "windowsX64": {
+        "status": "pending",
+        "reference": null
+      }
+    },
+    "rollbackBeforeCommit": {
+      "linuxX64": {
+        "status": "pending",
+        "reference": null
+      },
+      "windowsX64": {
+        "status": "pending",
+        "reference": null
+      }
+    },
+    "docker": {
+      "selfUpdateRefused": {
+        "status": "pending",
+        "reference": null
+      }
+    },
+    "nginx": {
+      "root": {
+        "status": "pending",
+        "reference": null
+      },
+      "fsPrefix": {
+        "status": "pending",
+        "reference": null
+      }
+    }
+  },
+  "knownRisks": [
+    "The release-candidate workflow and both platform artifacts have not yet been produced for the final candidate commit.",
+    "Real Windows and Linux bootstrap, confirmed update, pre-COMMITTED rollback, Docker refusal, and Nginx root/subpath acceptance remain pending.",
+    "Fresh 2026-10-28 registry audits exited nonzero: full is 4 Critical / 7 High / 25 Moderate / 9 Low; production is 1 Critical / 5 High / 19 Moderate. Critical/High disposition is required before publication.",
+    "The publisher public key is UNCONFIGURED, so signing and publication must fail closed."
+  ],
+  "notes": "Intentionally pending. Do not tag, sign, or publish v0.2.5 until the exact candidate run and every real acceptance check are recorded and the release gate exits zero."
+}

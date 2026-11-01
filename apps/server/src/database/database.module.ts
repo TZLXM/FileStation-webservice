@@ -4,6 +4,50 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
 import { promises as fs } from 'fs';
 import { dirname } from 'path';
+import { AdminAccount } from '../accounts/entities/admin-account.entity';
+import { ApiToken } from '../api-tokens/entities/api-token.entity';
+import { AuditLog } from '../audit/entities/audit-log.entity';
+import { Authenticator } from '../auth/entities/authenticator.entity';
+import { LoginChallenge } from '../auth/entities/login-challenge.entity';
+import { RecoveryCode } from '../auth/entities/recovery-code.entity';
+import { Session } from '../auth/entities/session.entity';
+import { SystemMeta } from '../auth/entities/system-meta.entity';
+import { File } from '../files/entities/file.entity';
+import { UploadPart } from '../files/entities/upload-part.entity';
+import { UploadSession } from '../files/entities/upload-session.entity';
+import { Folder } from '../folders/entities/folder.entity';
+import { Setting } from '../settings/entities/setting.entity';
+import { DownloadSession } from '../shares/entities/download-session.entity';
+import { DownloadTicket } from '../shares/entities/download-ticket.entity';
+import { Share } from '../shares/entities/share.entity';
+import { InitialSchema1700000000000 } from './migrations/1700000000000-initial-schema';
+import { OneTotpAuthenticatorPerAccount1700000000001 } from './migrations/1700000000001-one-totp-authenticator-per-account';
+import { UpdateAuditIdempotency1800000000000 } from './migrations/1800000000000-update-audit-idempotency';
+
+const entities = [
+  AdminAccount,
+  ApiToken,
+  Authenticator,
+  AuditLog,
+  DownloadSession,
+  DownloadTicket,
+  File,
+  Folder,
+  LoginChallenge,
+  RecoveryCode,
+  Session,
+  Setting,
+  Share,
+  SystemMeta,
+  UploadPart,
+  UploadSession,
+];
+
+const migrations = [
+  InitialSchema1700000000000,
+  OneTotpAuthenticatorPerAccount1700000000001,
+  UpdateAuditIdempotency1800000000000,
+];
 
 @Injectable()
 export class DatabaseInitializer implements OnApplicationBootstrap {
@@ -44,8 +88,8 @@ export class DatabaseInitializer implements OnApplicationBootstrap {
         return {
           type: 'sqlite',
           database: dbPath,
-          entities: [__dirname + '/../**/*.entity{.ts,.js}'],
-          migrations: [__dirname + '/migrations/*{.ts,.js}'],
+          entities,
+          migrations,
           migrationsRun: true,
           synchronize: false,
           logging: configService.get<string>('app.nodeEnv') === 'development',

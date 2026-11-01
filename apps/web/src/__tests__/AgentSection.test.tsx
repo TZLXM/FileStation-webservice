@@ -21,7 +21,10 @@ describe('AgentSection', () => {
     mockedApi.put.mockResolvedValue({ data: {} } as never);
   });
 
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllEnvs();
+  });
 
   it('saves the MCP settings using the server DTO limits and refreshes its parent', async () => {
     const onSaved = vi.fn();
@@ -43,6 +46,13 @@ describe('AgentSection', () => {
 
     expect(screen.getByLabelText('启用 MCP 端点')).toBeChecked();
     expect(screen.getByLabelText('MCP 单文件大小上限（MB）')).toHaveValue(64);
+  });
+
+  it('shows the MCP endpoint under the deployment base', async () => {
+    vi.stubEnv('BASE_URL', '/fs/');
+    render(<AgentSection agent={initialAgent} onSaved={vi.fn()} />);
+
+    expect(await screen.findByText(`${window.location.origin}/fs/api/v1/mcp`)).toBeInTheDocument();
   });
 
   it('rejects values outside the server range and presents save errors', async () => {

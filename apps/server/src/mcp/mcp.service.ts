@@ -108,9 +108,8 @@ export class McpService {
     const text = (value: unknown) => ({
       content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }],
     });
-    // SDK 1.30's compatibility overload unions Zod 3 and Zod 4 schemas and can
-    // exceed TypeScript's instantiation depth for ordinary Zod 3 raw shapes.
-    // Keep handler inference on the pinned Zod 3 types and invoke the same tool API.
+    // Invoke the SDK's overloaded registration API without making its broad
+    // schema union drive handler inference for this local raw-shape map.
     const registerTool = <Schema extends McpToolSchema>(
       name: string,
       description: string,

@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,6 +20,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
@@ -30,14 +32,78 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Release gate tests
+        run: node --test scripts/ci/verify-release-gate.test.mjs
+
+      - name: Release tool tests
+        run: node --test scripts/release/release-tools.test.mjs scripts/release/resolve-candidate.test.mjs
+
+      - name: Build server updater prerequisites
+        run: |
+          npm run build:shared
+          npm run build --workspace=@filestation/update-core
+          npm run build --workspace=@filestation/updater
+          npm run build --workspace=@filestation/server
+
+      - name: Server unit tests
+        run: npm test --workspace=@filestation/server -- --runInBand
+
+      - name: Server E2E tests
+        run: npm run test:e2e --workspace=@filestation/server
+
+      - name: Web unit tests
+        working-directory: apps/web
+        run: npx --no-install vitest run --no-cache
+
       - name: Type check
         run: npm run typecheck
 
-      - name: Lint
-        run: npm run lint
-
-      - name: Test
-        run: npm test
-
       - name: Build
         run: npm run build
+
+      - name: Check diff whitespace
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${PR_BASE_SHA}" ]]; then
+            merge_base="$(git merge-base "${PR_BASE_SHA}" HEAD)"
+            git diff --check "${merge_base}...HEAD"
+          else
+            git diff --check
+          fi
+
+  update-platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build runtime prerequisites
+        run: |
+          npm run build:shared
+          npm run build --workspace=@filestation/update-core
+          npm run build --workspace=@filestation/updater
+
+      - name: Updater lock link crash and capability suites
+        run: npm test --workspace=@filestation/updater -- --runInBand src/update src/state/update-lock.spec.ts src/platform/current-link.spec.ts
+
+      - name: Internal update protocol unit tests
+        run: npm test --workspace=@filestation/server -- --runInBand updates/internal-update.controller.spec.ts updates/update-audit-reconciler.spec.ts
+
+      - name: Internal update protocol and Nginx fixtures
+        run: npm run test:e2e --workspace=@filestation/server -- internal-update.e2e-spec.ts nginx-update-deny.e2e-spec.ts

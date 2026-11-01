@@ -1,4 +1,4 @@
-import { Test, TestingModule } from '@nestjs/testing';
+import { Test, TestingModule, TestingModuleBuilder } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import cookieParser from 'cookie-parser';
@@ -9,6 +9,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { createHash } from 'crypto';
 import { AppModule } from '../src/app.module';
 import { AuthService } from '../src/auth/auth.service';
+import { FileLifecycleService } from '../src/files/file-lifecycle.service';
+import { StorageService } from '../src/files/storage.service';
 import { RangeNotSatisfiableFilter } from '../src/common/http/range-not-satisfiable.filter';
 import { setupSwagger } from '../src/common/swagger/setup-swagger';
 
@@ -34,8 +36,12 @@ export async function teardownEnv(env: TestEnv): Promise<void> {
   await rm(env.dir, { recursive: true, force: true });
 }
 
-export async function createApp(configure?: (app: INestApplication) => void): Promise<INestApplication> {
-  const moduleFixture: TestingModule = await Test.createTestingModule({ imports: [AppModule] }).compile();
+export async function createApp(
+  configure?: (app: INestApplication) => void,
+  configureModule?: (builder: TestingModuleBuilder) => TestingModuleBuilder,
+): Promise<INestApplication> {
+  const builder = Test.createTestingModule({ imports: [AppModule] });
+  const moduleFixture: TestingModule = await (configureModule?.(builder) ?? builder).compile();
   const app = moduleFixture.createNestApplication();
   app.use(cookieParser());
   app.setGlobalPrefix('api/v1');
@@ -44,6 +50,8 @@ export async function createApp(configure?: (app: INestApplication) => void): Pr
   app.useGlobalFilters(new RangeNotSatisfiableFilter());
   configure?.(app);
   await app.init();
+  await app.get(StorageService).activate();
+  await app.get(FileLifecycleService).activate();
   return app;
 }
 
