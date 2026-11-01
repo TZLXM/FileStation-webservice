@@ -23,6 +23,7 @@ import { Share } from '../shares/entities/share.entity';
 import { InitialSchema1700000000000 } from './migrations/1700000000000-initial-schema';
 import { OneTotpAuthenticatorPerAccount1700000000001 } from './migrations/1700000000001-one-totp-authenticator-per-account';
 import { UpdateAuditIdempotency1800000000000 } from './migrations/1800000000000-update-audit-idempotency';
+import { SessionRefreshRotation1800000000001 } from './migrations/1800000000001-session-refresh-rotation';
 
 const entities = [
   AdminAccount,
@@ -47,6 +48,7 @@ const migrations = [
   InitialSchema1700000000000,
   OneTotpAuthenticatorPerAccount1700000000001,
   UpdateAuditIdempotency1800000000000,
+  SessionRefreshRotation1800000000001,
 ];
 
 @Injectable()

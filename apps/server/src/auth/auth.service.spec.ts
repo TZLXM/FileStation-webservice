@@ -260,26 +260,37 @@ describe('AuthService', () => {
   });
 
   describe('refreshToken', () => {
-    it('should include username in result', async () => {
-      // update builder mock（原子抢占）
-      const executeMock = jest.fn().mockResolvedValue({ affected: 1 });
-      const builderMock = {
-        update: jest.fn().mockReturnThis(),
-        set: jest.fn().mockReturnThis(),
-        where: jest.fn().mockReturnThis(),
-        andWhere: jest.fn().mockReturnThis(),
-        execute: executeMock,
-      };
-      mockQueryRunner.manager.createQueryBuilder.mockReturnValue(builderMock);
-      mockQueryRunner.manager.findOne.mockResolvedValue({ accountId: 'acc-1' });
+    it('rotates the refresh hash in the same session and includes its sid', async () => {
+      mockQueryRunner.query.mockImplementation(async (sql: string) => {
+        if (sql.startsWith('SELECT id, account_id FROM sessions')) {
+          return [{ id: 'session-1', account_id: 'acc-1' }];
+        }
+        if (sql.startsWith('UPDATE sessions')) {
+          return { changes: 1 };
+        }
+        return [];
+      });
       mockAccountsService.findById.mockResolvedValue({ id: 'acc-1', username: 'admin' });
-      mockQueryRunner.manager.create.mockImplementation((_e, x) => x);
-      mockQueryRunner.manager.save.mockResolvedValue({});
       mockJwtService.sign.mockReturnValue('new-access');
 
       const result = await service.refreshToken('refresh-token');
       expect(result.username).toBe('admin');
       expect(result.accessToken).toBe('new-access');
+      expect(mockJwtService.sign).toHaveBeenCalledWith(expect.objectContaining({
+        sub: 'acc-1',
+        principal_type: 'admin',
+        sid: 'session-1',
+      }));
+      expect(mockQueryRunner.query).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE sessions'),
+        expect.arrayContaining(['session-1', 'acc-1']),
+        true,
+      );
+      expect(mockQueryRunner.query).toHaveBeenCalledWith(
+        expect.stringContaining('refresh_family_hash'),
+        expect.any(Array),
+        true,
+      );
     });
   });
 

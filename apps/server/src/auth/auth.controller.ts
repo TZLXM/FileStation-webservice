@@ -247,17 +247,19 @@ export class AuthController {
     };
   }
 
-  // v1.6：移除 @UseGuards(JwtAuthGuard)——access token 过期时前端必须能调 logout 清 cookie。
-  // logout 只依赖 refresh_token cookie 吊销会话，无 cookie 时为幂等 no-op。
+  // Access JWT 过期时仍必须能清 cookie；若提供了有效签名，同时按稳定 sid
+  // 吊销 session，以覆盖 refresh/logout 竞争。
   @Post('logout')
   @HttpCode(HttpStatus.OK)
   async logout(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
+    @Headers('authorization') authorization?: string,
   ): Promise<ApiResponse<null>> {
     const refreshToken = req.cookies[REFRESH_COOKIE];
-    if (refreshToken) {
-      await this.authService.logout(refreshToken);
+    const bearer = authorization?.match(/^Bearer[ \t]+(\S+)$/i);
+    if (refreshToken || bearer) {
+      await this.authService.logout(refreshToken, bearer?.[1]);
     }
 
     res.clearCookie(REFRESH_COOKIE);

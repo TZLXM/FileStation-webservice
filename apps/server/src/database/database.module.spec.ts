@@ -22,6 +22,7 @@ import { Share } from '../shares/entities/share.entity';
 import { InitialSchema1700000000000 } from './migrations/1700000000000-initial-schema';
 import { OneTotpAuthenticatorPerAccount1700000000001 } from './migrations/1700000000001-one-totp-authenticator-per-account';
 import { UpdateAuditIdempotency1800000000000 } from './migrations/1800000000000-update-audit-idempotency';
+import { SessionRefreshRotation1800000000001 } from './migrations/1800000000001-session-refresh-rotation';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { v4 as uuidv4 } from 'uuid';
@@ -104,11 +105,13 @@ describe('DatabaseModule', () => {
       InitialSchema1700000000000,
       OneTotpAuthenticatorPerAccount1700000000001,
       UpdateAuditIdempotency1800000000000,
+      SessionRefreshRotation1800000000001,
     ]);
     expect(dataSource.migrations.map((migration) => migration.name)).toEqual([
       'InitialSchema1700000000000',
       'OneTotpAuthenticatorPerAccount1700000000001',
       'UpdateAuditIdempotency1800000000000',
+      'SessionRefreshRotation1800000000001',
     ]);
   });
 
@@ -144,6 +147,7 @@ describe('DatabaseModule', () => {
           'InitialSchema1700000000000',
           'OneTotpAuthenticatorPerAccount1700000000001',
           'UpdateAuditIdempotency1800000000000',
+          'SessionRefreshRotation1800000000001',
         ],
       });
     },
@@ -192,6 +196,18 @@ describe('DatabaseModule', () => {
     expect(names).toContain('verify_lease_until');
     expect(names).toContain('verify_heartbeat_at');
     expect(names).toContain('target_folder_id');
+  });
+
+  it('should store a bounded refresh family and legacy compatibility hash', async () => {
+    const cols = await dataSource.query(`PRAGMA table_info(sessions)`);
+    const names = cols.map((column: any) => column.name);
+    expect(names).toContain('refresh_family_hash');
+    expect(names).toContain('pre_family_refresh_token_hash');
+    const indexes = await dataSource.query(
+      `SELECT name FROM sqlite_master
+       WHERE type = 'index' AND name = 'idx_sessions_pre_family_refresh_token_hash'`,
+    );
+    expect(indexes).toHaveLength(1);
   });
 
   it('allows at most one TOTP authenticator per account without restricting WebAuthn rows', async () => {

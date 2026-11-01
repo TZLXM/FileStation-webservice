@@ -435,7 +435,16 @@ export default function FileUpload({ onUploadComplete, folderId }: {
   return (
     <div className="space-y-4">
       {storageWarning && <p role="alert" className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">{storageWarning}</p>}
-      {feedback && <p role={feedback.role} aria-live={feedback.role === 'alert' ? 'assertive' : 'polite'} className="text-sm">{feedback.text}</p>}
+      {feedback && (
+        <p
+          role={feedback.role}
+          aria-live={feedback.role === 'alert' ? 'assertive' : 'polite'}
+          className="text-sm"
+          style={{ maxWidth: '100%', overflowWrap: 'anywhere' }}
+        >
+          {feedback.text}
+        </p>
+      )}
 
       {resumables.length > 0 && (
         <section role="region" aria-label="待续传上传" className="rounded-lg border border-amber-200 bg-amber-50 p-3 sm:p-4">

@@ -1,4 +1,4 @@
-# FileStation 文件传输站 - 设计文档 v2.3
+# FileStation 文件传输站 - 设计文档 v2.4
 
 ## 1. 项目概述
 
@@ -29,7 +29,7 @@
 
 **v2.3 实现状态说明：** v2.2 是历史设计基线；Phase 2 已实现细节、当前端点/限制和部署残余风险以第 10 节、`docs/CURRENT-STATE.md` 与代码/测试为准。旧版示例中未在第 10 节标为已实现的能力仍属设计或后续路线图，不可据此推断已上线。
 
-**版本历史：** v2.3（2026-09-26）补充 Phase 2 as-built 契约、实际部署模式、审计/Agent/认证/上传安全参数，以及尚未完成的用户验收边界。
+**版本历史：** v2.4（2026-11-02）将管理员 access JWT 绑定到数据库 session，恢复码、登出和刷新轮换统一使用稳定 `sid`；v2.3（2026-09-26）补充 Phase 2 as-built 契约、实际部署模式、审计/Agent/认证/上传安全参数，以及尚未完成的用户验收边界。
 
 ---
 
@@ -170,12 +170,17 @@ CREATE TABLE sessions (
     id TEXT PRIMARY KEY,
     account_id TEXT NOT NULL REFERENCES admin_accounts(id),
     refresh_token_hash TEXT NOT NULL,
+    refresh_family_hash TEXT,
+    pre_family_refresh_token_hash TEXT,
     device_info TEXT,
     created_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
     revoked_at INTEGER,
     UNIQUE(refresh_token_hash)
 );
+
+CREATE INDEX idx_sessions_pre_family_refresh_token_hash
+ON sessions(pre_family_refresh_token_hash);
 
 CREATE TABLE recovery_codes (
     id TEXT PRIMARY KEY,
@@ -670,8 +675,16 @@ POST /api/v1/auth/login/totp
 成功响应通过 Set-Cookie 设置 refresh_token（HttpOnly、SameSite=Strict、生产环境 Secure，7 天）。
 
 POST /api/v1/auth/refresh
-从 HttpOnly refresh_token Cookie 读取并轮换会话凭据；响应体返回新的 access_token、expires_in、username，刷新凭据仍通过 Set-Cookie 返回。
+从 HttpOnly refresh_token Cookie 读取并在原 session 行上轮换 refresh 哈希；session id 和 refresh token family 保持稳定，响应体返回带同一 `sid` 的新 access_token、expires_in、username，刷新凭据仍通过 Set-Cookie 返回。
 ```
+
+管理员 access JWT 必须包含 `principal_type: admin`、`sub` 与数据库 `sessions.id` 对应的 `sid`。每个受保护请求都重新检查该 session 存在、`sessions.account_id = sub`、未撤销且未过期；恢复码成功、登出或其它会话吊销在提交后立即使该 access JWT 失效，不等待 JWT 自身到期。刷新只在同一 session 行轮换 `refresh_token_hash` 并续期 session，因此轮换前已签发的 access JWT 仍可在该 session 有效期内使用；并发刷新只有一个请求能命中旧哈希。登出同时使用 refresh Cookie 和可选的有效签名 access JWT，以稳定 `sid` 关闭 refresh/logout 竞争窗口。
+
+新格式 refresh token 为 `fs_rt_1.<sid>.<family-secret>.<rotation-secret>`，family secret 与 rotation secret 均为 256 bit。数据库只保存完整 token 哈希和稳定 family 哈希；每次 refresh 只接受当前完整 token，因此 R0 在 R1 产生后不能再次刷新，但持有同一 family 的任意在途旧 Cookie 仍可按 `sid + family` 登出并撤销当前 R2/Rn session。登出与 refresh 使用同一 SQLite 即时事务队列。预升级 UUID refresh Cookie 没有 family，首次成功轮换时每个 session 至多保留一个 `pre_family_refresh_token_hash` 作为有界兼容关联；它同样只能用于撤销，不能再刷新。该设计不保存无界历史 token。
+
+升级前签发、没有 `sid` 的管理员 JWT 无法安全关联具体 session，受保护 API 返回 `401 REAUTH_REQUIRED`。Web 当前不会在受保护请求收到该 401 后自动 refresh/重试；用户需整页刷新，使应用启动时的 `checkAuth` 凭仍有效的 HttpOnly refresh Cookie 调用 `/auth/refresh` 获得带 `sid` 的新 access JWT。refresh 已失效时需要重新登录。
+
+管理员 session 绑定只影响 `principal_type: admin` 的 access JWT。已创建的 API Token 继续按其自身 scope、撤销与到期状态工作；上传 token 继续按上传 session 有效期与 owner 规则工作。认证已完成的在途请求不会被追溯取消，绑定和恢复撤销作用于后续认证检查。
 
 单管理员模式下，`totp_required` 不是选择“是否对登录追加二次验证”的开关：只要账户存在 active TOTP，密码登录就总是要求 TOTP challenge。该设置只约束策略状态——开启前必须已有 active TOTP；开启后禁止移除 TOTP，须先关闭该要求。
 
@@ -949,7 +962,7 @@ MCP 实际工具、权限 scope 和 body/上传上限见第 10.2 节；不要将
 
 - TOTP 使用当前 `otplib@12.0.1` authenticator 默认参数（SHA-1、6 位、30 秒）并接受前后各一个 step；登录 challenge 5 分钟且单次使用。已消费 step 通过条件更新防止重放。
 - Setup 的 secret/otpauth URL/二维码只在 setup 响应返回；数据库密文使用 AES-256-GCM（12-byte IV、16-byte tag），加密 key 为 `SHA-256(JWT_SECRET)`。生产环境须持久化、妥善备份并保持 `JWT_SECRET` 稳定；更换后既有 TOTP 密文无法解密。
-- 恢复组含 10 个一次性 Crockford Base32 码，每码 10 个字符（50 bit），显示分组 `4-4-2`，有效期 24 小时；仅显示一次、数据库仅存 Argon2id 哈希（memory 19,456 KiB、time 2、parallelism 1）。账户连续 5 次失败锁 15 分钟；IP admission 有 5 分钟逐请求 reservation，达到 10 个历史失败/活动 reservation 后限流。成功恢复会原子消费代码、吊销旧 session 并创建新 session。
+- 恢复组含 10 个一次性 Crockford Base32 码，每码 10 个字符（50 bit），显示分组 `4-4-2`，有效期 24 小时；仅显示一次、数据库仅存 Argon2id 哈希（memory 19,456 KiB、time 2、parallelism 1）。账户连续 5 次失败锁 15 分钟；IP admission 有 5 分钟逐请求 reservation，达到 10 个历史失败/活动 reservation 后限流。成功恢复会原子消费代码、吊销旧 session 并创建新 session；所有绑定旧 `sid` 的 access JWT 从同一事务提交后立即失效。恢复不撤销 API Token 或上传 token，已通过认证检查的在途请求也不被追溯取消。
 
 ### 10.4 上传恢复与并发完成
 
@@ -964,6 +977,6 @@ Phase 2 的实现、server/Web 自动化测试与静态验证可独立完成，�
 
 ---
 
-*文档版本: v2.3*
+*文档版本: v2.4*
 *创建日期: 2026-07-28*
-*审阅状态: v2.3 补充 Phase 2 as-built 事实；实现/自动化状态与待用户验收分开记录*
+*审阅状态: v2.4 补充管理员 access JWT 的稳定 session 绑定；实现/自动化状态与待用户验收分开记录*

@@ -8,6 +8,7 @@ import { UnauthorizedException } from '@nestjs/common';
 import { AccountsService } from '../accounts/accounts.service';
 import { AdminAccount } from '../accounts/entities/admin-account.entity';
 import { InitialSchema1700000000000 } from '../database/migrations/1700000000000-initial-schema';
+import { SessionRefreshRotation1800000000001 } from '../database/migrations/1800000000001-session-refresh-rotation';
 import { SqliteImmediateTransactionService } from '../common/database/sqlite-immediate-transaction.service';
 import { AuditService } from '../audit/audit.service';
 import { Authenticator } from './entities/authenticator.entity';
@@ -57,6 +58,7 @@ describe('RecoveryService', () => {
       id,
       accountId: 'account-1',
       refreshTokenHash: `prepared-refresh-hash-${id}`,
+      refreshFamilyHash: `prepared-family-hash-${id}`,
       createdAt: now,
       expiresAt: now + 7 * 24 * 60 * 60 * 1000,
     };
@@ -70,7 +72,10 @@ describe('RecoveryService', () => {
       type: 'sqlite',
       database: dbPath,
       entities: [AdminAccount, RecoveryCode, Session, SystemMeta, Authenticator],
-      migrations: [InitialSchema1700000000000],
+      migrations: [
+        InitialSchema1700000000000,
+        SessionRefreshRotation1800000000001,
+      ],
       migrationsRun: true,
       synchronize: false,
     });
@@ -255,6 +260,7 @@ describe('RecoveryService', () => {
     expect(sessions.find(({ id }) => id === recoverySession.id)).toMatchObject({
       accountId: recoverySession.accountId,
       refreshTokenHash: recoverySession.refreshTokenHash,
+      refreshFamilyHash: recoverySession.refreshFamilyHash,
       createdAt: recoverySession.createdAt,
       expiresAt: recoverySession.expiresAt,
       revokedAt: null,
