@@ -2,6 +2,7 @@
 
 ## 2026-11-01 v0.2.5 首发例外（实施中）
 
+- **Windows CI 测试预算待 hosted 复核：** candidate `dc6a915b880749f799d3974bf261deca273a0646` 的 RC `41276487530` 双平台成功；CI `41276487531` 的 Windows updater 分组因 retention 中两个真实文件/journal 测试超过 Jest 默认 5 秒而失败，158 项通过、1 项跳过。前一候选相同测试通过；本轮仅将两项测试预算调整至 30 秒，保留断言及生产期限。Windows Node 22 本地整套 9/9、独立复审整套 9/9；CI Node 20 的具体耗时根因和修后 hosted 结果仍待验证。Jest 超时不会取消异步任务、fixture 进入调用方 try 前失败可能留下临时目录是既有限制；本轮临时根已检查并清理。
 - 已获用户批准设计仅限 v0.2.5 的结构化首发延期：Linux 实机 bootstrap、两平台真实签名更新和提交前回滚可在明确批准并绑定精确候选后延期；其他验收仍需证据。发布签名、公私钥配对、候选来源、双平台摘要及受保护环境审批不延期，失败验收不得填为通过。详见首发例外设计和 Future Work；当前尚未正式发布。
 - 现有隔离 Docker/Nginx root 与 `/fs/` 实测、Windows 托管 bootstrap 有成功记录，但尚未绑定最终候选；375px、真实 TOTP/恢复码、刷新续传仍缺人工验收记录。Linux 原始制品在目标系统的兼容性尚未实机证明。
 - 当前工作树验证：release-gate 100/100、release tools 56/56、server unit 57 suites / 345 passed / 20 todo、server E2E 17 suites / 122 passed、Web 23 files / 260 passed、typecheck/build 通过。初次沙箱运行遇 TEMP 重命名、loopback、junction 权限限制；使用适当临时目录和允许回环的环境重跑。以上不代表最终候选实机验收或发布已完成。
