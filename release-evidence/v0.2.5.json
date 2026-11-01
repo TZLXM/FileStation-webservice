@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "version": "0.2.5",
   "candidate": {
-    "sourceCommit": null,
-    "runId": null,
+    "sourceCommit": "2e4dc9f609a393f388cad166e5636608e9de7d17",
+    "runId": "41289921687",
     "platformDigests": {
-      "linux-x64": null,
-      "windows-x64": null
+      "linux-x64": "sha256:221b428e1e7da81f27906d9b1159b547103488f2fda1b68e9162dc7f13dc3e2c",
+      "windows-x64": "sha256:8a42e2ac7d0615fb582a4d36108b00d64fb6db5266d0b8869f730c9f14f261ac"
     }
   },
   "manual": {
@@ -30,8 +30,8 @@
         "reference": null
       },
       "windowsX64": {
-        "status": "pending",
-        "reference": null
+        "status": "failed",
+        "reference": "docs/CURRENT-STATE.md#2026-11-01-v025-首发例外实施中 (final candidate managed startup File metadata failure; sanitized Windows acceptance report)"
       }
     },
     "confirmedUpdate": {
@@ -56,26 +56,26 @@
     },
     "docker": {
       "selfUpdateRefused": {
-        "status": "pending",
-        "reference": null
+        "status": "passed",
+        "reference": "docs/CURRENT-STATE.md#2026-11-01-v025-首发例外实施中 (Ubuntu 24.04 scoped candidate report SHA-256 674e50075140f6de04e63fa218f7a57cd7d043492b696a556e9ac61b98b43ece)"
       }
     },
     "nginx": {
       "root": {
-        "status": "pending",
-        "reference": null
+        "status": "passed",
+        "reference": "docs/CURRENT-STATE.md#2026-11-01-v025-首发例外实施中 (Ubuntu 24.04 scoped candidate report SHA-256 674e50075140f6de04e63fa218f7a57cd7d043492b696a556e9ac61b98b43ece)"
       },
       "fsPrefix": {
-        "status": "pending",
-        "reference": null
+        "status": "passed",
+        "reference": "docs/CURRENT-STATE.md#2026-11-01-v025-首发例外实施中 (Ubuntu 24.04 scoped candidate report SHA-256 674e50075140f6de04e63fa218f7a57cd7d043492b696a556e9ac61b98b43ece)"
       }
     }
   },
   "knownRisks": [
-    "The release-candidate workflow and both platform artifacts have not yet been produced for the final candidate commit.",
-    "Real Windows and Linux bootstrap, confirmed update, pre-COMMITTED rollback, Docker refusal, and Nginx root/subpath acceptance remain pending.",
-    "Fresh 2026-10-28 registry audits exited nonzero: full is 4 Critical / 7 High / 25 Moderate / 9 Low; production is 1 Critical / 5 High / 19 Moderate. Critical/High disposition is required before publication.",
-    "The publisher public key is UNCONFIGURED, so signing and publication must fail closed."
+    "The exact candidate archives were hashed against candidate metadata; final candidate acceptance remains pending.",
+    "Real signed update and pre-COMMITTED rollback on both platforms, and native Linux bootstrap, remain unverified and are proposed for the approved first-release deferral.",
+    "The 2026-10-30 audit snapshot reported zero Critical/High with remaining Moderate/Low advisories; a fresh audit has not been recorded here.",
+    "The publisher public key is configured; actual private/public key matching must still be verified by the protected signing job."
   ],
   "notes": "Intentionally pending. Do not tag, sign, or publish v0.2.5 until the exact candidate run and every real acceptance check are recorded and the release gate exits zero."
 }

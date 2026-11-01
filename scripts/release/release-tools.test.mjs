@@ -46,6 +46,132 @@ import { validateReleaseNotes } from "./validate-release-notes.mjs";
 const fixtureRoot = await mkdtemp(path.join(tmpdir(), "filestation-release-tools-"));
 const sourceCommit = "0123456789abcdef0123456789abcdef01234567";
 const tagCommit = "abcdef0123456789abcdef0123456789abcdef01";
+const serverDatabaseModuleSourcePath =
+  "apps/server/src/database/database.module.ts";
+const serverDatabaseModuleDistPath =
+  "apps/server/dist/database/database.module.js";
+const explicitServerDatabaseModuleFixture = [
+  '"use strict";',
+  'const admin_account_entity_1 = require("../accounts/entities/admin-account.entity");',
+  'const api_token_entity_1 = require("../api-tokens/entities/api-token.entity");',
+  'const audit_log_entity_1 = require("../audit/entities/audit-log.entity");',
+  'const authenticator_entity_1 = require("../auth/entities/authenticator.entity");',
+  'const login_challenge_entity_1 = require("../auth/entities/login-challenge.entity");',
+  'const recovery_code_entity_1 = require("../auth/entities/recovery-code.entity");',
+  'const session_entity_1 = require("../auth/entities/session.entity");',
+  'const system_meta_entity_1 = require("../auth/entities/system-meta.entity");',
+  'const file_entity_1 = require("../files/entities/file.entity");',
+  'const upload_part_entity_1 = require("../files/entities/upload-part.entity");',
+  'const upload_session_entity_1 = require("../files/entities/upload-session.entity");',
+  'const folder_entity_1 = require("../folders/entities/folder.entity");',
+  'const setting_entity_1 = require("../settings/entities/setting.entity");',
+  'const download_session_entity_1 = require("../shares/entities/download-session.entity");',
+  'const download_ticket_entity_1 = require("../shares/entities/download-ticket.entity");',
+  'const share_entity_1 = require("../shares/entities/share.entity");',
+  'const _1700000000000_initial_schema_1 = require("./migrations/1700000000000-initial-schema");',
+  'const _1700000000001_one_totp_authenticator_per_account_1 = require("./migrations/1700000000001-one-totp-authenticator-per-account");',
+  'const _1800000000000_update_audit_idempotency_1 = require("./migrations/1800000000000-update-audit-idempotency");',
+  "const entities = [",
+  "  admin_account_entity_1.AdminAccount,",
+  "  api_token_entity_1.ApiToken,",
+  "  authenticator_entity_1.Authenticator,",
+  "  audit_log_entity_1.AuditLog,",
+  "  download_session_entity_1.DownloadSession,",
+  "  download_ticket_entity_1.DownloadTicket,",
+  "  file_entity_1.File,",
+  "  folder_entity_1.Folder,",
+  "  login_challenge_entity_1.LoginChallenge,",
+  "  recovery_code_entity_1.RecoveryCode,",
+  "  session_entity_1.Session,",
+  "  setting_entity_1.Setting,",
+  "  share_entity_1.Share,",
+  "  system_meta_entity_1.SystemMeta,",
+  "  upload_part_entity_1.UploadPart,",
+  "  upload_session_entity_1.UploadSession,",
+  "];",
+  "const migrations = [",
+  "  _1700000000000_initial_schema_1.InitialSchema1700000000000,",
+  "  _1700000000001_one_totp_authenticator_per_account_1.OneTotpAuthenticatorPerAccount1700000000001,",
+  "  _1800000000000_update_audit_idempotency_1.UpdateAuditIdempotency1800000000000,",
+  "];",
+  "const options = { type: 'sqlite', entities, migrations };",
+  "",
+].join("\n");
+const explicitServerDatabaseModuleSourceFixture = [
+  "import { Module } from '@nestjs/common';",
+  "import { TypeOrmModule } from '@nestjs/typeorm';",
+  "import { AdminAccount } from '../accounts/entities/admin-account.entity';",
+  "import { ApiToken } from '../api-tokens/entities/api-token.entity';",
+  "import { AuditLog } from '../audit/entities/audit-log.entity';",
+  "import { Authenticator } from '../auth/entities/authenticator.entity';",
+  "import { LoginChallenge } from '../auth/entities/login-challenge.entity';",
+  "import { RecoveryCode } from '../auth/entities/recovery-code.entity';",
+  "import { Session } from '../auth/entities/session.entity';",
+  "import { SystemMeta } from '../auth/entities/system-meta.entity';",
+  "import { File } from '../files/entities/file.entity';",
+  "import { UploadPart } from '../files/entities/upload-part.entity';",
+  "import { UploadSession } from '../files/entities/upload-session.entity';",
+  "import { Folder } from '../folders/entities/folder.entity';",
+  "import { Setting } from '../settings/entities/setting.entity';",
+  "import { DownloadSession } from '../shares/entities/download-session.entity';",
+  "import { DownloadTicket } from '../shares/entities/download-ticket.entity';",
+  "import { Share } from '../shares/entities/share.entity';",
+  "import { InitialSchema1700000000000 } from './migrations/1700000000000-initial-schema';",
+  "import { OneTotpAuthenticatorPerAccount1700000000001 } from './migrations/1700000000001-one-totp-authenticator-per-account';",
+  "import { UpdateAuditIdempotency1800000000000 } from './migrations/1800000000000-update-audit-idempotency';",
+  "",
+  "const entities = [",
+  "  AdminAccount,",
+  "  ApiToken,",
+  "  Authenticator,",
+  "  AuditLog,",
+  "  DownloadSession,",
+  "  DownloadTicket,",
+  "  File,",
+  "  Folder,",
+  "  LoginChallenge,",
+  "  RecoveryCode,",
+  "  Session,",
+  "  Setting,",
+  "  Share,",
+  "  SystemMeta,",
+  "  UploadPart,",
+  "  UploadSession,",
+  "];",
+  "",
+  "const migrations = [",
+  "  InitialSchema1700000000000,",
+  "  OneTotpAuthenticatorPerAccount1700000000001,",
+  "  UpdateAuditIdempotency1800000000000,",
+  "];",
+  "",
+  "@Module({",
+  "  imports: [",
+  "    TypeOrmModule.forRootAsync({",
+  "      useFactory: () => ({ type: 'sqlite', entities, migrations }),",
+  "    }),",
+  "  ],",
+  "})",
+  "export class DatabaseModule {}",
+  "",
+].join("\n");
+
+function replaceCompiledArray(contents, name, transform) {
+  const marker = `const ${name} = [`;
+  const start = contents.indexOf(marker);
+  const end = contents.indexOf("];", start + marker.length);
+  assert.notEqual(start, -1, `fixture is missing ${name} array`);
+  assert.notEqual(end, -1, `fixture is missing ${name} array terminator`);
+  const body = contents.slice(start + marker.length, end);
+  return (
+    contents.slice(0, start) +
+    marker +
+    "\n" +
+    transform(body) +
+    "\n];" +
+    contents.slice(end + 2)
+  );
+}
 
 test('bilingual changelog preserves reviewed dual-bundle paths and timeless acceptance gate', async () => {
   const changelog = await readFile(new URL('../../CHANGELOG.md', import.meta.url), 'utf8');
@@ -756,6 +882,16 @@ async function createRepositoryFixture() {
   }
   await writeFixtureFile(
     root,
+    serverDatabaseModuleSourcePath,
+    explicitServerDatabaseModuleSourceFixture,
+  );
+  await writeFixtureFile(
+    root,
+    serverDatabaseModuleDistPath,
+    explicitServerDatabaseModuleFixture,
+  );
+  await writeFixtureFile(
+    root,
     "node_modules/sqlite3/build/Release/node_sqlite3.node",
     "native-fixture",
   );
@@ -854,6 +990,316 @@ test("artifact staging includes production tree and excludes data, env, logs, an
   ]) {
     await assert.rejects(stat(path.join(destination, excluded)), { code: "ENOENT" });
   }
+});
+
+test("artifact staging rejects the legacy database entity glob on every release platform", async () => {
+  for (const platform of ["linux-x64", "windows-x64"]) {
+    const repositoryRoot = await createRepositoryFixture();
+    await writeFixtureFile(
+      repositoryRoot,
+      serverDatabaseModuleDistPath,
+      [
+        "const entities = [__dirname + '/../**/*.entity{.ts,.js}'];",
+        "const migrations = [__dirname + '/migrations/*{.ts,.js}'];",
+        "const options = { type: 'sqlite', entities, migrations };",
+        "",
+      ].join("\n"),
+    );
+
+    await assert.rejects(
+      prepareArtifactDirectory({
+        repositoryRoot,
+        destination: path.join(
+          fixtureRoot,
+          `legacy-database-module-${platform}-${crypto.randomUUID()}`,
+        ),
+        version: "0.2.0",
+        platform,
+      }),
+      /database\.module\.js.*legacy.*glob/i,
+      platform,
+    );
+  }
+});
+
+test("database artifact validation ignores registrations that exist only in comments", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  const commentedFixture = replaceCompiledArray(
+    explicitServerDatabaseModuleFixture,
+    "entities",
+    (body) =>
+      body
+        .split(/\r?\n/u)
+        .filter((line) => line.trim())
+        .map((line) => `  // ${line.trim()}`)
+        .join("\n"),
+  );
+  await writeFixtureFile(
+    repositoryRoot,
+    serverDatabaseModuleDistPath,
+    commentedFixture,
+  );
+
+  await assert.rejects(
+    prepareArtifactDirectory({
+      repositoryRoot,
+      destination: path.join(
+        fixtureRoot,
+        `commented-database-registrations-${crypto.randomUUID()}`,
+      ),
+      version: "0.2.0",
+      platform: "linux-x64",
+    }),
+    /database\.module\.js.*(?:explicit|registration|entities)/i,
+  );
+});
+
+test("database artifact validation rejects string literals as entity registrations", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  const stringFixture = replaceCompiledArray(
+    explicitServerDatabaseModuleFixture,
+    "entities",
+    (body) =>
+      body
+        .split(/\r?\n/u)
+        .filter((line) => line.trim())
+        .map(
+          (line) =>
+            `  ${JSON.stringify(line.trim().replace(/,$/u, ""))},`,
+        )
+        .join("\n"),
+  );
+  await writeFixtureFile(
+    repositoryRoot,
+    serverDatabaseModuleDistPath,
+    stringFixture,
+  );
+
+  await assert.rejects(
+    prepareArtifactDirectory({
+      repositoryRoot,
+      destination: path.join(
+        fixtureRoot,
+        `string-database-registrations-${crypto.randomUUID()}`,
+      ),
+      version: "0.2.0",
+      platform: "windows-x64",
+    }),
+    /database\.module\.js.*(?:unsupported|registration|entities)/i,
+  );
+});
+
+test("database artifact validation rejects path.join entity globs", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  const pathGlobFixture = replaceCompiledArray(
+    explicitServerDatabaseModuleFixture,
+    "entities",
+    () =>
+      '  (0, path_1.join)(__dirname, "../**/*.entity{.ts,.js}"),',
+  ).replace(
+    "const entities = [",
+    'const path_1 = require("path");\nconst entities = [',
+  );
+  await writeFixtureFile(
+    repositoryRoot,
+    serverDatabaseModuleDistPath,
+    pathGlobFixture,
+  );
+
+  await assert.rejects(
+    prepareArtifactDirectory({
+      repositoryRoot,
+      destination: path.join(
+        fixtureRoot,
+        `path-join-database-glob-${crypto.randomUUID()}`,
+      ),
+      version: "0.2.0",
+      platform: "linux-x64",
+    }),
+    /database\.module\.js.*legacy.*glob/i,
+  );
+});
+
+test("database artifact validation rejects a missing migration from dist", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  await writeFixtureFile(
+    repositoryRoot,
+    serverDatabaseModuleDistPath,
+    explicitServerDatabaseModuleFixture.replace(
+      "  _1800000000000_update_audit_idempotency_1.UpdateAuditIdempotency1800000000000,\n",
+      "",
+    ),
+  );
+
+  await assert.rejects(
+    prepareArtifactDirectory({
+      repositoryRoot,
+      destination: path.join(
+        fixtureRoot,
+        `missing-migration-${crypto.randomUUID()}`,
+      ),
+      version: "0.2.0",
+      platform: "windows-x64",
+    }),
+    /UpdateAuditIdempotency1800000000000/,
+  );
+});
+
+test("database artifact validation follows a newly added source entity", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  await writeFixtureFile(
+    repositoryRoot,
+    serverDatabaseModuleSourcePath,
+    explicitServerDatabaseModuleSourceFixture
+      .replace(
+        "const entities = [",
+        "import { NewEntity } from '../files/entities/new.entity';\n\nconst entities = [\n  NewEntity,",
+      ),
+  );
+
+  await assert.rejects(
+    prepareArtifactDirectory({
+      repositoryRoot,
+      destination: path.join(
+        fixtureRoot,
+        `source-entity-drift-${crypto.randomUUID()}`,
+      ),
+      version: "0.2.0",
+      platform: "linux-x64",
+    }),
+    /NewEntity/,
+  );
+});
+
+test("database artifact validation follows a newly added source migration", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  await writeFixtureFile(
+    repositoryRoot,
+    serverDatabaseModuleSourcePath,
+    explicitServerDatabaseModuleSourceFixture.replace(
+      "const migrations = [",
+      "import { NewMigration1900000000000 } from './migrations/1900000000000-new-migration';\n\nconst migrations = [\n  NewMigration1900000000000,",
+    ),
+  );
+
+  await assert.rejects(
+    prepareArtifactDirectory({
+      repositoryRoot,
+      destination: path.join(
+        fixtureRoot,
+        `source-migration-drift-${crypto.randomUUID()}`,
+      ),
+      version: "0.2.0",
+      platform: "windows-x64",
+    }),
+    /NewMigration1900000000000/,
+  );
+});
+
+test("database artifact validation rejects duplicate compiled registrations", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  await writeFixtureFile(
+    repositoryRoot,
+    serverDatabaseModuleDistPath,
+    replaceCompiledArray(
+      explicitServerDatabaseModuleFixture,
+      "entities",
+      (body) => `${body.trimEnd()}\n  file_entity_1.File,`,
+    ),
+  );
+
+  await assert.rejects(
+    prepareArtifactDirectory({
+      repositoryRoot,
+      destination: path.join(
+        fixtureRoot,
+        `duplicate-registration-${crypto.randomUUID()}`,
+      ),
+      version: "0.2.0",
+      platform: "windows-x64",
+    }),
+    /duplicate.*file_entity_1\.File|file_entity_1\.File.*duplicate/i,
+  );
+});
+
+test("database artifact validation requires SQLite config to reference both arrays", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  await writeFixtureFile(
+    repositoryRoot,
+    serverDatabaseModuleDistPath,
+    explicitServerDatabaseModuleFixture.replace(
+      "const options = { type: 'sqlite', entities, migrations };",
+      "const options = { type: 'sqlite', entities: [], migrations };",
+    ),
+  );
+
+  await assert.rejects(
+    prepareArtifactDirectory({
+      repositoryRoot,
+      destination: path.join(
+        fixtureRoot,
+        `unused-database-arrays-${crypto.randomUUID()}`,
+      ),
+      version: "0.2.0",
+      platform: "linux-x64",
+    }),
+    /database\.module\.js.*sqlite.*(?:entities|migrations)/i,
+  );
+});
+
+test("database artifact validation rejects shadowed SQLite array references", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  await writeFixtureFile(
+    repositoryRoot,
+    serverDatabaseModuleDistPath,
+    explicitServerDatabaseModuleFixture.replace(
+      "const options = { type: 'sqlite', entities, migrations };",
+      "const options = (entities) => ({ type: 'sqlite', entities, migrations });",
+    ),
+  );
+
+  await assert.rejects(
+    prepareArtifactDirectory({
+      repositoryRoot,
+      destination: path.join(
+        fixtureRoot,
+        `shadowed-database-arrays-${crypto.randomUUID()}`,
+      ),
+      version: "0.2.0",
+      platform: "windows-x64",
+    }),
+    /database\.module\.js.*(?:shadow|top-level).*entities/i,
+  );
+});
+
+test("database artifact rejection preserves an existing staging directory", async () => {
+  const repositoryRoot = await createRepositoryFixture();
+  await writeFixtureFile(
+    repositoryRoot,
+    serverDatabaseModuleDistPath,
+    replaceCompiledArray(
+      explicitServerDatabaseModuleFixture,
+      "entities",
+      (body) => `${body.trimEnd()}\n  file_entity_1.File,`,
+    ),
+  );
+  const destination = path.join(
+    fixtureRoot,
+    `preserved-failed-stage-${crypto.randomUUID()}`,
+  );
+  const sentinel = path.join(destination, "sentinel.txt");
+  await writeFixtureFile(destination, "sentinel.txt", "keep me\n");
+
+  await assert.rejects(
+    prepareArtifactDirectory({
+      repositoryRoot,
+      destination,
+      version: "0.2.0",
+      platform: "linux-x64",
+    }),
+    /duplicate.*file_entity_1\.File|file_entity_1\.File.*duplicate/i,
+  );
+  assert.equal(await readFile(sentinel, "utf8"), "keep me\n");
 });
 
 test("artifact staging includes the built updater and stable launcher scripts", async () => {
