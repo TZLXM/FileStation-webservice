@@ -173,6 +173,7 @@ export default function UpdateSection({
   const [status, setStatus] = useState<UpdateStatusView | null>(null);
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
+  const [checkFailed, setCheckFailed] = useState(false);
   const [preparing, setPreparing] = useState(false);
   const [prepared, setPrepared] = useState<PreparedUpdate | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -284,9 +285,11 @@ export default function UpdateSection({
       const response = await api.postRaw<UpdateStatusView>('/updates/check', { force: true });
       if (!response) throw new Error('服务器未返回更新检查结果。');
       setStatus(response);
+      setCheckFailed(false);
       setPrepared(null);
       setInstallMessage('');
     } catch (checkError) {
+      setCheckFailed(true);
       setError(errorMessage(checkError, '检查更新失败，请重试。'));
     } finally {
       checkInFlight.current = false;
@@ -396,7 +399,12 @@ export default function UpdateSection({
     Boolean(status.available_version) &&
     Boolean(status.manifest_sha256) &&
     Boolean(status.artifact_sha256);
-  const latestVersion = status?.available_version ?? status?.current_version;
+  const sameVersion = status?.decision === 'same_version';
+  const latestVersion = status?.available_version
+    ?? (sameVersion ? status?.current_version : null);
+  const historicalResult = Boolean(
+    latestVersion && (checkFailed || status?.error_code === 'UPDATE_CHECK_FAILED'),
+  );
   const releaseSummaries = status?.release_summaries;
   const hasBreaking = Boolean(
     releaseSummaries && (
@@ -448,6 +456,12 @@ export default function UpdateSection({
             </div>
           </dl>
 
+          {historicalResult && (
+            <p role="status" className="mt-4 text-sm text-amber-900">
+              本次检查失败，显示的是上次成功检查的历史结果。
+            </p>
+          )}
+
           {status.error_code && (
             <p role="alert" className="mt-4 break-words rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
               {status.message ?? status.error_code}
@@ -459,9 +473,9 @@ export default function UpdateSection({
             </p>
           )}
 
-          {status.decision === 'same_version' && (
+          {sameVersion && (
             <p role="status" className="mt-4 rounded border border-green-200 bg-green-50 p-3 text-sm text-green-800">
-              已是最新版本
+              {historicalResult ? '上次成功检查时已是最新版本' : '已是最新版本'}
             </p>
           )}
 

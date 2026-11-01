@@ -76,6 +76,13 @@ const available = status({
   },
 });
 
+const sameVersion = status({
+  decision: 'same_version',
+  available_version: null,
+  checked_at: '2026-10-28T08:00:00.000Z',
+  manifest_sha256: 'c'.repeat(64),
+});
+
 const prepared = {
   prepared_id: '07523e2b-37ee-40cb-980f-cce36310e45f',
   manifest_sha256: 'a'.repeat(64),
@@ -105,7 +112,7 @@ async function openConfirmation(totpActive = false) {
 
 describe('UpdateSection', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     mockedApi.getRaw.mockResolvedValue(response(status()));
     mockedApi.postRaw.mockImplementation(async (path: string) => {
       if (path === '/updates/prepare') return response(prepared);
@@ -120,7 +127,9 @@ describe('UpdateSection', () => {
     useAuthStore.setState({ accessToken: null, isAuthenticated: false });
   });
 
-  it('shows current and latest versions when no stable update is available', async () => {
+  it('shows the verified latest version when it matches the current version', async () => {
+    mockedApi.getRaw.mockResolvedValue(response(sameVersion));
+
     render(<UpdateSection totpActive={false} />);
 
     expect(await screen.findByText('当前版本')).toBeInTheDocument();
@@ -128,6 +137,142 @@ describe('UpdateSection', () => {
     expect(screen.getAllByText('v0.2.0')).toHaveLength(2);
     expect(screen.getByText('已是最新版本')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '下载并验证更新' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/历史结果/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { decision: 'unavailable' },
+    {
+      stage: 'failed',
+      decision: 'unavailable',
+      error_code: 'UPDATE_CHECK_FAILED',
+      message: 'Update check failed',
+    },
+  ])('shows an unknown latest version without a verified release: %j', async (overrides) => {
+    mockedApi.getRaw.mockResolvedValue(response(status({
+      current_version: '0.2.5',
+      ...overrides,
+    })));
+
+    render(<UpdateSection totpActive={false} />);
+
+    await screen.findByText('最新稳定版');
+    expect(screen.getByText('最新稳定版').nextElementSibling).toHaveTextContent(/^未知$/);
+    expect(screen.getByText('当前版本').nextElementSibling).toHaveTextContent(/^v0\.2\.5$/);
+    expect(screen.queryByText('已是最新版本')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '下载并验证更新' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/历史结果/)).not.toBeInTheDocument();
+  });
+
+  it.each([false, true])('preserves the latest version display after a rejected check with cache=%s', async (hasCache) => {
+    mockedApi.getRaw.mockResolvedValue(response(hasCache ? available : status({ decision: 'unavailable' })));
+    mockedApi.postRaw.mockRejectedValueOnce(new Error('Update check failed'));
+
+    render(<UpdateSection totpActive={false} />);
+
+    await screen.findByText('最新稳定版');
+    fireEvent.click(screen.getByRole('button', { name: '立即检查' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Update check failed');
+    expect(screen.getByText('最新稳定版').nextElementSibling)
+      .toHaveTextContent(hasCache ? /^v0\.2\.5$/ : /^未知$/);
+    if (hasCache) {
+      expect(screen.getByText(/上次成功检查的历史结果/)).toBeInTheDocument();
+    } else {
+      expect(screen.queryByText(/历史结果/)).not.toBeInTheDocument();
+    }
+  });
+
+  it('preserves a verified cached latest version returned with a failed check', async () => {
+    mockedApi.getRaw.mockResolvedValue(response(available));
+    mockedApi.postRaw.mockResolvedValueOnce(response({
+      ...available,
+      error_code: 'UPDATE_CHECK_FAILED',
+      message: 'Update check failed; using the cached result',
+    }));
+
+    render(<UpdateSection totpActive={false} />);
+
+    await screen.findByText('最新稳定版');
+    fireEvent.click(screen.getByRole('button', { name: '立即检查' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('using the cached result');
+    expect(screen.getByText('最新稳定版').nextElementSibling).toHaveTextContent(/^v0\.2\.5$/);
+    expect(screen.getByText(/上次成功检查的历史结果/)).toBeInTheDocument();
+  });
+
+  it.each([false, true])('replaces an available release with same_version/null and marks a later failed check as historical (rejected=%s)', async (rejected) => {
+    mockedApi.getRaw.mockResolvedValue(response(available));
+    mockedApi.postRaw.mockResolvedValueOnce(response(sameVersion));
+    if (rejected) {
+      mockedApi.postRaw.mockRejectedValueOnce(new Error('Update check failed'));
+    } else {
+      mockedApi.postRaw.mockResolvedValueOnce(response({
+        ...sameVersion,
+        error_code: 'UPDATE_CHECK_FAILED',
+        message: 'Update check failed; using the cached result',
+      }));
+    }
+    mockedApi.postRaw.mockResolvedValueOnce(response(sameVersion));
+
+    render(<UpdateSection totpActive={false} />);
+
+    await screen.findByText('v0.2.5');
+    fireEvent.click(screen.getByRole('button', { name: '立即检查' }));
+    await screen.findByText('已是最新版本');
+    expect(screen.getByText('最新稳定版').nextElementSibling).toHaveTextContent(/^v0\.2\.0$/);
+    expect(screen.queryByText('v0.2.5')).not.toBeInTheDocument();
+    expect(screen.queryByText(/历史结果/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '下载并验证更新' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '立即检查' }));
+    await screen.findByRole('alert');
+    expect(screen.getByText('最新稳定版').nextElementSibling).toHaveTextContent(/^v0\.2\.0$/);
+    expect(screen.getByText(/上次成功检查的历史结果/)).toBeInTheDocument();
+    expect(screen.getByText('上次成功检查时已是最新版本')).toBeInTheDocument();
+    expect(screen.queryByText('已是最新版本', { exact: true })).not.toBeInTheDocument();
+    expect(screen.getByText('检查时间').nextElementSibling)
+      .toHaveTextContent(new Date(sameVersion.checked_at!).toLocaleString('zh-CN', { hour12: false }));
+
+    fireEvent.click(screen.getByRole('button', { name: '立即检查' }));
+    await screen.findByText('已是最新版本');
+    expect(screen.queryByText(/历史结果/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('clears an available release when a check returns failure without a cached release', async () => {
+    mockedApi.getRaw.mockResolvedValue(response(available));
+    mockedApi.postRaw.mockResolvedValueOnce(response(status({
+      stage: 'failed',
+      decision: 'unavailable',
+      error_code: 'UPDATE_CHECK_FAILED',
+      message: 'Update check failed',
+    })));
+
+    render(<UpdateSection totpActive={false} />);
+
+    await screen.findByText('v0.2.5');
+    fireEvent.click(screen.getByRole('button', { name: '立即检查' }));
+    await screen.findByRole('alert');
+    expect(screen.getByText('最新稳定版').nextElementSibling).toHaveTextContent(/^未知$/);
+    expect(screen.queryByText('v0.2.5')).not.toBeInTheDocument();
+    expect(screen.queryByText('已是最新版本')).not.toBeInTheDocument();
+    expect(screen.queryByText(/历史结果/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '下载并验证更新' })).not.toBeInTheDocument();
+  });
+
+  it('labels a cached same_version/null status as historical on initial load', async () => {
+    mockedApi.getRaw.mockResolvedValue(response({
+      ...sameVersion,
+      error_code: 'UPDATE_CHECK_FAILED',
+      message: 'Update check failed; using the cached result',
+    }));
+
+    render(<UpdateSection totpActive={false} />);
+
+    await screen.findByRole('alert');
+    expect(screen.getByText('最新稳定版').nextElementSibling).toHaveTextContent(/^v0\.2\.0$/);
+    expect(screen.getByText(/上次成功检查的历史结果/)).toBeInTheDocument();
+    expect(screen.getByText('上次成功检查时已是最新版本')).toBeInTheDocument();
+    expect(screen.queryByText('已是最新版本', { exact: true })).not.toBeInTheDocument();
   });
 
   it('shows bilingual release sections, risk, checked time, and omits empty categories', async () => {

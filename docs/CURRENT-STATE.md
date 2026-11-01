@@ -2,6 +2,8 @@
 
 Updated: 2026-10-30
 
+- **2026-11-01 Windows 实际托管启动：** 精确 candidate `4deed96a917e3176971ac8d94d96a76417638996` 对应 CI `41221310884` 和无签名 candidate `41221310886` 全部作业成功。其 Windows archive SHA-256 为 `0cb184e652c47c10b1bd906d3189cd62825dafbbb754a0aeebf0f097edc69613`，在隔离服务器完成 bootstrap 和 SQLite 快照完整性验证，托管 launcher 成功启动，登录、反代及更新状态接口通过；能力报告 `managed`、Windows x64、updater 0.2.5。首次更新检查返回 `UPDATE_CHECK_FAILED`，服务器无凭据访问官方 latest Release 接口返回 404，仓库页面显示无已发布 Release；因此没有验证远程签名或下载/安装。浏览器设置页曾在无成功检查结果时将当前版本误显示为“最新稳定版”；本地修复区分未知、已验证同版本与缓存失败历史结果，定向测试 35/35 通过，尚未部署到测试站点。当前用户可用实例是临时受控测试部署，非正式发布；真实签名更新、回滚、Linux 验收及发布门仍未完成。
+
 - **2026-11-01 Windows 托管验收阻断与修复：** 精确 candidate `69651931ec4e5156f54a13c399d096c326a9ce54` 的 bootstrap、快照和依赖复制通过，但真实托管启动暴露 Windows `D:\Program`/`D:\program` 路径大小写造成 TypeORM 实体类身份分裂；已改为显式注册 16 个实体和 3 个迁移。启动失败清理已覆盖普通/gated/validation/updater、create 阶段、10 秒关闭超时和非零退出；COMMITTED 恢复规则未改变。最终 server unit **57 suites / 345 passed / 20 todo**、E2E **17 suites / 122 passed**、Web **23 files / 251 passed**、typecheck/build 通过；server unit 仍有既有 worker 强制退出警告。修复尚未生成新 candidate 或完成真实托管启动、更新和回滚验收，正式发布继续阻断。
 
 - **6378ea7 真实场景准备与 bootstrap 预演（2026-10-31）：** 同提交 hosted CI（重跑后）与无签名 candidate 均成功；candidate 绑定 Windows/Linux 制品，正式 evidence 尚未填写。Windows Node 22 在专属短路径、合成 HTTP/SQLite 旧进程和工作树产物上验证活进程拒绝、停止后 dry-run、bootstrap、幂等、SQLite 快照及 launcher dry-run；因无法证明出站网络隔离，未启动正常应用；证据 `C:\fsb-1031-a781b0\REPORT.md`。Linux Node 20.17 无网络只读根容器，在合成 SQLite writer 上通过活进程拒绝、dry-run、bootstrap、快照、路径权限及幂等；这是使用源码和重建 sqlite3 的预演，不是原始 candidate 或非 Docker installed 验收。首次 Windows Git archive 因 autocrlf 输出 CRLF 导致 bash 失败；Git blob 为 LF，字节保持导出重试通过，失败日志保留。两平台合成运行数据及专属容器已清理，证据保留。
