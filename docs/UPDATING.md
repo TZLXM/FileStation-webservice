@@ -13,13 +13,20 @@ manifests must agree on `0.2.5`. The exact candidate commit must be built by
 recorded with the Actions run ID in `release-evidence/v0.2.5.json`.
 
 The same downloaded artifacts must also pass Windows bootstrap, Docker
-self-update refusal, and Nginx root plus `/fs/` acceptance. Phase 2 checks for
-375px, TOTP/recovery, and resume after refresh remain mandatory. For the first
-v0.2.5 release only, the separately approved, candidate-bound exception may
-record Linux installed acceptance and both platforms' real confirmed update
-and pre-COMMITTED rollback as deferred; a failed check is never a pass. The
-exception does not waive candidate provenance, artifact digests, signature
-verification, key matching, or protected-environment approval. A later commit may
+self-update refusal, and Nginx root plus `/fs/` acceptance. The general 375px
+layout check, TOTP/recovery, and resume after refresh remain mandatory. For the
+first v0.2.5 release only, the separately approved, candidate-bound exception
+may record Linux installed acceptance, both platforms' real confirmed update
+and pre-COMMITTED rollback, and the 375px upload-success-prompt check as
+deferred. These six fields form an explicitly authorized set, but the exception
+may defer any non-empty subset. Every listed field must be pending and every
+unlisted authorized field must be passed; a failed check is never a pass. The deferred prompt may be missing,
+clipped, or unusable, while upload completion and every other 375px check stay
+mandatory. After release, verify the successful-upload prompt in a real 375px
+browser, confirm it is visible and actionable, and record the evidence before
+closing the exception. The exception does not waive candidate provenance,
+artifact digests, signature verification, key matching, or protected-environment
+approval. A later commit may
 change only the release evidence and the evidence/status portion of
 `docs/CURRENT-STATE.md`. The tag workflow compares that commit with the recorded
 candidate source and rejects changes to any artifact input.

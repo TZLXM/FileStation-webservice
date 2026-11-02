@@ -46,6 +46,19 @@ const FIRST_RELEASE_DEFERRALS = [
     risk: "Pre-commit rollback behavior on Windows x64 remains unproven.",
     closureCondition: "Complete a pre-commit rollback acceptance run on Windows x64.",
   },
+  {
+    check: "manual.viewport375pxUploadSuccessPrompt",
+    reason: "The approved first release prioritizes publishing before this prompt is tested.",
+    risk: "The 375px upload success prompt may remain visually unverified after release.",
+    closureCondition: "Verify the successful-upload prompt in a real 375px browser session.",
+  },
+];
+const FIRST_RELEASE_EXCEPTION_ORIGINAL_CHECKS = [
+  "updateSystem.bootstrap.linuxX64",
+  "updateSystem.confirmedUpdate.linuxX64",
+  "updateSystem.confirmedUpdate.windowsX64",
+  "updateSystem.rollbackBeforeCommit.linuxX64",
+  "updateSystem.rollbackBeforeCommit.windowsX64",
 ];
 
 function passed(reference) {
@@ -83,6 +96,13 @@ function validEvidence(version = "0.2.0") {
       viewport375px: passed("manual/375px"),
       totpRecovery: passed("manual/totp-recovery"),
       resumeAfterRefresh: passed("manual/resume-after-refresh"),
+      ...(version === "0.2.5"
+        ? {
+            viewport375pxUploadSuccessPrompt: passed(
+              "manual/375px-upload-success-prompt",
+            ),
+          }
+        : {}),
     },
     knownRisks: ["moderate/low dependency advisories accepted in CURRENT-STATE"],
     notes: "Structured evidence only; Pending prose is intentionally ignored.",
@@ -124,13 +144,20 @@ function validFirstReleaseException(evidence) {
   };
 }
 
-function firstReleaseExceptionEvidence() {
+function firstReleaseExceptionEvidenceFor(deferrals) {
   const evidence = validEvidence("0.2.5");
-  for (const { check } of FIRST_RELEASE_DEFERRALS) {
+  for (const { check } of deferrals) {
     setUpdateCheck(evidence, check, pending());
   }
-  evidence.firstReleaseException = validFirstReleaseException(evidence);
+  evidence.firstReleaseException = {
+    ...validFirstReleaseException(evidence),
+    deferrals: structuredClone(deferrals),
+  };
   return evidence;
+}
+
+function firstReleaseExceptionEvidence() {
+  return firstReleaseExceptionEvidenceFor(FIRST_RELEASE_DEFERRALS);
 }
 
 async function verifyRawFixture(version, rawEvidence) {
@@ -219,6 +246,44 @@ test("accepts exact v0.2.5 first-release exceptions for only the approved pendin
   assert.equal(result.version, "0.2.5");
 });
 
+test("accepts a prompt-only first-release deferral when the original five checks passed", async () => {
+  const promptDeferral = FIRST_RELEASE_DEFERRALS.filter(
+    ({ check }) => check === "manual.viewport375pxUploadSuccessPrompt",
+  );
+  const evidence = firstReleaseExceptionEvidenceFor(promptDeferral);
+  const result = await verifyFixture("0.2.5", evidence);
+
+  assert.equal(result.version, "0.2.5");
+  assert.equal(evidence.firstReleaseException.deferrals.length, 1);
+  for (const check of FIRST_RELEASE_EXCEPTION_ORIGINAL_CHECKS) {
+    assert.equal(updateRecord(evidence, check).status, "passed");
+  }
+});
+
+test("accepts the original five deferrals when the prompt check passed", async () => {
+  const originalFive = FIRST_RELEASE_DEFERRALS.filter(
+    ({ check }) => check !== "manual.viewport375pxUploadSuccessPrompt",
+  );
+  const evidence = firstReleaseExceptionEvidenceFor(originalFive);
+  const result = await verifyFixture("0.2.5", evidence);
+
+  assert.equal(result.version, "0.2.5");
+  assert.equal(evidence.firstReleaseException.deferrals.length, 5);
+  assert.equal(
+    evidence.manual.viewport375pxUploadSuccessPrompt.status,
+    "passed",
+  );
+});
+
+test("rejects an empty first-release exception deferral set", async () => {
+  const evidence = firstReleaseExceptionEvidenceFor([]);
+
+  await assert.rejects(
+    verifyFixture("0.2.5", evidence),
+    /deferrals must contain at least one approved check/,
+  );
+});
+
 test("rejects a failed check even when it appears in the first-release exception", async () => {
   const evidence = firstReleaseExceptionEvidence();
   setUpdateCheck(
@@ -257,6 +322,38 @@ test("rejects a pending update check outside the first-release exception whiteli
   );
 });
 
+test("rejects v0.2.5 without the upload-success-prompt manual field", async () => {
+  const evidence = validEvidence("0.2.5");
+  delete evidence.manual.viewport375pxUploadSuccessPrompt;
+
+  await assert.rejects(
+    verifyFixture("0.2.5", evidence),
+    /manual\.viewport375pxUploadSuccessPrompt/,
+  );
+});
+
+test("rejects a pending upload-success-prompt check without the first-release exception", async () => {
+  const evidence = validEvidence("0.2.5");
+  evidence.manual.viewport375pxUploadSuccessPrompt = pending();
+
+  await assert.rejects(
+    verifyFixture("0.2.5", evidence),
+    /manual\.viewport375pxUploadSuccessPrompt is pending/,
+  );
+});
+
+test("rejects the upload-success-prompt field for v0.2.0", async () => {
+  const evidence = validEvidence();
+  evidence.manual.viewport375pxUploadSuccessPrompt = passed(
+    "manual/375px-upload-success-prompt",
+  );
+
+  await assert.rejects(
+    verifyFixture("0.2.0", evidence),
+    /manual\.viewport375pxUploadSuccessPrompt/,
+  );
+});
+
 test("rejects other pending manual checks with the first-release exception", async () => {
   const evidence = firstReleaseExceptionEvidence();
   evidence.manual.viewport375px = pending();
@@ -264,6 +361,31 @@ test("rejects other pending manual checks with the first-release exception", asy
   await assert.rejects(
     verifyFixture("0.2.5", evidence),
     /manual\.viewport375px is pending/,
+  );
+});
+
+test("rejects a passed upload-success-prompt check listed as deferred", async () => {
+  const evidence = firstReleaseExceptionEvidence();
+  evidence.manual.viewport375pxUploadSuccessPrompt = passed(
+    "manual/375px-upload-success-prompt",
+  );
+
+  await assert.rejects(
+    verifyFixture("0.2.5", evidence),
+    /manual\.viewport375pxUploadSuccessPrompt must be pending/,
+  );
+});
+
+test("rejects a failed upload-success-prompt check even when deferred", async () => {
+  const evidence = firstReleaseExceptionEvidence();
+  evidence.manual.viewport375pxUploadSuccessPrompt = {
+    status: "failed",
+    reference: "manual/375px-upload-success-prompt-failed",
+  };
+
+  await assert.rejects(
+    verifyFixture("0.2.5", evidence),
+    /manual\.viewport375pxUploadSuccessPrompt is failed/,
   );
 });
 
@@ -276,16 +398,6 @@ test("rejects the v0.2.5 first-release exception for another release version", a
   await assert.rejects(
     verifyFixture("0.2.0", evidence),
     /firstReleaseException/,
-  );
-});
-
-test("rejects a first-release exception without every approved pending check", async () => {
-  const evidence = firstReleaseExceptionEvidence();
-  evidence.firstReleaseException.deferrals.pop();
-
-  await assert.rejects(
-    verifyFixture("0.2.5", evidence),
-    /deferrals/,
   );
 });
 
@@ -702,6 +814,9 @@ for (const version of ["0.2.0", "0.2.5"]) {
 
   const checks = [
     ["manual", "viewport375px"],
+    ...(version === "0.2.5"
+      ? [["manual", "viewport375pxUploadSuccessPrompt"]]
+      : []),
     ["manual", "totpRecovery"],
     ["manual", "resumeAfterRefresh"],
     ...(version === "0.2.5"

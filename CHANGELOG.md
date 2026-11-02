@@ -33,6 +33,7 @@ reviewed facts.
 #### 已知问题
 
 - 首次发布时，正式渠道的签名自动更新、提交前回滚及 Linux 实机验收尚未完成；升级可能需要人工恢复，请先备份数据库与存储并参阅 UPDATING.md。
+- 仅本次 `v0.2.5` 首发允许延后 375px 视口下的上传成功提示实测；该提示可能缺失、被裁切或不可操作，但上传完成功能和其他 375px 验收仍须通过。发布后须用真实 375px 浏览器完成上传、确认提示清晰可见且可操作，并记录证据。
 - `0.2.5` 首个 managed updater 不自动替换自身，协议或 updater 版本不兼容时会要求手动 bootstrap/upgrade。
 - 2026-10-30 registry 快照：full 为 0 Critical、0 High、25 Moderate、9 Low，production 为 0 Critical、0 High、16 Moderate、0 Low；audit 仍退出 1，剩余 advisories 与候选和人工发布门保持独立。
 - Linux 原生兼容性须在目标系统验证；本轮 Bookworm/glibc 2.36 测试镜像需源码重建 sqlite3，不能据此认定未重建 Linux 制品兼容。
@@ -64,6 +65,7 @@ reviewed facts.
 #### Known Issues
 
 - At first release, signed automatic updates through the official channel, pre-commit rollback, and native Linux acceptance remain unverified; upgrades may require manual recovery. Back up the database and storage and consult UPDATING.md.
+- For the `v0.2.5` first release only, real-device verification of the upload-success prompt at 375px is deferred. The prompt may be missing, clipped, or unusable, while upload completion and all other 375px checks remain mandatory. After release, perform an upload in a real 375px browser, confirm the prompt is visible and actionable, and record evidence.
 - The first managed updater in `0.2.5` does not replace itself; incompatible protocols or updater versions require manual bootstrap or upgrade guidance.
 - The 2026-10-30 registry snapshot has 0 Critical, 0 High, 25 Moderate and 9 Low findings for the full graph, and 0 Critical, 0 High, 16 Moderate and 0 Low for production; audit still exits 1, and remaining advisories, candidate and manual release gates remain separate.
 - Verify Linux native compatibility on the target system; this Bookworm/glibc 2.36 test image required a sqlite3 source rebuild and does not certify an unrebuilt Linux artifact.

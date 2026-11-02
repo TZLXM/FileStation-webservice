@@ -11,6 +11,10 @@ const PHASE_2_MANUAL_CHECKS = [
   "totpRecovery",
   "resumeAfterRefresh",
 ];
+const V025_MANUAL_CHECKS = [
+  ...PHASE_2_MANUAL_CHECKS,
+  "viewport375pxUploadSuccessPrompt",
+];
 const UPDATE_SYSTEM_GROUPS = {
   bootstrap: ["linuxX64", "windowsX64"],
   confirmedUpdate: ["linuxX64", "windowsX64"],
@@ -25,6 +29,7 @@ const FIRST_RELEASE_EXCEPTION_CHECKS = [
   "updateSystem.confirmedUpdate.windowsX64",
   "updateSystem.rollbackBeforeCommit.linuxX64",
   "updateSystem.rollbackBeforeCommit.windowsX64",
+  "manual.viewport375pxUploadSuccessPrompt",
 ];
 const SUPPORTED_VERSIONS = new Set(["0.2.0", "0.2.5"]);
 const EVIDENCE_STATUSES = new Set(["passed", "failed", "pending"]);
@@ -249,10 +254,14 @@ function validateManualRecord(record, field, deferred = false) {
   }
 }
 
-function validateManualEvidence(manual) {
-  assertExactObject(manual, PHASE_2_MANUAL_CHECKS, "manual");
-  for (const check of PHASE_2_MANUAL_CHECKS) {
-    validateManualRecord(manual[check], `manual.${check}`);
+function validateManualEvidence(manual, requestedVersion, deferredChecks) {
+  const checks = requestedVersion === "0.2.5"
+    ? V025_MANUAL_CHECKS
+    : PHASE_2_MANUAL_CHECKS;
+  assertExactObject(manual, checks, "manual");
+  for (const check of checks) {
+    const field = `manual.${check}`;
+    validateManualRecord(manual[check], field, deferredChecks.has(field));
   }
 }
 
@@ -342,10 +351,8 @@ function validateFirstReleaseException(exception, evidence) {
   if (!Array.isArray(exception.deferrals)) {
     fail(`${field}.deferrals must be an array`);
   }
-  if (exception.deferrals.length !== FIRST_RELEASE_EXCEPTION_CHECKS.length) {
-    fail(
-      `${field}.deferrals must contain exactly ${FIRST_RELEASE_EXCEPTION_CHECKS.length} approved checks`,
-    );
+  if (exception.deferrals.length === 0) {
+    fail(`${field}.deferrals must contain at least one approved check`);
   }
 
   const approvedChecks = new Set(FIRST_RELEASE_EXCEPTION_CHECKS);
@@ -373,12 +380,6 @@ function validateFirstReleaseException(exception, evidence) {
       );
     }
   });
-
-  for (const check of FIRST_RELEASE_EXCEPTION_CHECKS) {
-    if (!deferredChecks.has(check)) {
-      fail(`${field}.deferrals is missing approved check ${check}`);
-    }
-  }
 
   return deferredChecks;
 }
@@ -410,12 +411,13 @@ function validateEvidence(evidence, requestedVersion) {
 
   validateCandidate(evidence.candidate);
   validateCandidateDigests(evidence.candidate);
-  validateManualEvidence(evidence.manual);
-
-  if (requestedVersion === "0.2.5") {
-    const deferredChecks = Object.hasOwn(evidence, "firstReleaseException")
+  const deferredChecks = requestedVersion === "0.2.5"
+    && Object.hasOwn(evidence, "firstReleaseException")
       ? validateFirstReleaseException(evidence.firstReleaseException, evidence)
       : new Set();
+  validateManualEvidence(evidence.manual, requestedVersion, deferredChecks);
+
+  if (requestedVersion === "0.2.5") {
     validateUpdateSystem(evidence.updateSystem, deferredChecks);
   }
 
