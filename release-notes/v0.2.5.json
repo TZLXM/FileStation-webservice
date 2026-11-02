@@ -61,6 +61,14 @@
       ],
       "known_issues": [
         {
+          "id": "known:first-release-validation",
+          "text": "首次发布时，正式渠道的签名自动更新、提交前回滚及 Linux 实机验收尚未完成；升级可能需要人工恢复，请先备份数据库与存储并参阅 UPDATING.md。"
+        },
+        {
+          "id": "known:375-upload-success-prompt",
+          "text": "仅本次 v0.2.5 首发允许延后 375px 视口下的上传成功提示实测；该提示可能缺失、被裁切或不可操作，但上传完成功能和其他 375px 验收不在延期范围内。发布后须用真实 375px 浏览器完成上传并确认提示清晰可见、可操作并记录证据。"
+        },
+        {
           "id": "known:first-updater",
           "text": "0.2.5 首个 managed updater 不自动替换自身，协议或 updater 版本不兼容时会要求手动 bootstrap/upgrade。"
         },
@@ -124,6 +132,14 @@
         }
       ],
       "known_issues": [
+        {
+          "id": "known:first-release-validation",
+          "text": "At first release, signed automatic updates through the official channel, pre-commit rollback, and native Linux acceptance remain unverified; upgrades may require manual recovery. Back up the database and storage and consult UPDATING.md."
+        },
+        {
+          "id": "known:375-upload-success-prompt",
+          "text": "For the v0.2.5 first release only, real-device verification of the upload-success prompt at 375px is deferred. The prompt may be missing, clipped, or unusable, while upload completion and all other 375px checks remain mandatory. After release, perform an upload in a real 375px browser, confirm the prompt is visible and actionable, and record evidence."
+        },
         {
           "id": "known:first-updater",
           "text": "The first managed updater in 0.2.5 does not replace itself; incompatible protocols or updater versions require manual bootstrap or upgrade guidance."

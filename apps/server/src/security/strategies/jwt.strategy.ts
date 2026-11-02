@@ -7,6 +7,7 @@ import { Repository } from 'typeorm';
 import { AccountsService } from '../../accounts/accounts.service';
 import { ApiToken } from '../../api-tokens/entities/api-token.entity';
 import { JwtPayload } from '@filestation/shared';
+import { Session } from '../../auth/entities/session.entity';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
@@ -15,6 +16,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     private accountsService: AccountsService,
     @InjectRepository(ApiToken)
     private apiTokensRepository: Repository<ApiToken>,
+    @InjectRepository(Session)
+    private sessionsRepository: Repository<Session>,
   ) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
@@ -25,9 +28,41 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 
   async validate(payload: JwtPayload) {
     if (payload.principal_type === 'admin') {
+      if (typeof payload.sid !== 'string' || payload.sid.length === 0) {
+        throw new UnauthorizedException({
+          code: 'REAUTH_REQUIRED',
+          message: 'Session-bound access token required; refresh or sign in again',
+        });
+      }
+      const session = await this.sessionsRepository.findOne({
+        where: { id: payload.sid, accountId: payload.sub },
+      });
+      if (!session) {
+        throw new UnauthorizedException({
+          code: 'SESSION_INVALID',
+          message: 'Session is missing or does not belong to this account',
+        });
+      }
+      if (session.revokedAt !== null) {
+        throw new UnauthorizedException({
+          code: 'SESSION_REVOKED',
+          message: 'Session has been revoked',
+        });
+      }
+      if (session.expiresAt <= Date.now()) {
+        throw new UnauthorizedException({
+          code: 'SESSION_EXPIRED',
+          message: 'Session has expired',
+        });
+      }
       const account = await this.accountsService.findById(payload.sub);
       if (!account) throw new UnauthorizedException('Account not found');
-      return { id: account.id, username: account.username, principalType: 'admin' as const };
+      return {
+        id: account.id,
+        username: account.username,
+        principalType: 'admin' as const,
+        sessionId: session.id,
+      };
     }
 
     if (payload.principal_type === 'api_token') {

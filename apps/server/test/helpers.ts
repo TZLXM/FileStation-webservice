@@ -33,7 +33,12 @@ export async function teardownEnv(env: TestEnv): Promise<void> {
   delete process.env.FILESTATION_DB_PATH;
   delete process.env.FILESTATION_STORAGE_PATH;
   delete process.env.FILESTATION_TEMP_PATH;
-  await rm(env.dir, { recursive: true, force: true });
+  await rm(env.dir, {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 100,
+  });
 }
 
 export async function createApp(

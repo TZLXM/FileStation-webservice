@@ -69,6 +69,7 @@ export interface JwtPayload {
   sub: string;
   username: string;
   principal_type: 'admin' | 'api_token';
+  sid?: string;           // admin access JWT 绑定的会话标识
   scopes?: string[];
   token_id?: string;      // 新增：api_token 主体必有（吊销检查用）
   iat: number;

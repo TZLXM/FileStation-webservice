@@ -2,23 +2,27 @@
   "schemaVersion": 1,
   "version": "0.2.5",
   "candidate": {
-    "sourceCommit": null,
-    "runId": null,
+    "sourceCommit": "4bf001334df9d2d83f65fcf994a8d6cc76910f7f",
+    "runId": "41391878108",
     "platformDigests": {
-      "linux-x64": null,
-      "windows-x64": null
+      "linux-x64": "sha256:9cfaae2e5f3677eab5f38b8e333bdabffbbcbeed13b4e60a7b6372498ee1acfe",
+      "windows-x64": "sha256:70c3d3eed782afc9c05f1f5bf0d58094de137fef04b6bc3d1cf0f5a0c654506e"
     }
   },
   "manual": {
     "viewport375px": {
-      "status": "pending",
-      "reference": null
+      "status": "passed",
+      "reference": "docs/CURRENT-STATE.md#2026-11-02-v025-candidate-4bf0013-acceptance (same-artifact 375px file card, folder drawer, share dialog, long-filename share page, root/fs settings round trips, and completed resume page; interaction report sha256:579f566237b62b7e95dcd930fe95d167794ae6a7c1f62f26eefa06cc29091cfd; Linux report sha256:3b4f021119eb0e9442f2d10a1e0c74e9f97f8ed7ac10cb174d443e594d5364d1)"
     },
     "totpRecovery": {
-      "status": "pending",
-      "reference": null
+      "status": "passed",
+      "reference": "docs/CURRENT-STATE.md#2026-11-02-v025-candidate-4bf0013-acceptance (Linux report sha256:3b4f021119eb0e9442f2d10a1e0c74e9f97f8ed7ac10cb174d443e594d5364d1; browser summary sha256:5e9fc3a4d9373a7903b106a0724f5b8c155314e2e2ee4aa3de45b750f138eba1)"
     },
     "resumeAfterRefresh": {
+      "status": "passed",
+      "reference": "docs/CURRENT-STATE.md#2026-11-02-v025-candidate-4bf0013-acceptance (Linux report sha256:3b4f021119eb0e9442f2d10a1e0c74e9f97f8ed7ac10cb174d443e594d5364d1; Nginx request evidence sha256:a2e951d23aa7d4e75388a808c5a9b6e2325b64fede3c6b10409623790ff26e11)"
+    },
+    "viewport375pxUploadSuccessPrompt": {
       "status": "pending",
       "reference": null
     }
@@ -30,8 +34,8 @@
         "reference": null
       },
       "windowsX64": {
-        "status": "pending",
-        "reference": null
+        "status": "passed",
+        "reference": "docs/CURRENT-STATE.md#2026-11-02-v025-candidate-4bf0013-acceptance (Windows report sha256:b511f990f04ddfee3fe43031c64840502d20e24af4b3acb4bd0d0f3d5fcc34bb; acceptance summary sha256:e851b4ad6903a6a4afce5cf73b70bf12d27361b2140b526d99b9679b16b003ac)"
       }
     },
     "confirmedUpdate": {
@@ -56,26 +60,76 @@
     },
     "docker": {
       "selfUpdateRefused": {
-        "status": "pending",
-        "reference": null
+        "status": "passed",
+        "reference": "docs/CURRENT-STATE.md#2026-11-02-v025-candidate-4bf0013-acceptance (Linux report sha256:3b4f021119eb0e9442f2d10a1e0c74e9f97f8ed7ac10cb174d443e594d5364d1; HTTP evidence sha256:f123e5e8867413f559398d7adac813afbfa0c52f217d2f4fe890ac06ef0cca40)"
       }
     },
     "nginx": {
       "root": {
-        "status": "pending",
-        "reference": null
+        "status": "passed",
+        "reference": "docs/CURRENT-STATE.md#2026-11-02-v025-candidate-4bf0013-acceptance (Linux report sha256:3b4f021119eb0e9442f2d10a1e0c74e9f97f8ed7ac10cb174d443e594d5364d1; isolation evidence sha256:805e312ebe88a2109ce98f9c93de2979ae5a2933cf29087e622e9628a540b304)"
       },
       "fsPrefix": {
-        "status": "pending",
-        "reference": null
+        "status": "passed",
+        "reference": "docs/CURRENT-STATE.md#2026-11-02-v025-candidate-4bf0013-acceptance (Linux report sha256:3b4f021119eb0e9442f2d10a1e0c74e9f97f8ed7ac10cb174d443e594d5364d1; isolation evidence sha256:805e312ebe88a2109ce98f9c93de2979ae5a2933cf29087e622e9628a540b304)"
       }
     }
   },
+  "firstReleaseException": {
+    "version": "0.2.5",
+    "approvalReference": "docs/CURRENT-STATE.md#2026-11-02-v025-first-release-approval",
+    "candidate": {
+      "sourceCommit": "4bf001334df9d2d83f65fcf994a8d6cc76910f7f",
+      "runId": "41391878108",
+      "platformDigests": {
+        "linux-x64": "sha256:9cfaae2e5f3677eab5f38b8e333bdabffbbcbeed13b4e60a7b6372498ee1acfe",
+        "windows-x64": "sha256:70c3d3eed782afc9c05f1f5bf0d58094de137fef04b6bc3d1cf0f5a0c654506e"
+      }
+    },
+    "deferrals": [
+      {
+        "check": "updateSystem.bootstrap.linuxX64",
+        "reason": "The user approved deferring native Linux installed bootstrap for the v0.2.5 first release.",
+        "risk": "Native Linux bootstrap remains unproven until a persistent Linux installation is exercised.",
+        "closureCondition": "Complete bootstrap acceptance on a persistent Linux x64 installation and record candidate-bound evidence."
+      },
+      {
+        "check": "updateSystem.confirmedUpdate.linuxX64",
+        "reason": "The user approved deferring the real confirmed update on Linux for the v0.2.5 first release.",
+        "risk": "Real signed update behavior on Linux remains unproven.",
+        "closureCondition": "Complete a confirmed signed update on a real Linux installation and record candidate-bound evidence."
+      },
+      {
+        "check": "updateSystem.confirmedUpdate.windowsX64",
+        "reason": "The user approved deferring the real confirmed update on Windows for the v0.2.5 first release.",
+        "risk": "Real signed update behavior on Windows remains unproven.",
+        "closureCondition": "Complete a confirmed signed update on a real Windows installation and record candidate-bound evidence."
+      },
+      {
+        "check": "updateSystem.rollbackBeforeCommit.linuxX64",
+        "reason": "The user approved deferring pre-COMMITTED rollback on Linux for the v0.2.5 first release.",
+        "risk": "Pre-COMMITTED rollback behavior on Linux remains unproven.",
+        "closureCondition": "Complete a pre-COMMITTED rollback drill on Linux and record candidate-bound evidence."
+      },
+      {
+        "check": "updateSystem.rollbackBeforeCommit.windowsX64",
+        "reason": "The user approved deferring pre-COMMITTED rollback on Windows for the v0.2.5 first release.",
+        "risk": "Pre-COMMITTED rollback behavior on Windows remains unproven.",
+        "closureCondition": "Complete a pre-COMMITTED rollback drill on Windows and record candidate-bound evidence."
+      },
+      {
+        "check": "manual.viewport375pxUploadSuccessPrompt",
+        "reason": "The user approved deferring only the 375px upload-success prompt check for the v0.2.5 first release.",
+        "risk": "The upload-success prompt may be missing, clipped, or unusable at 375px.",
+        "closureCondition": "Complete an upload in a real 375px browser, confirm the success prompt is visible and actionable, and record sanitized evidence."
+      }
+    ]
+  },
   "knownRisks": [
-    "The release-candidate workflow and both platform artifacts have not yet been produced for the final candidate commit.",
-    "Real Windows and Linux bootstrap, confirmed update, pre-COMMITTED rollback, Docker refusal, and Nginx root/subpath acceptance remain pending.",
-    "Fresh 2026-10-28 registry audits exited nonzero: full is 4 Critical / 7 High / 25 Moderate / 9 Low; production is 1 Critical / 5 High / 19 Moderate. Critical/High disposition is required before publication.",
-    "The publisher public key is UNCONFIGURED, so signing and publication must fail closed."
+    "The 375px upload-success prompt remains unverified until after release.",
+    "Native Linux bootstrap and real confirmed update/pre-COMMITTED rollback on both platforms remain deferred under the approved first-release exception.",
+    "The 2026-10-30 audit snapshot reported zero Critical/High with remaining Moderate/Low advisories; a fresh audit has not been recorded here.",
+    "The publisher public key is configured; actual private/public key matching must still be verified by the protected signing job."
   ],
-  "notes": "Intentionally pending. Do not tag, sign, or publish v0.2.5 until the exact candidate run and every real acceptance check are recorded and the release gate exits zero."
+  "notes": "Candidate-bound evidence. General 375px interactions and all non-deferred checks are recorded as passed; the upload-success prompt and the original five first-release checks remain explicitly deferred. The working-tree release gate and prospective candidate-to-tag allowlist checks pass. Do not tag, sign, or publish until the final evidence commit exists and candidate-to-tag validation exits zero against that exact commit."
 }

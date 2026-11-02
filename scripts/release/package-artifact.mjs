@@ -17,6 +17,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { deflateRawSync, gzipSync } from "node:zlib";
+import ts from "typescript";
 import { parseStableSemver, ReleaseValidationError } from "./validate-version.mjs";
 
 const REPOSITORY_ROOT = path.resolve(
@@ -61,6 +62,11 @@ const REQUIRED_ARTIFACT_FILES = [
   "scripts/start-filestation.ps1",
   "scripts/start-filestation.sh",
 ];
+const SERVER_DATABASE_MODULE_SOURCE_PATH =
+  "apps/server/src/database/database.module.ts";
+const SERVER_DATABASE_MODULE_DIST_PATH =
+  "apps/server/dist/database/database.module.js";
+const SERVER_DATABASE_REGISTRATION_ARRAYS = ["entities", "migrations"];
 const PRODUCT_VERSION_MANIFESTS = [
   "package.json",
   "apps/server/package.json",
@@ -118,6 +124,370 @@ export function isForbiddenArtifactPath(relativePath) {
 export function artifactFilename(version, platform) {
   const definition = platformDefinition(platform);
   return `filestation-v${parseStableSemver(version).raw}-${definition.suffix}.${definition.extension}`;
+}
+
+function parseSourceFile(filePath, content, scriptKind) {
+  const sourceFile = ts.createSourceFile(
+    filePath,
+    content,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKind,
+  );
+  const diagnostics = sourceFile.parseDiagnostics ?? [];
+  if (diagnostics.length > 0) {
+    const details = diagnostics
+      .map((diagnostic) =>
+        ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"),
+      )
+      .join("; ");
+    fail(`${filePath} could not be parsed for release validation: ${details}`);
+  }
+  return sourceFile;
+}
+
+function registrationArrayDeclaration(sourceFile, arrayName, filePath) {
+  const declarations = [];
+  function visit(node) {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === arrayName
+    ) {
+      declarations.push(node);
+    }
+    ts.forEachChild(node, visit);
+  }
+  ts.forEachChild(sourceFile, visit);
+
+  if (declarations.length === 0) {
+    fail(`${filePath} is missing its explicit ${arrayName} array`);
+  }
+  if (declarations.length > 1) {
+    fail(`${filePath} has ambiguous ${arrayName} variable declarations`);
+  }
+  const declaration = declarations[0];
+  if (
+    !declaration.initializer ||
+    !ts.isArrayLiteralExpression(declaration.initializer)
+  ) {
+    fail(`${filePath} ${arrayName} is not an explicit array literal`);
+  }
+  return declaration.initializer;
+}
+
+function registrationKey(moduleSpecifier, importedName) {
+  return `${moduleSpecifier}\u0000${importedName}`;
+}
+
+function looksLikeLegacyGlob(node, sourceFile) {
+  const text = node.getText(sourceFile);
+  return (
+    /(?:\.entity|migrations)/u.test(text) &&
+    /(?:\.ts|\.js|\.entity\{|\*)/u.test(text)
+  );
+}
+
+function collectSourceImports(sourceFile, filePath) {
+  const imports = new Map();
+  for (const statement of sourceFile.statements) {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      !ts.isStringLiteral(statement.moduleSpecifier) ||
+      !statement.importClause?.namedBindings ||
+      !ts.isNamedImports(statement.importClause.namedBindings)
+    ) {
+      continue;
+    }
+    for (const element of statement.importClause.namedBindings.elements) {
+      const localName = element.name.text;
+      if (imports.has(localName)) {
+        fail(`${filePath} has duplicate import binding ${localName}`);
+      }
+      imports.set(localName, {
+        importedName: element.propertyName?.text ?? localName,
+        moduleSpecifier: statement.moduleSpecifier.text,
+      });
+    }
+  }
+  return imports;
+}
+
+function extractSourceRegistrations(sourceFile, arrayName, filePath) {
+  const array = registrationArrayDeclaration(sourceFile, arrayName, filePath);
+  const imports = collectSourceImports(sourceFile, filePath);
+  const registrations = new Map();
+  for (const element of array.elements) {
+    if (!ts.isIdentifier(element)) {
+      if (looksLikeLegacyGlob(element, sourceFile)) {
+        fail(`${filePath} ${arrayName} contains a legacy TypeORM glob`);
+      }
+      fail(
+        `${filePath} ${arrayName} contains an unsupported registration member: ${element.getText(sourceFile)}`,
+      );
+    }
+    const imported = imports.get(element.text);
+    if (!imported) {
+      fail(
+        `${filePath} ${arrayName} member ${element.text} is not a named import`,
+      );
+    }
+    const key = registrationKey(
+      imported.moduleSpecifier,
+      imported.importedName,
+    );
+    if (registrations.has(key)) {
+      fail(`${filePath} ${arrayName} contains duplicate registration ${element.text}`);
+    }
+    registrations.set(key, {
+      importedName: imported.importedName,
+      label: element.text,
+      moduleSpecifier: imported.moduleSpecifier,
+    });
+  }
+  if (registrations.size === 0) {
+    fail(`${filePath} ${arrayName} must contain explicit registrations`);
+  }
+  return registrations;
+}
+
+function collectDistRequires(sourceFile) {
+  const requires = new Map();
+  for (const statement of sourceFile.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (
+        !ts.isIdentifier(declaration.name) ||
+        !declaration.initializer ||
+        !ts.isCallExpression(declaration.initializer) ||
+        !ts.isIdentifier(declaration.initializer.expression) ||
+        declaration.initializer.expression.text !== "require" ||
+        declaration.initializer.arguments.length !== 1 ||
+        !ts.isStringLiteral(declaration.initializer.arguments[0])
+      ) {
+        continue;
+      }
+      requires.set(
+        declaration.name.text,
+        declaration.initializer.arguments[0].text,
+      );
+    }
+  }
+  return requires;
+}
+
+function extractDistRegistrations(sourceFile, arrayName, filePath) {
+  const array = registrationArrayDeclaration(sourceFile, arrayName, filePath);
+  const requires = collectDistRequires(sourceFile);
+  const registrations = new Map();
+  for (const element of array.elements) {
+    if (
+      !ts.isPropertyAccessExpression(element) ||
+      !ts.isIdentifier(element.expression) ||
+      !ts.isIdentifier(element.name)
+    ) {
+      if (looksLikeLegacyGlob(element, sourceFile)) {
+        fail(
+          `${filePath} ${arrayName} contains a legacy TypeORM glob; rebuild the server before packaging`,
+        );
+      }
+      fail(
+        `${filePath} ${arrayName} contains an unsupported registration member: ${element.getText(sourceFile)}`,
+      );
+    }
+    const moduleSpecifier = requires.get(element.expression.text);
+    if (!moduleSpecifier) {
+      fail(
+        `${filePath} ${arrayName} member ${element.getText(sourceFile)} is not a require() binding`,
+      );
+    }
+    const importedName = element.name.text;
+    const key = registrationKey(moduleSpecifier, importedName);
+    const label = element.getText(sourceFile);
+    if (registrations.has(key)) {
+      fail(`${filePath} ${arrayName} contains duplicate registration: ${label}`);
+    }
+    registrations.set(key, {
+      importedName,
+      label,
+      moduleSpecifier,
+    });
+  }
+  return registrations;
+}
+
+function propertyName(property) {
+  if (!property.name) return null;
+  if (
+    ts.isIdentifier(property.name) ||
+    ts.isStringLiteral(property.name) ||
+    ts.isNumericLiteral(property.name)
+  ) {
+    return property.name.text;
+  }
+  return null;
+}
+
+function propertyReferencesVariable(property, variableName) {
+  return (
+    (ts.isShorthandPropertyAssignment(property) &&
+      property.name.text === variableName) ||
+    (ts.isPropertyAssignment(property) &&
+      ts.isIdentifier(property.initializer) &&
+      property.initializer.text === variableName)
+  );
+}
+
+function bindingIncludesName(bindingName, expectedName) {
+  if (ts.isIdentifier(bindingName)) return bindingName.text === expectedName;
+  if (ts.isBindingElement(bindingName)) {
+    return bindingIncludesName(bindingName.name, expectedName);
+  }
+  if (ts.isObjectBindingPattern(bindingName) || ts.isArrayBindingPattern(bindingName)) {
+    return bindingName.elements.some(
+      (element) =>
+        !ts.isOmittedExpression(element) &&
+        bindingIncludesName(element.name, expectedName),
+    );
+  }
+  return false;
+}
+
+function enclosingParameterShadows(configuration, variableName) {
+  for (let current = configuration.parent; current; current = current.parent) {
+    if (
+      Array.isArray(current.parameters) &&
+      current.parameters.some((parameter) =>
+        bindingIncludesName(parameter.name, variableName),
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function validateSqliteConfig(sourceFile, filePath) {
+  const sqliteConfigurations = [];
+  function visit(node) {
+    if (ts.isObjectLiteralExpression(node)) {
+      const typeProperty = node.properties.find(
+        (property) =>
+          propertyName(property) === "type" &&
+          ts.isPropertyAssignment(property) &&
+          ts.isStringLiteral(property.initializer) &&
+          property.initializer.text === "sqlite",
+      );
+      if (typeProperty) sqliteConfigurations.push(node);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+
+  if (sqliteConfigurations.length !== 1) {
+    fail(
+      `${filePath} must contain exactly one SQLite TypeORM configuration, found ${sqliteConfigurations.length}`,
+    );
+  }
+  const configuration = sqliteConfigurations[0];
+  for (const arrayName of SERVER_DATABASE_REGISTRATION_ARRAYS) {
+    if (enclosingParameterShadows(configuration, arrayName)) {
+      fail(
+        `${filePath} SQLite TypeORM configuration uses shadowed ${arrayName}; expected the top-level ${arrayName} array`,
+      );
+    }
+    const matches = configuration.properties.filter(
+      (property) => propertyName(property) === arrayName,
+    );
+    if (
+      matches.length !== 1 ||
+      !propertyReferencesVariable(matches[0], arrayName)
+    ) {
+      fail(
+        `${filePath} SQLite TypeORM configuration does not use the top-level ${arrayName} array`,
+      );
+    }
+  }
+}
+
+function compareRegistrations(expected, actual, arrayName) {
+  const missing = [...expected.entries()]
+    .filter(([key]) => !actual.has(key))
+    .map(([, registration]) => registration.label)
+    .sort();
+  const unexpected = [...actual.entries()]
+    .filter(([key]) => !expected.has(key))
+    .map(([, registration]) => registration.label)
+    .sort();
+  if (missing.length > 0 || unexpected.length > 0) {
+    fail(
+      `${SERVER_DATABASE_MODULE_DIST_PATH} ${arrayName} registrations do not match ${SERVER_DATABASE_MODULE_SOURCE_PATH}` +
+        (missing.length > 0 ? `; missing: ${missing.join(", ")}` : "") +
+        (unexpected.length > 0
+          ? `; unexpected: ${unexpected.join(", ")}`
+          : ""),
+    );
+  }
+}
+
+async function readDatabaseModule(repositoryRoot, relativePath) {
+  const target = path.join(repositoryRoot, relativePath);
+  try {
+    return await readFile(target, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      fail(`required release database module is missing: ${relativePath}`);
+    }
+    throw error;
+  }
+}
+
+export async function assertServerDatabaseModuleArtifact(repositoryRoot) {
+  const [sourceContent, distContent] = await Promise.all([
+    readDatabaseModule(repositoryRoot, SERVER_DATABASE_MODULE_SOURCE_PATH),
+    readDatabaseModule(repositoryRoot, SERVER_DATABASE_MODULE_DIST_PATH),
+  ]);
+  const sourceFile = parseSourceFile(
+    SERVER_DATABASE_MODULE_SOURCE_PATH,
+    sourceContent,
+    ts.ScriptKind.TS,
+  );
+  const distFile = parseSourceFile(
+    SERVER_DATABASE_MODULE_DIST_PATH,
+    distContent,
+    ts.ScriptKind.JS,
+  );
+
+  const expectedRegistrations = new Map();
+  const actualRegistrations = new Map();
+  for (const arrayName of SERVER_DATABASE_REGISTRATION_ARRAYS) {
+    expectedRegistrations.set(
+      arrayName,
+      extractSourceRegistrations(
+        sourceFile,
+        arrayName,
+        SERVER_DATABASE_MODULE_SOURCE_PATH,
+      ),
+    );
+    actualRegistrations.set(
+      arrayName,
+      extractDistRegistrations(
+        distFile,
+        arrayName,
+        SERVER_DATABASE_MODULE_DIST_PATH,
+      ),
+    );
+  }
+  validateSqliteConfig(sourceFile, SERVER_DATABASE_MODULE_SOURCE_PATH);
+  validateSqliteConfig(distFile, SERVER_DATABASE_MODULE_DIST_PATH);
+
+  for (const arrayName of SERVER_DATABASE_REGISTRATION_ARRAYS) {
+    compareRegistrations(
+      expectedRegistrations.get(arrayName),
+      actualRegistrations.get(arrayName),
+      arrayName,
+    );
+  }
 }
 
 async function pathExists(target) {
@@ -238,6 +608,7 @@ export async function prepareArtifactDirectory({
     fail("artifact destination must be a dedicated directory outside the source tree");
   }
   platformDefinition(platform);
+  await assertServerDatabaseModuleArtifact(resolvedRepository);
   const normalizedVersion = parseStableSemver(version).raw;
 
   await rm(resolvedDestination, { recursive: true, force: true });

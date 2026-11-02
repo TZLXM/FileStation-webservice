@@ -4,12 +4,12 @@ import { ConfigService } from '@nestjs/config';
 import { AccountsService } from '../accounts/accounts.service';
 import { SettingsService } from '../settings/settings.service';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, IsNull, QueryRunner } from 'typeorm';
+import { Repository, IsNull, QueryRunner } from 'typeorm';
 import { Session } from './entities/session.entity';
 import { LoginChallenge } from './entities/login-challenge.entity';
 import { SystemMeta } from './entities/system-meta.entity';
 import { v4 as uuidv4 } from 'uuid';
-import { createHash, timingSafeEqual } from 'crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import * as bcrypt from 'bcrypt';
 import { TokenPair, JwtPayload } from '@filestation/shared';
 import { LoginDto } from './dto/login.dto';
@@ -23,6 +23,8 @@ import { TotpService } from './totp.service';
 import { RecoveryService, type RecoverySessionMaterial } from './recovery.service';
 import { reserveRecoveryIpAttempt as reservePersistentRecoveryIpAttempt, settleRecoveryIpFailure } from './recovery-ip-reservations';
 
+const REFRESH_TOKEN_PREFIX = 'fs_rt_1';
+
 export interface RefreshResult extends TokenPair {
   username: string;
 }
@@ -30,6 +32,18 @@ export interface RefreshResult extends TokenPair {
 export type LoginOutcome =
   | { kind: 'tokens'; tokens: TokenPair }
   | { kind: 'second_factor'; loginChallenge: string; availableMethods: string[] };
+
+interface ParsedRefreshToken {
+  sessionId: string;
+  familySecret: string;
+  rotationSecret: string;
+}
+
+interface PreparedRefreshToken {
+  token: string;
+  tokenHash: string;
+  familyHash: string;
+}
 
 @Injectable()
 export class AuthService {
@@ -46,7 +60,6 @@ export class AuthService {
     private challengesRepository: Repository<LoginChallenge>,
     @InjectRepository(SystemMeta)
     private systemMetaRepository: Repository<SystemMeta>,
-    private dataSource: DataSource,
     private sqliteTransactions: SqliteImmediateTransactionService,
     private apiTokensService: ApiTokensService,
     private totpService: TotpService,
@@ -440,55 +453,148 @@ export class AuthService {
 
   async refreshToken(refreshToken: string): Promise<RefreshResult> {
     const tokenHash = this.hashToken(refreshToken);
+    const parsed = this.parseRefreshToken(refreshToken);
+    let rotatedRefreshToken: string | null = null;
+    const session = await this.sqliteTransactions.run(async (connection) => {
+      // Expiry must be evaluated after this queued transaction owns the write lock.
+      const now = Date.now();
+      const expiresAt = now + 7 * 24 * 60 * 60 * 1000;
+      let current: { id: string; account_id: string } | undefined;
+      let rotated: { changes: number };
 
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    await queryRunner.startTransaction();
-
-    try {
-      const result = await queryRunner.manager
-        .createQueryBuilder()
-        .update(Session)
-        .set({ revokedAt: Date.now() })
-        .where('refresh_token_hash = :tokenHash', { tokenHash })
-        .andWhere('revoked_at IS NULL')
-        .andWhere('expires_at > :now', { now: Date.now() })
-        .execute();
-
-      if (result.affected === 0) {
-        throw new UnauthorizedException('Invalid or expired refresh token');
+      if (parsed) {
+        current = await connection.get<{ id: string; account_id: string }>(
+          `SELECT id, account_id FROM sessions
+           WHERE id = ? AND refresh_token_hash = ? AND refresh_family_hash = ?
+             AND revoked_at IS NULL AND expires_at > ?`,
+          [
+            parsed.sessionId,
+            tokenHash,
+            this.refreshFamilyHash(parsed.sessionId, parsed.familySecret),
+            now,
+          ],
+        );
+        if (!current) return null;
+        const next = this.createRefreshToken(current.id, parsed.familySecret);
+        rotatedRefreshToken = next.token;
+        rotated = await connection.run(
+          `UPDATE sessions SET refresh_token_hash = ?, expires_at = ?
+           WHERE id = ? AND account_id = ? AND refresh_token_hash = ?
+             AND refresh_family_hash = ? AND revoked_at IS NULL AND expires_at > ?`,
+          [
+            next.tokenHash,
+            expiresAt,
+            current.id,
+            current.account_id,
+            tokenHash,
+            next.familyHash,
+            now,
+          ],
+        );
+      } else {
+        current = await connection.get<{ id: string; account_id: string }>(
+          `SELECT id, account_id FROM sessions
+           WHERE refresh_token_hash = ? AND revoked_at IS NULL AND expires_at > ?`,
+          [tokenHash, now],
+        );
+        if (!current) return null;
+        const next = this.createRefreshToken(current.id);
+        rotatedRefreshToken = next.token;
+        rotated = await connection.run(
+          `UPDATE sessions
+           SET refresh_token_hash = ?, refresh_family_hash = ?,
+               pre_family_refresh_token_hash = ?, expires_at = ?
+           WHERE id = ? AND account_id = ? AND refresh_token_hash = ?
+             AND revoked_at IS NULL AND expires_at > ?`,
+          [
+            next.tokenHash,
+            next.familyHash,
+            tokenHash,
+            expiresAt,
+            current.id,
+            current.account_id,
+            tokenHash,
+            now,
+          ],
+        );
       }
+      return rotated.changes === 1 ? current : null;
+    });
 
-      const session = await queryRunner.manager.findOne(Session, {
-        where: { refreshTokenHash: tokenHash },
-      });
-
-      if (!session) {
-        throw new UnauthorizedException('Session not found');
-      }
-
-      const account = await this.accountsService.findById(session.accountId);
-      if (!account) {
-        throw new UnauthorizedException('Account not found');
-      }
-
-      const tokens = await this.generateTokensInTransaction(queryRunner, account.id, account.username);
-      await queryRunner.commitTransaction();
-      return { ...tokens, username: account.username };
-    } catch (error) {
-      await queryRunner.rollbackTransaction();
-      throw error;
-    } finally {
-      await queryRunner.release();
+    if (!session || !rotatedRefreshToken) {
+      throw new UnauthorizedException('Invalid or expired refresh token');
     }
+
+    const account = await this.accountsService.findById(session.account_id);
+    if (!account) {
+      throw new UnauthorizedException('Account not found');
+    }
+
+    return {
+      accessToken: this.createAccessToken(account.id, account.username, session.id),
+      refreshToken: rotatedRefreshToken,
+      expiresIn: 24 * 60 * 60,
+      username: account.username,
+    };
   }
 
-  async logout(refreshToken: string): Promise<void> {
-    const tokenHash = this.hashToken(refreshToken);
-    await this.sessionsRepository.update(
-      { refreshTokenHash: tokenHash },
-      { revokedAt: Date.now() },
-    );
+  async logout(refreshToken: string, accessToken?: string): Promise<void> {
+    const revokedAt = Date.now();
+    let payload: JwtPayload | null = null;
+    if (accessToken) {
+      try {
+        payload = await this.jwtService.verifyAsync<JwtPayload>(accessToken, {
+          ignoreExpiration: true,
+        });
+      } catch {
+        // A malformed access token cannot revoke by sid; a refresh cookie still can.
+      }
+    }
+
+    const parsedRefresh = refreshToken ? this.parseRefreshToken(refreshToken) : null;
+    const tokenHash = refreshToken && !parsedRefresh
+      ? this.hashToken(refreshToken)
+      : null;
+    const sid = payload?.principal_type === 'admin'
+      && typeof payload.sub === 'string'
+      && typeof payload.sid === 'string'
+      ? payload.sid
+      : null;
+    const accountId = sid ? payload!.sub : null;
+    if (!refreshToken && !sid) return;
+
+    // A token family keeps logout revocation stable across any number of rotations.
+    // Legacy UUID cookies retain one bounded pre-family hash for upgrade compatibility.
+    await this.sqliteTransactions.run(async (connection) => {
+      if (parsedRefresh) {
+        await connection.run(
+          `UPDATE sessions SET revoked_at = ?
+           WHERE id = ? AND refresh_family_hash = ? AND revoked_at IS NULL`,
+          [
+            revokedAt,
+            parsedRefresh.sessionId,
+            this.refreshFamilyHash(
+              parsedRefresh.sessionId,
+              parsedRefresh.familySecret,
+            ),
+          ],
+        );
+      } else if (tokenHash) {
+        await connection.run(
+          `UPDATE sessions SET revoked_at = ?
+           WHERE revoked_at IS NULL
+             AND (refresh_token_hash = ? OR pre_family_refresh_token_hash = ?)`,
+          [revokedAt, tokenHash, tokenHash],
+        );
+      }
+      if (sid) {
+        await connection.run(
+          `UPDATE sessions SET revoked_at = ?
+           WHERE id = ? AND account_id = ? AND revoked_at IS NULL`,
+          [revokedAt, sid, accountId],
+        );
+      }
+    });
   }
 
   // ---- 登录锁定（账户固定 + IP 独立，原子 UPSERT）----
@@ -659,98 +765,109 @@ export class AuthService {
     });
   }
 
-  private async generateTokensInTransaction(queryRunner: any, accountId: string, username: string): Promise<TokenPair> {
-    const payload: Omit<JwtPayload, 'iat' | 'exp'> = {
-      sub: accountId,
-      username,
-      principal_type: 'admin',
-    };
-
-    const accessToken = this.jwtService.sign(payload);
-    const refreshToken = uuidv4();
-    const expiresIn = 24 * 60 * 60;
-
-    const session = queryRunner.manager.create(Session, {
-      id: uuidv4(),
-      accountId,
-      refreshTokenHash: this.hashToken(refreshToken),
-      createdAt: Date.now(),
-      expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
-    });
-    await queryRunner.manager.save(session);
-
-    return { accessToken, refreshToken, expiresIn };
-  }
-
   private async generateTokensInImmediateTransaction(
     connection: SqliteTransactionConnection,
     accountId: string,
     username: string,
   ): Promise<TokenPair> {
-    const payload: Omit<JwtPayload, 'iat' | 'exp'> = {
-      sub: accountId,
-      username,
-      principal_type: 'admin',
-    };
-    const accessToken = this.jwtService.sign(payload);
-    const refreshToken = uuidv4();
+    const sessionId = uuidv4();
+    const accessToken = this.createAccessToken(accountId, username, sessionId);
+    const refresh = this.createRefreshToken(sessionId);
     const now = Date.now();
     const expiresIn = 24 * 60 * 60;
     await connection.run(
-      'INSERT INTO sessions (id, account_id, refresh_token_hash, device_info, created_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [uuidv4(), accountId, this.hashToken(refreshToken), null, now, now + 7 * 24 * 60 * 60 * 1000, null],
+      'INSERT INTO sessions (id, account_id, refresh_token_hash, refresh_family_hash, device_info, created_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [
+        sessionId,
+        accountId,
+        refresh.tokenHash,
+        refresh.familyHash,
+        null,
+        now,
+        now + 7 * 24 * 60 * 60 * 1000,
+        null,
+      ],
     );
-    return { accessToken, refreshToken, expiresIn };
+    return { accessToken, refreshToken: refresh.token, expiresIn };
   }
 
   private async generateTokens(accountId: string, username: string): Promise<TokenPair> {
-    const payload: Omit<JwtPayload, 'iat' | 'exp'> = {
-      sub: accountId,
-      username,
-      principal_type: 'admin',
-    };
-
-    const accessToken = this.jwtService.sign(payload);
-    const refreshToken = uuidv4();
+    const sessionId = uuidv4();
+    const accessToken = this.createAccessToken(accountId, username, sessionId);
+    const refresh = this.createRefreshToken(sessionId);
     const expiresIn = 24 * 60 * 60;
 
     const session = this.sessionsRepository.create({
-      id: uuidv4(),
+      id: sessionId,
       accountId,
-      refreshTokenHash: this.hashToken(refreshToken),
+      refreshTokenHash: refresh.tokenHash,
+      refreshFamilyHash: refresh.familyHash,
       createdAt: Date.now(),
       expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
     });
     await this.sessionsRepository.save(session);
 
-    return { accessToken, refreshToken, expiresIn };
+    return { accessToken, refreshToken: refresh.token, expiresIn };
   }
 
   private prepareRecoveryTokens(
     accountId: string,
     username: string,
   ): { tokens: TokenPair; session: RecoverySessionMaterial } {
-    const payload: Omit<JwtPayload, 'iat' | 'exp'> = {
-      sub: accountId,
-      username,
-      principal_type: 'admin',
-    };
-    const refreshToken = uuidv4();
+    const sessionId = uuidv4();
+    const refresh = this.createRefreshToken(sessionId);
     const now = Date.now();
     return {
       tokens: {
-        accessToken: this.jwtService.sign(payload),
-        refreshToken,
+        accessToken: this.createAccessToken(accountId, username, sessionId),
+        refreshToken: refresh.token,
         expiresIn: 24 * 60 * 60,
       },
       session: {
-        id: uuidv4(),
+        id: sessionId,
         accountId,
-        refreshTokenHash: this.hashToken(refreshToken),
+        refreshTokenHash: refresh.tokenHash,
+        refreshFamilyHash: refresh.familyHash,
         createdAt: now,
         expiresAt: now + 7 * 24 * 60 * 60 * 1000,
       },
     };
+  }
+
+  private createAccessToken(accountId: string, username: string, sessionId: string): string {
+    const payload: Omit<JwtPayload, 'iat' | 'exp'> = {
+      sub: accountId,
+      username,
+      principal_type: 'admin',
+      sid: sessionId,
+    };
+    return this.jwtService.sign(payload);
+  }
+
+  private createRefreshToken(
+    sessionId: string,
+    familySecret = randomBytes(32).toString('base64url'),
+  ): PreparedRefreshToken {
+    const rotationSecret = randomBytes(32).toString('base64url');
+    const token = `${REFRESH_TOKEN_PREFIX}.${sessionId}.${familySecret}.${rotationSecret}`;
+    return {
+      token,
+      tokenHash: this.hashToken(token),
+      familyHash: this.refreshFamilyHash(sessionId, familySecret),
+    };
+  }
+
+  private parseRefreshToken(token: string): ParsedRefreshToken | null {
+    const match = token.match(
+      /^fs_rt_1\.([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.([A-Za-z0-9_-]{43})\.([A-Za-z0-9_-]{43})$/,
+    );
+    return match
+      ? { sessionId: match[1], familySecret: match[2], rotationSecret: match[3] }
+      : null;
+  }
+
+  private refreshFamilyHash(sessionId: string, familySecret: string): string {
+    return this.hashToken(`${REFRESH_TOKEN_PREFIX}.${sessionId}.${familySecret}`);
   }
 
   private hashToken(token: string): string {

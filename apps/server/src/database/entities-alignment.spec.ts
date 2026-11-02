@@ -3,13 +3,16 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { mkdir, rm } from 'fs/promises';
 import { v4 as uuidv4 } from 'uuid';
+import { AdminAccount } from '../accounts/entities/admin-account.entity';
 import { ApiToken } from '../api-tokens/entities/api-token.entity';
 import { Authenticator } from '../auth/entities/authenticator.entity';
 import { RecoveryCode } from '../auth/entities/recovery-code.entity';
+import { Session } from '../auth/entities/session.entity';
 import { AuditLog } from '../audit/entities/audit-log.entity';
 import { InitialSchema1700000000000 } from '../database/migrations/1700000000000-initial-schema';
 import { OneTotpAuthenticatorPerAccount1700000000001 } from '../database/migrations/1700000000001-one-totp-authenticator-per-account';
 import { UpdateAuditIdempotency1800000000000 } from '../database/migrations/1800000000000-update-audit-idempotency';
+import { SessionRefreshRotation1800000000001 } from '../database/migrations/1800000000001-session-refresh-rotation';
 
 // 真实迁移建库（synchronize: false + migrationsRun）：
 // 迁移 DDL 是权威 schema，实体必须贴合它
@@ -23,11 +26,19 @@ describe('Phase 2 entities alignment (real migration)', () => {
     ds = new DataSource({
       type: 'sqlite',
       database: join(dir, 'test.db'),
-      entities: [ApiToken, Authenticator, RecoveryCode, AuditLog],
+      entities: [
+        AdminAccount,
+        ApiToken,
+        Authenticator,
+        RecoveryCode,
+        AuditLog,
+        Session,
+      ],
       migrations: [
         InitialSchema1700000000000,
         OneTotpAuthenticatorPerAccount1700000000001,
         UpdateAuditIdempotency1800000000000,
+        SessionRefreshRotation1800000000001,
       ],
       migrationsRun: true,
       synchronize: false,
@@ -45,10 +56,12 @@ describe('Phase 2 entities alignment (real migration)', () => {
 
   it('实体列名与迁移 DDL 逐列吻合（防漂移）', async () => {
     const cases: Array<[any, string]> = [
+      [AdminAccount, 'admin_accounts'],
       [ApiToken, 'api_tokens'],
       [Authenticator, 'authenticators'],
       [RecoveryCode, 'recovery_codes'],
       [AuditLog, 'audit_logs'],
+      [Session, 'sessions'],
     ];
     for (const [entity, table] of cases) {
       const metaCols = ds.getMetadata(entity).columns.map((c) => c.databaseName).sort();

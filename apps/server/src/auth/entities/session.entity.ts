@@ -16,6 +16,13 @@ export class Session {
   @Column({ name: 'refresh_token_hash', unique: true })
   refreshTokenHash!: string;
 
+  @Column({ name: 'refresh_family_hash', type: 'text', nullable: true })
+  refreshFamilyHash!: string | null;
+
+  /** One bounded compatibility hash for a UUID cookie issued before token families. */
+  @Column({ name: 'pre_family_refresh_token_hash', type: 'text', nullable: true })
+  preFamilyRefreshTokenHash!: string | null;
+
   @Column({ name: 'device_info', type: 'text', nullable: true })
   deviceInfo!: string | null;
 

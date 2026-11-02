@@ -115,6 +115,8 @@ Authorization: Bearer <API_TOKEN>
 - [ ] 实际完成 TOTP 启用、登录、禁用及恢复码生成/单次恢复流程
 - [ ] 刷新页面后重新选择原文件并验证断点续传
 
+仅 `v0.2.5` 首次发布允许延后 375px 下的上传成功提示实测；上传完成、其他 375px 布局、TOTP/恢复码和刷新续传仍须通过。发布后应在真实 375px 浏览器完成上传，确认提示清晰可见且可操作，并记录证据。
+
 Web 上传现已在 LAN HTTP 缺少 SubtleCrypto 时使用 SHA-256 回退，并保留 `X-Part-Checksum` 校验；自动化回归验证了首个分块请求和准确校验值。继续续传时，点击“继续”后需要重新选择最初上传的同一个文件。
 
 当前内置浏览器访问本地服务被 `ERR_BLOCKED_BY_CLIENT` 阻断，因此 375px、TOTP/恢复码及刷新后续传的真实设备验收仍待用户环境完成。2026-10-28 fresh registry audit 的 full 结果为 4 Critical / 7 High / 25 Moderate / 9 Low，production 为 1 Critical / 5 High / 19 Moderate，两个命令均 exit 1；Task 11 未执行大范围 audit fix 或 major 升级。Critical/High 处置或明确风险接受前发布保持 blocked，详情见 [当前状态](docs/CURRENT-STATE.md)。

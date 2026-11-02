@@ -297,7 +297,7 @@ describe('recovery-code authentication (e2e)', () => {
     }
   });
 
-  it('serializes different valid codes with their session replacement before returning tokens', async () => {
+  it('serializes different valid codes with their session credential rotation before returning tokens', async () => {
     const firstCode = latestCodes[2];
     const secondCode = latestCodes[3];
     const recoveryService = app.get(RecoveryService);
@@ -353,9 +353,10 @@ describe('recovery-code authentication (e2e)', () => {
       const sessionsAfterRefresh = await dataSource.getRepository(Session).findBy({ accountId: account.id });
       const activeAfterRefresh = sessionsAfterRefresh.filter(({ revokedAt }) => revokedAt === null);
       expect(activeAfterRefresh).toHaveLength(1);
-      expect(sessionsAfterRefresh.find(({ id }) => id === active[0].id)?.revokedAt).not.toBeNull();
+      expect(activeAfterRefresh[0].id).toBe(active[0].id);
       expect(activeAfterRefresh[0].refreshTokenHash)
         .toBe(createHash('sha256').update(rotatedRefreshToken!).digest('hex'));
+      adminJwt = refreshedWinner.body.data.access_token;
     } finally {
       releaseFirst();
       verifySpy.mockRestore();
@@ -391,6 +392,7 @@ describe('recovery-code authentication (e2e)', () => {
     expect(typeof recovered.body.data.access_token).toBe('string');
     expect(recovered.body.data.username).toBe('admin');
     expect(hasRefreshCookie(recovered.headers['set-cookie'])).toBe(true);
+    adminJwt = recovered.body.data.access_token;
 
     const after = await sessionsRepository.findBy({ accountId: before[0].accountId });
     expect(before.filter((session) => session.revokedAt === null).every((prior) =>
@@ -413,6 +415,7 @@ describe('recovery-code authentication (e2e)', () => {
 
     expect(results.filter((result) => result.status === 200)).toHaveLength(1);
     expect(results.filter((result) => result.status === 401)).toHaveLength(1);
+    adminJwt = results.find((result) => result.status === 200)!.body.data.access_token;
     const codes = await dataSource.getRepository(RecoveryCode).findBy({ accountId: account.id });
     expect(codes.filter(({ usedAt }) => usedAt !== null)).toHaveLength(usedBefore + 1);
     expect(results.every((result) => !JSON.stringify(result.body).includes(code))).toBe(true);

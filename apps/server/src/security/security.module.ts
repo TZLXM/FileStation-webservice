@@ -8,6 +8,7 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { AdminOnlyGuard } from './guards/admin-only.guard';
 import { AccountsModule } from '../accounts/accounts.module';
 import { ApiToken } from '../api-tokens/entities/api-token.entity';
+import { Session } from '../auth/entities/session.entity';
 
 /**
  * SecurityModule：JwtModule 注册 + JwtStrategy + JwtAuthGuard。
@@ -18,7 +19,7 @@ import { ApiToken } from '../api-tokens/entities/api-token.entity';
 @Module({
   imports: [
     AccountsModule,
-    TypeOrmModule.forFeature([ApiToken]),
+    TypeOrmModule.forFeature([ApiToken, Session]),
     PassportModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],

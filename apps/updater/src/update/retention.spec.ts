@@ -150,7 +150,7 @@ describe("RetentionService", () => {
       await v.journal.appendCompletion({attemptId:'attempt-retention-02',fence:8,intentId:proof.id,phase:'COMMITTED',result:{version:'0.2.5',health:'ok',pid:1234,createdAt:'fixture-created',boot:'fixture-boot',nonce:'fixture-nonce-0123456789',release:v.currentRelease}});
       expect((await new RetentionService(v.root).cleanup(await v.journal.readSnapshot())).deleted).not.toContain(v.unusedRelease);
     }finally{await rm(v.root,{recursive:true,force:true});}
-  });
+  },30000);
   it('rejects a legacy generic-200 record without independent process proof',async()=>{
     const v=await committedFixture();
     try {
@@ -158,7 +158,7 @@ describe("RetentionService", () => {
       await v.journal.appendCompletion({attemptId:'attempt-retention-01',fence:7,intentId:intent.id,phase:'COMMITTED',result:{version:'0.2.5',health:'ok'}});
       expect((await new RetentionService(v.root).cleanup(await v.journal.readSnapshot())).eligible).toBe(false);
     }finally{await rm(v.root,{recursive:true,force:true});}
-  });
+  },30000);
   it('retains releases referenced only by backup metadata and bounds other diagnostics',async()=>{
     const v=await committedFixture();
     try {

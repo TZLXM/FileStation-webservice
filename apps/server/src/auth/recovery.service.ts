@@ -49,6 +49,7 @@ export interface RecoverySessionMaterial {
   id: string;
   accountId: string;
   refreshTokenHash: string;
+  refreshFamilyHash: string;
   createdAt: number;
   expiresAt: number;
 }
@@ -213,8 +214,15 @@ export class RecoveryService {
             [committedAt, account.id],
           );
           await connection.run(
-            'INSERT INTO sessions (id, account_id, refresh_token_hash, device_info, created_at, expires_at, revoked_at) VALUES (?, ?, ?, NULL, ?, ?, NULL)',
-            [session.id, session.accountId, session.refreshTokenHash, session.createdAt, session.expiresAt],
+            'INSERT INTO sessions (id, account_id, refresh_token_hash, refresh_family_hash, device_info, created_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, NULL, ?, ?, NULL)',
+            [
+              session.id,
+              session.accountId,
+              session.refreshTokenHash,
+              session.refreshFamilyHash,
+              session.createdAt,
+              session.expiresAt,
+            ],
           );
           await connection.run('DELETE FROM system_meta WHERE key = ?', [failureKey]);
           if (clientIp) {
